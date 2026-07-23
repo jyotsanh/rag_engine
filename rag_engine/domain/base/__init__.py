@@ -1,5 +1,9 @@
 """Base document abstractions (Phase 2).
 
-Placeholder for ``NoSQLBaseDocument`` (MongoDB ODM) and ``VectorBaseDocument``
-(Qdrant vector records).
+Home of ``NoSQLBaseDocument`` (MongoDB ODM). ``VectorBaseDocument`` (Qdrant
+vector records) arrives in a later phase.
 """
+
+from .nosql import NoSQLBaseDocument
+
+__all__ = ["NoSQLBaseDocument"]
