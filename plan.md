@@ -323,3 +323,27 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Use the `testcontainers.community.*` imports; the top-level module paths are deprecated.
   - When runtime clients arrive (Steps 10/11/68), add `pymongo`, `redis` and `qdrant-client` as **runtime** deps (`qdrant-client` on the 1.19 line).
 - Next: Step 9: Fixture website
+
+### Step 9: Fixture website  (2026-10-16)
+- Status: ✅ done
+- Built:
+  - `tests/fixtures/site/` (~240 KB): a fictional "Acme Widgets" site.
+    - Pages: home, about/privacy/terms, docs (getting-started with code blocks, configuration with a table, api/reference → deep/level4 → level5 for depth limits), blog (2 posts), a sitemap-only orphan page.
+    - Every page shares a header nav, cookie banner and footer (for Step 40 boilerplate removal).
+    - Edge-case pages: dup-a/dup-b (same content), a canonical variant, a latin-1 page with the charset only in `<meta>`, a robots-disallowed `/private/`, a nofollow target, a JS-only SPA at `/app/`.
+    - `robots.txt` (Disallow `/private/`, `Crawl-delay: 0.1`, Sitemap), `sitemap_index.xml` → `sitemap-pages.xml` + gzip `sitemap-docs.xml.gz` (includes an off-site URL).
+    - Documents: `files/` widget-spec.pdf (2 pages), scanned.pdf (no text layer), encrypted.pdf, install-guide.docx (headings, bullets, table), roadmap.pptx (3 slides, notes, table), pricing.xlsx (2 sheets); `images/logo.png`; `data.json`.
+  - `tests/fixtures/build_documents.py` regenerates the binaries (pymupdf, python-docx, python-pptx, openpyxl) with pinned metadata dates.
+  - `tests/support/fixture_site.py`: a Starlette app run by uvicorn in a daemon thread on a free `127.0.0.1` port.
+    - `{{BASE}}`/`{{OTHER_HOST}}` templating (`localhost:<port>` = same server, different host).
+    - Dynamic routes: 301/302 redirects and a chain, a `/loop-a`↔`/loop-b` loop, a redirect to `169.254.169.254`, 500, `/flaky` (503 + Retry-After ×2 then 200), `/rate-limited` (429 always), `/slow?delay=` (default 5s), `/large.html` (25 MiB chunked, no Content-Length), `/files/large.bin` (25 MiB with Content-Length), the gzip sitemap, `/app/advanced` (linked only from JS-rendered content), dir → slash redirect, path-traversal guard.
+    - Request log (`requests`, `hits(path)`, `reset()`).
+    - `SITE_PAGES`: URL → `Expect` outcome (HTML, JS_RENDERED, DOCUMENT, DOCUMENT_UNREADABLE, REDIRECT, REDIRECT_LOOP, BLOCKED_SSRF, NOT_FOUND, SERVER_ERROR, RETRY_THEN_OK, RATE_LIMITED, TIMEOUT, TOO_LARGE, UNSUPPORTED_TYPE, DUPLICATE, CANONICAL_ELSEWHERE, ROBOTS_DISALLOWED, NOFOLLOW, SITEMAP_ONLY, OUT_OF_SCOPE), the oracle for Step 54.
+  - Root `conftest.py`: session `fixture_site_server` plus per-test `fixture_site` (resets the log and flaky counter).
+- Deps (dev): `python-docx`, `python-pptx`, `openpyxl`, `pymupdf`. Steps 41–44 will promote the needed ones to runtime (with `pymupdf4llm`).
+- Tests: `TestFixtureSite_S9` (52): templating, manifest covers every home-page link, all HTML pages served, shared boilerplate, robots, sitemap index + gzip child, orphan not linked, all redirects, 404/500, flaky + reset, 429, timeout, streaming size without Content-Length, Content-Length on the binary, unsupported types, SPA empty without JS, latin-1 meta charset, duplicates, canonical, nofollow, other hostname, traversal, request log, and every document parses (PDF text / no text / encrypted, DOCX, PPTX, XLSX). Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 141 passed (~23s incl. containers).
+- Decisions/notes:
+  - The fixture-site tests live under `tests/unit` because they need loopback only (no Docker); the marker text now says so.
+  - SPA content lives inside the `<script>`; a JS-shell detector must ignore script text.
+  - `pymupdf.PDF_ENCRYPT_AES_256` exists only at runtime, hence the blanket ignore in the builder.
+- Next: Step 10: Mongo infrastructure

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>{{BASE}}/</loc></url>
+  <url><loc>{{BASE}}/about.html</loc></url>
+  <url><loc>{{BASE}}/orphan.html</loc></url>
+  <url><loc>{{BASE}}/blog/post-1.html</loc></url>
+  <url><loc>https://offsite.example/from-sitemap</loc></url>
+</urlset>

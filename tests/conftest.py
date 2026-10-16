@@ -7,7 +7,7 @@
 """
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,7 @@ for _key, _value in TEST_ENV.items():
     os.environ.setdefault(_key, _value)
 
 from rag_engine.config import Settings, settings  # noqa: E402
+from tests.support.fixture_site import FixtureSite  # noqa: E402
 
 pytest_plugins = ["pytester"]
 
@@ -73,3 +74,17 @@ def override_settings(monkeypatch: pytest.MonkeyPatch) -> OverrideSettings:
         return settings
 
     return _override
+
+
+@pytest.fixture(scope="session")
+def fixture_site_server() -> Iterator[FixtureSite]:
+    site = FixtureSite().start()
+    yield site
+    site.stop()
+
+
+@pytest.fixture
+def fixture_site(fixture_site_server: FixtureSite) -> FixtureSite:
+    """The local edge-case website (see `tests/support/fixture_site.py`), reset per test."""
+    fixture_site_server.reset()
+    return fixture_site_server
