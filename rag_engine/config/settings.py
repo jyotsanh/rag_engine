@@ -1,0 +1,162 @@
+from typing import Literal, Self
+from urllib.parse import quote
+
+from pydantic import Field, SecretStr, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from rag_engine.config.enums import EmbeddingProvider, Environment, RerankerType, VectorStoreType
+
+OpenAIEmbeddingModel = Literal["text-embedding-3-small", "text-embedding-3-large"]
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_ignore_empty=True,  # ignore empty key
+        extra="ignore",  # ignores extra key if provided
+    )
+
+    # ---- app ---- #
+    ENVIRONMENT: Environment = Environment.DEV
+    PROJECT_NAME: str = "RAG Engine"
+    API_V1_STR: str = "/api/v1"
+    LOG_LEVEL: Literal["TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    LOG_JSON: bool = True
+
+    # Production HOST & PORT
+    PROD_HOST: str = "0.0.0.0"
+    PROD_PORT: int = Field(default=8000, ge=1, le=65535)
+
+    # Development HOST & PORT
+    DEV_HOST: str = "127.0.0.1"
+    DEV_PORT: int = Field(default=8000, ge=1, le=65535)
+
+    # cors
+    BACKEND_CORS_ORIGINS: list[str] = []
+    ALLOW_CREDENTIALS: bool = False
+
+    # ---- security ---- #
+    # master key for /admin/* (tenant + API key management)
+    ADMIN_API_KEY: SecretStr = Field(min_length=32)
+    # server-side pepper mixed into tenant API key hashes
+    API_KEY_PEPPER: SecretStr = Field(min_length=32)
+    # outbound fetches (crawler, robots, webhooks) may only target these ports
+    SSRF_ALLOWED_PORTS: list[int] = [80, 443]
+    # ONLY for tests/local fixture sites — never enable in prod
+    SSRF_ALLOW_PRIVATE_NETWORKS: bool = False
+
+    # ---- mongodb (jobs, pages, chunks, tenants) ---- #
+    MONGO_HOST: str = "localhost"
+    MONGO_PORT: int = Field(default=27017, ge=1, le=65535)
+    MONGO_USER: str | None = None
+    MONGO_PASSWORD: SecretStr | None = None
+    MONGO_DB: str = "rag_engine"
+    # full URI overrides HOST/PORT/USER/PASSWORD when set
+    MONGO_URI: SecretStr | None = None
+
+    # ---- redis (rate limits, caches, cancel flags, celery) ---- #
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = Field(default=6379, ge=1, le=65535)
+    REDIS_PASSWORD: SecretStr | None = None
+    REDIS_DB: int = Field(default=0, ge=0, le=15)
+    REDIS_CELERY_BROKER_DB: int = Field(default=1, ge=0, le=15)
+    REDIS_CELERY_RESULT_DB: int = Field(default=2, ge=0, le=15)
+
+    # ---- celery ---- #
+    CELERY_TASK_SOFT_TIME_LIMIT_SECONDS: int = Field(default=3 * 60 * 60, gt=0)
+    CELERY_TASK_TIME_LIMIT_SECONDS: int = Field(default=3 * 60 * 60 + 300, gt=0)
+    CELERY_WORKER_CONCURRENCY: int = Field(default=2, gt=0)
+
+    # ---- vector store ---- #
+    ACTIVE_VECTOR_STORE: VectorStoreType = VectorStoreType.QDRANT
+    QDRANT_HOST: str = "localhost"
+    QDRANT_HTTP_PORT: int = Field(default=6333, ge=1, le=65535)
+    QDRANT_GRPC_PORT: int = Field(default=6334, ge=1, le=65535)
+    QDRANT_PREFER_GRPC: bool = True
+    QDRANT_HTTPS: bool = False
+    QDRANT_API_KEY: SecretStr | None = None
+    QDRANT_TIMEOUT_SECONDS: int = Field(default=30, gt=0)
+
+    # ---- embeddings ---- #
+    ACTIVE_EMBEDDING_PROVIDER: EmbeddingProvider = EmbeddingProvider.OPENAI
+    OPENAI_API_KEY: SecretStr = Field(min_length=1)
+    OPENAI_BASE_URL: str | None = None
+    OPENAI_TIMEOUT_SECONDS: float = Field(default=60.0, gt=0)
+    OPENAI_MAX_RETRIES: int = Field(default=6, ge=0)
+    OPENAI_MAX_CONCURRENT_REQUESTS: int = Field(default=4, gt=0)
+    # tenant default when the admin does not pick one; a KB locks its model at creation
+    DEFAULT_EMBEDDING_MODEL: OpenAIEmbeddingModel = "text-embedding-3-small"
+
+    # ---- reranker ---- #
+    ACTIVE_RERANKER: RerankerType = RerankerType.CROSS_ENCODER
+
+    # ---- crawler ---- #
+    CRAWL_USER_AGENT: str = "RagEngineBot/0.1 (+https://github.com/jyotsanh/rag_engine)"
+    CRAWL_DEFAULT_MAX_PAGES: int = Field(default=500, gt=0)
+    CRAWL_HARD_MAX_PAGES: int = Field(default=10_000, gt=0)
+    CRAWL_DEFAULT_MAX_DEPTH: int = Field(default=10, ge=0)
+    CRAWL_HARD_MAX_DEPTH: int = Field(default=50, ge=0)
+    CRAWL_MAX_JOB_SECONDS: int = Field(default=2 * 60 * 60, gt=0)
+    CRAWL_MAX_PAGE_BYTES: int = Field(default=20 * 1024 * 1024, gt=0)
+    CRAWL_MAX_TOTAL_BYTES: int = Field(default=2 * 1024 * 1024 * 1024, gt=0)
+    CRAWL_CONCURRENCY: int = Field(default=8, gt=0)
+    CRAWL_PER_DOMAIN_RPS: float = Field(default=2.0, gt=0)
+    CRAWL_CONNECT_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0)
+    CRAWL_READ_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
+    CRAWL_MAX_REDIRECTS: int = Field(default=5, ge=0)
+    CRAWL_MAX_RETRIES: int = Field(default=3, ge=0)
+    CRAWL_RENDER_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
+    ROBOTS_CACHE_TTL_SECONDS: int = Field(default=60 * 60, gt=0)
+
+    @model_validator(mode="after")
+    def _check_limits(self) -> Self:
+        if self.CRAWL_DEFAULT_MAX_PAGES > self.CRAWL_HARD_MAX_PAGES:
+            raise ValueError("CRAWL_DEFAULT_MAX_PAGES must be <= CRAWL_HARD_MAX_PAGES")
+        if self.CRAWL_DEFAULT_MAX_DEPTH > self.CRAWL_HARD_MAX_DEPTH:
+            raise ValueError("CRAWL_DEFAULT_MAX_DEPTH must be <= CRAWL_HARD_MAX_DEPTH")
+        if self.CRAWL_MAX_PAGE_BYTES > self.CRAWL_MAX_TOTAL_BYTES:
+            raise ValueError("CRAWL_MAX_PAGE_BYTES must be <= CRAWL_MAX_TOTAL_BYTES")
+        if self.CELERY_TASK_SOFT_TIME_LIMIT_SECONDS >= self.CELERY_TASK_TIME_LIMIT_SECONDS:
+            raise ValueError(
+                "CELERY_TASK_SOFT_TIME_LIMIT_SECONDS must be < CELERY_TASK_TIME_LIMIT_SECONDS"
+            )
+        if self.ENVIRONMENT is Environment.PROD and self.SSRF_ALLOW_PRIVATE_NETWORKS:
+            raise ValueError("SSRF_ALLOW_PRIVATE_NETWORKS must be false in prod")
+        return self
+
+    @property
+    def mongo_url(self) -> str:
+        """Resolved Mongo connection string — explicit MONGO_URI wins."""
+        if self.MONGO_URI:
+            return self.MONGO_URI.get_secret_value()
+        auth = ""
+        if self.MONGO_USER and self.MONGO_PASSWORD:
+            password = quote(self.MONGO_PASSWORD.get_secret_value(), safe="")
+            auth = f"{quote(self.MONGO_USER, safe='')}:{password}@"
+        return f"mongodb://{auth}{self.MONGO_HOST}:{self.MONGO_PORT}"
+
+    def _redis_url(self, db: int) -> str:
+        auth = ""
+        if self.REDIS_PASSWORD:
+            auth = f":{quote(self.REDIS_PASSWORD.get_secret_value(), safe='')}@"
+        return f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{db}"
+
+    @property
+    def redis_url(self) -> str:
+        return self._redis_url(self.REDIS_DB)
+
+    @property
+    def celery_broker_url(self) -> str:
+        return self._redis_url(self.REDIS_CELERY_BROKER_DB)
+
+    @property
+    def celery_result_backend(self) -> str:
+        return self._redis_url(self.REDIS_CELERY_RESULT_DB)
+
+    @property
+    def qdrant_url(self) -> str:
+        scheme = "https" if self.QDRANT_HTTPS else "http"
+        return f"{scheme}://{self.QDRANT_HOST}:{self.QDRANT_HTTP_PORT}"
+
+
+settings = Settings()

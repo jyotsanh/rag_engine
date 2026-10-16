@@ -232,3 +232,13 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
 - Tests: `TestUvScaffold_S2`: import, console scripts registered, dev/server call uvicorn with the right args. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 5 passed.
 - Decisions/notes: host/port are module constants in `rag_engine/__init__.py`, and Step 3 must swap them for `settings.DEV_*`/`PROD_*`. `rag_engine.api.app:app` doesn't exist until Step 6, so `uv run dev` won't serve until then. The old ty keys `root`/`python` were dropped (ty 0.0.89 uses `[tool.ty.src] include` and finds `.venv` itself).
 - Next: Step 3: Settings
+
+### Step 3: Settings  (2026-10-16)
+- Status: ✅ done
+- Built: `rag_engine/config/settings.py` (one flat uppercase `Settings` singleton, grouped app / security / mongo / redis / celery / vector store / embeddings / reranker / crawler), `rag_engine/config/enums.py` (`Environment`, `VectorStoreType`, `EmbeddingProvider`, `RerankerType`), `rag_engine/config/__init__.py` re-exports, `.env.example`, `tests/conftest.py` (injects test secrets before import). `rag_engine/__init__.py` now reads `settings.DEV_*`/`PROD_*`.
+- Required secrets (no default): `ADMIN_API_KEY` (≥32), `API_KEY_PEPPER` (≥32), `OPENAI_API_KEY`, all `SecretStr`.
+- Computed: `mongo_url` (`MONGO_URI` wins, credentials URL-escaped), `redis_url`, `celery_broker_url`, `celery_result_backend` (separate Redis DBs 0/1/2), `qdrant_url`.
+- Validation: default ≤ hard max for pages/depth, page bytes ≤ total bytes, Celery soft < hard time limit, `SSRF_ALLOW_PRIVATE_NETWORKS` forbidden when `ENVIRONMENT=prod`, port ranges, positive limits.
+- Tests: `TestSettings_S3`: missing/short secrets, masked repr, defaults, env parsing (JSON lists, enums), empty-env fallback, unknown model rejected, inconsistent limits, prod SSRF guard, URL builders. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 26 passed.
+- Decisions/notes: `DEFAULT_EMBEDDING_MODEL` is a `Literal` for now, and Step 14's model registry should become its source of truth. Backend selector enums live in `config/enums.py`, and the later dispatchers import them from there. ty 0.0.89 does not flag missing required fields on `Settings()`, so no `# type: ignore` is needed. `.env` comments must sit on their own lines. Tests build `Settings(_env_file=None, ...)` so a developer's local `.env` never leaks in.
+- Next: Step 4: Logging

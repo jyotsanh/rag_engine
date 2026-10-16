@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 import rag_engine
+from rag_engine.config import settings
 
 # ---- #
 # Tests
@@ -38,7 +39,7 @@ class TestUvScaffold_S2:
         assert calls == [
             (
                 (rag_engine.APP_PATH,),
-                {"host": rag_engine.DEV_HOST, "port": rag_engine.DEV_PORT, "reload": True},
+                {"host": settings.DEV_HOST, "port": settings.DEV_PORT, "reload": True},
             )
         ]
 
@@ -49,5 +50,5 @@ class TestUvScaffold_S2:
         rag_engine.server()
 
         assert calls == [
-            ((rag_engine.APP_PATH,), {"host": rag_engine.PROD_HOST, "port": rag_engine.PROD_PORT})
+            ((rag_engine.APP_PATH,), {"host": settings.PROD_HOST, "port": settings.PROD_PORT})
         ]

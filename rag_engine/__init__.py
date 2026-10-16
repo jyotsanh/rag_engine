@@ -6,11 +6,9 @@
 import uvicorn
 from loguru import logger
 
-APP_PATH = "rag_engine.api.app:app"
+from rag_engine.config import settings
 
-# Step 3 replaces these with values from `rag_engine.config.settings`
-DEV_HOST, DEV_PORT = "127.0.0.1", 8000
-PROD_HOST, PROD_PORT = "0.0.0.0", 8000
+APP_PATH = "rag_engine.api.app:app"
 
 
 def dev() -> None:
@@ -18,7 +16,7 @@ def dev() -> None:
     running server in development mode (auto-reload)
     """
     logger.info("running server **development** mode")
-    uvicorn.run(APP_PATH, host=DEV_HOST, port=DEV_PORT, reload=True)
+    uvicorn.run(APP_PATH, host=settings.DEV_HOST, port=settings.DEV_PORT, reload=True)
 
 
 def server() -> None:
@@ -26,7 +24,7 @@ def server() -> None:
     running server in production mode
     """
     logger.info("running server **production** mode")
-    uvicorn.run(APP_PATH, host=PROD_HOST, port=PROD_PORT)
+    uvicorn.run(APP_PATH, host=settings.PROD_HOST, port=settings.PROD_PORT)
 
 
 __all__ = ["APP_PATH", "dev", "server"]
