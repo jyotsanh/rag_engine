@@ -307,3 +307,19 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
 - ⚠️ Found a stale volume `rag_engine_mongo_data` (created 2026-07-21 by the pre-reset project). Mongo only creates the root user on an empty data dir, so with that volume present the new credentials are never applied and auth fails. **Left untouched for the user to decide** (`docker volume rm rag_engine_mongo_data` before first `up`). Verification ran under a separate project name (`rag_engine_verify`) on fresh volumes.
 - Decisions/notes: Step 10's `qdrant-client` should pin to the 1.19 line to match the server. Step 96 adds api/worker/beat services to this file; those containers must override `MONGO_PORT=27017`, `REDIS_PORT=6379` and the `*_HOST` values to the service names.
 - Next: Step 8: Test infrastructure
+
+### Step 8: Test infrastructure  (2026-10-16)
+- Status: ✅ done
+- Built:
+  - `tests/conftest.py`: test secrets injected before import; directory auto-markers (`tests/unit` → `unit`, `tests/integration` → `integration`); `--run-live` gate (live tests are skipped by default); `override_settings(**fields)` fixture that validates via a full `Settings(...)` build, monkeypatches the singleton and auto-restores; `pytester` plugin enabled.
+  - `tests/support/services.py`: `MongoService` / `RedisService` / `QdrantService` connection dataclasses, plus image constants pinned to the same images as `docker-compose.yml`.
+  - `tests/integration/conftest.py`: `docker_available` (skips when there's no daemon), session-scoped lazy testcontainers for Mongo (root auth), Redis (`requirepass`) and Qdrant (API key), and an `integration_settings` fixture (settings aimed at the containers, unique `MONGO_DB` per test, teardown drops the DB, flushes the app/broker/result Redis DBs and deletes all Qdrant collections).
+  - `pyproject.toml`: registered markers `unit`, `integration`, `browser`, `live`, `eval`; filtered the expected Qdrant "api key over http" warning.
+  - `tests/README.md`: run commands and fixture table.
+- Deps (dev): `testcontainers[mongodb,redis,qdrant]` 4.15, which brings sync `pymongo` 4.19, `redis` 8.1, `qdrant-client` 1.19.1 and `docker` as test-side helpers (used only in fixtures and teardown for now).
+- Tests: `TestTestInfrastructure_S8` (8, unit): auto marker, live skipped / enabled with `--run-live` (via pytester), override apply / restore / validate / coerce / unknown-field. `TestIntegrationServices_S8` (7, integration): marker, auth enforced on all 3 services (Qdrant reports 1.19.2), settings point at the containers, cross-test isolation (data written in one test is gone in the next). Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 89 passed (82 unit + 7 integration, ~15–20s with container start). No leftover containers.
+- Decisions/notes:
+  - Integration tests run sequentially; the isolation test relies on file order (no pytest-randomly or xdist).
+  - Use the `testcontainers.community.*` imports; the top-level module paths are deprecated.
+  - When runtime clients arrive (Steps 10/11/68), add `pymongo`, `redis` and `qdrant-client` as **runtime** deps (`qdrant-client` on the 1.19 line).
+- Next: Step 9: Fixture website

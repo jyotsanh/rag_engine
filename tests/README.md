@@ -14,7 +14,22 @@
 | `live` | Hits real external services (OpenAI, public websites). Never run by default |
 | `eval` | Retrieval quality evaluation |
 
-Fast path: `uv run pytest -q -m "not integration and not browser and not live and not eval"`
+`unit` / `integration` are applied automatically from the directory. `live` tests are
+skipped unless `--run-live` is passed. Integration tests are skipped (not failed) when
+no Docker daemon is reachable.
+
+```bash
+uv run pytest -q -m "not integration and not browser"   # fast path (no Docker)
+uv run pytest -q -m integration                          # starts containers once per session
+uv run pytest -q --run-live -m live                      # real OpenAI / public sites
+```
+
+## Fixtures
+| Fixture | Scope | Purpose |
+|---|---|---|
+| `override_settings(**fields)` | function | Validated patch of the global `settings` singleton, auto-restored |
+| `mongo_service` / `redis_service` / `qdrant_service` | session | testcontainers with auth, same images as `docker-compose.yml` (`tests/support/services.py`) |
+| `integration_settings` | function | Points `settings` at the containers. Unique `MONGO_DB` per test; Mongo DB dropped, Redis DBs flushed and Qdrant collections deleted on teardown |
 
 ## Naming
 - One plain pytest class per plan step: `Test<PascalCaseFeature>_S<step>` (e.g. `TestUrlNormalization_S23`).

@@ -32,6 +32,7 @@ dev = [
     "pytest>=8.4",
     "pytest-asyncio>=1.2",
     "ruff>=0.14",
+    "testcontainers[mongodb,qdrant,redis]>=4.13",
     "ty>=0.0.1a20",
 ]
 
@@ -72,3 +73,14 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers --strict-config"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "unit: fast, isolated; no network or containers (auto-applied under tests/unit)",
+    "integration: real MongoDB/Redis/Qdrant via testcontainers (auto-applied under tests/integration)",
+    "browser: needs Playwright Chromium",
+    "live: hits real external services (OpenAI, public websites); needs --run-live",
+    "eval: retrieval quality evaluation",
+]
+filterwarnings = [
+    # test containers serve Qdrant over plain http on localhost
+    "ignore:Api key is used with an insecure connection:UserWarning",
+]
