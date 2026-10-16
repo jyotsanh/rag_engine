@@ -31,11 +31,13 @@ _context_vars: dict[str, ContextVar[str | None]] = {
     name: ContextVar(name, default=None) for name in CONTEXT_FIELDS
 }
 
+# the API's ProcessTimeMiddleware writes access logs (with request_id); silence uvicorn's
+_SILENCED_LOGGERS = ("uvicorn.access",)
+
 # stdlib loggers that install their own handlers; reset so they propagate to root
 _STDLIB_LOGGERS = (
     "uvicorn",
     "uvicorn.error",
-    "uvicorn.access",
     "fastapi",
     "celery",
     "celery.task",
@@ -163,6 +165,10 @@ def setup_logging(
         std_logger = logging.getLogger(name)
         std_logger.handlers = []
         std_logger.propagate = True
+    for name in _SILENCED_LOGGERS:
+        std_logger = logging.getLogger(name)
+        std_logger.handlers = []
+        std_logger.propagate = False
 
 
 __all__ = ["InterceptHandler", "get_log_context", "log_context", "logger", "setup_logging"]

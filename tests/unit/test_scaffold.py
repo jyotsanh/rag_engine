@@ -45,6 +45,7 @@ class TestUvScaffold_S2:
                     "port": settings.DEV_PORT,
                     "reload": True,
                     "log_config": None,
+                    "access_log": False,
                 },
             )
         ]
@@ -59,6 +60,11 @@ class TestUvScaffold_S2:
         assert calls == [
             (
                 (rag_engine.APP_PATH,),
-                {"host": settings.PROD_HOST, "port": settings.PROD_PORT, "log_config": None},
+                {
+                    "host": settings.PROD_HOST,
+                    "port": settings.PROD_PORT,
+                    "log_config": None,
+                    "access_log": False,
+                },
             )
         ]

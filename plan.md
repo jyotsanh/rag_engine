@@ -273,3 +273,23 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - `UpstreamError` (502) is for external services we call (OpenAI, target sites); `ServiceUnavailableError` (503) is for our own infrastructure.
   - Step 6's handlers must render `exc.to_response(get_log_context()["request_id"])` with `exc.headers`, map FastAPI `RequestValidationError` and unhandled exceptions into the same `ErrorResponse` shape, and document `ErrorResponse` in OpenAPI.
 - Next: Step 6: FastAPI app
+
+### Step 6: FastAPI app  (2026-10-16)
+- Status: ✅ done
+- Built:
+  - `rag_engine/api/app.py`: `create_app()` factory, module-level `app`, lifespan hook, OpenAPI at `/api/v1/openapi.json`.
+  - `api/middlewares/request_id.py` (pure ASGI): honors a safe incoming `X-Request-ID` (`[A-Za-z0-9._-]{1,128}`), else generates uuid4 hex; binds `log_context(request_id)`, stores it on `scope["state"]`, echoes the header.
+  - `api/middlewares/process_time.py` (pure ASGI): `X-Process-Time` header plus one access-log line per request (method, path, status_code, duration_ms).
+  - `api/exception_handlers/handlers.py`: `AppBaseException`, `RequestValidationError` (strips `input` so secrets aren't echoed), Starlette `HTTPException` (404/405…), and unhandled `Exception` (generic 500, traceback only in logs). All render `ErrorResponse`, and the request ID header is added even on 500s.
+  - `api/routers/api.py`: `api_router` aggregator documenting 422/500 `ErrorResponse`.
+  - `api/routers/health.py`: `GET /api/v1/health` → `{"message": "app is healthy!!!"}`.
+  - CORS is only installed when `BACKEND_CORS_ORIGINS` is set, and exposes `X-Request-ID`, `X-Process-Time` and `Retry-After`.
+  - `rag_engine.__version__` added.
+- Deps: runtime `fastapi` (0.143, Starlette 1.8). Dev: `httpx`, `asgi-lifespan`. pytest `asyncio_mode = "auto"`.
+- Tests: `TestFastApiApp_S6` (16): health, generated/echoed/sanitized request IDs, timing header, access log carries request_id, app-error shape and headers (Retry-After), validation error hides input, 404/405 shape, 500 doesn't leak and is logged, OpenAPI path + `ErrorResponse` schema, lifespan logs, CORS allow/deny. Plus `test_uvicorn_access_log_is_silenced` in `TestLogging_S4`. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 73 passed.
+- Smoke: `uv run server`, then curl `/api/v1/health` → 200 with the headers, and `/nope` → 404 in `ErrorResponse` shape. Logs are JSON with one access line per request.
+- Decisions/notes:
+  - Middleware order (outermost first): Starlette ServerError → RequestId → ProcessTime → CORS → app. Unhandled 500s are rendered by ServerErrorMiddleware outside our middleware, so handlers read `request.state.request_id` and set the header themselves.
+  - `uvicorn.access` is silenced in `setup_logging` (`create_app()` re-runs it, which used to re-enable the logger after uvicorn's `access_log=False`). `dev()`/`server()` pass `access_log=False`.
+  - Feature routers get included in `api/routers/api.py`. Lifespan is where Steps 10–12 attach Mongo/Redis/Qdrant clients to `app.state`.
+- Next: Step 7: Dev compose

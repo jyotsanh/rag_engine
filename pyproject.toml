@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 authors = [{ name = "Jyotsan", email = "jyotsan@getblys.com" }]
 dependencies = [
+    "fastapi>=0.120",
     "loguru>=0.7.3",
     "pydantic>=2.12",
     "pydantic-settings>=2.13",
@@ -26,6 +27,8 @@ packages = ["rag_engine"]
 
 [dependency-groups] # development dependencies are local-only, not in project requirements
 dev = [
+    "asgi-lifespan>=2.1",
+    "httpx>=0.28",
     "pytest>=8.4",
     "pytest-asyncio>=1.2",
     "ruff>=0.14",
@@ -67,3 +70,5 @@ output-format = "concise"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --strict-config"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

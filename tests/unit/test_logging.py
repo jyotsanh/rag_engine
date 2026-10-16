@@ -127,6 +127,11 @@ class TestLogging_S4:
         ]
         assert all(r["extra"] == {} for r in records)
 
+    def test_uvicorn_access_log_is_silenced(self, json_stream: io.StringIO) -> None:
+        logging.getLogger("uvicorn.access").info("GET / 200")
+
+        assert _records(json_stream) == []
+
     def test_level_filters_lower_records(self) -> None:
         stream = io.StringIO()
         setup_logging(level="WARNING", json_logs=True, stream=stream)
