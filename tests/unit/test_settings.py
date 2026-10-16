@@ -115,7 +115,9 @@ class TestSettings_S3:
             _make(ENVIRONMENT="prod", SSRF_ALLOW_PRIVATE_NETWORKS=True)
 
     def test_mongo_url_built_from_parts_with_escaped_credentials(self) -> None:
-        settings = _make(MONGO_HOST="mongo", MONGO_USER="rag", MONGO_PASSWORD="p@ss/w")
+        settings = _make(
+            MONGO_HOST="mongo", MONGO_PORT=27017, MONGO_USER="rag", MONGO_PASSWORD="p@ss/w"
+        )
 
         assert settings.mongo_url == "mongodb://rag:p%40ss%2Fw@mongo:27017"
 
@@ -124,8 +126,15 @@ class TestSettings_S3:
 
         assert settings.mongo_url == "mongodb+srv://u:p@cluster.example"
 
+    def test_default_ports_match_compose_host_ports(self) -> None:
+        settings = _make()
+
+        assert settings.mongo_url == "mongodb://localhost:27020"
+        assert settings.redis_url == "redis://localhost:6380/0"
+        assert settings.qdrant_url == "http://localhost:6333"
+
     def test_redis_and_celery_urls_use_separate_dbs(self) -> None:
-        settings = _make(REDIS_HOST="redis", REDIS_PASSWORD="s3cret")
+        settings = _make(REDIS_HOST="redis", REDIS_PORT=6379, REDIS_PASSWORD="s3cret")
 
         assert settings.redis_url == "redis://:s3cret@redis:6379/0"
         assert settings.celery_broker_url == "redis://:s3cret@redis:6379/1"

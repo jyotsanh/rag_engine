@@ -293,3 +293,17 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - `uvicorn.access` is silenced in `setup_logging` (`create_app()` re-runs it, which used to re-enable the logger after uvicorn's `access_log=False`). `dev()`/`server()` pass `access_log=False`.
   - Feature routers get included in `api/routers/api.py`. Lifespan is where Steps 10–12 attach Mongo/Redis/Qdrant clients to `app.state`.
 - Next: Step 7: Dev compose
+
+### Step 7: Dev compose  (2026-10-16)
+- Status: ✅ done
+- Built: `docker-compose.yml` (project `rag_engine`):
+  - `mongo:8.0` with a root user from `MONGO_USER`/`MONGO_PASSWORD`, `mongosh ping` healthcheck.
+  - `redis:8.2` with `--requirepass`, AOF on, `redis-cli ping` healthcheck via `REDISCLI_AUTH`.
+  - `qdrant/qdrant:v1.19.2-unprivileged` (non-root) with an API key and telemetry off; the healthcheck hits `/readyz` over bash `/dev/tcp` because the image has no curl.
+  - Named volumes. Every port binds to `127.0.0.1` only. Credentials are required (`${VAR:?}`) from `.env`.
+- Settings/env: default `MONGO_PORT` changed to **27020** and `REDIS_PORT` to **6380**, matching the compose host ports (this machine's 27017/6379 are taken by other stacks). Compose reads the same `.env` variables as `Settings`, so the ports have one source of truth. `.env.example` now lists `MONGO_USER`, `MONGO_PASSWORD`, `REDIS_PASSWORD` and `QDRANT_API_KEY` as required by compose.
+- Tests: `test_default_ports_match_compose_host_ports` added to `TestSettings_S3`. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 74 passed.
+- Verified: `docker compose up -d --wait` → all 3 `healthy`. On fresh volumes: Mongo unauthenticated write → `Unauthorized`, authenticated → ok; Redis without password → `NOAUTH`, with → `PONG`, `appendonly yes`; Qdrant without key → 401, with key → 200 (v1.19.2). Torn down with `down -v`.
+- ⚠️ Found a stale volume `rag_engine_mongo_data` (created 2026-07-21 by the pre-reset project). Mongo only creates the root user on an empty data dir, so with that volume present the new credentials are never applied and auth fails. **Left untouched for the user to decide** (`docker volume rm rag_engine_mongo_data` before first `up`). Verification ran under a separate project name (`rag_engine_verify`) on fresh volumes.
+- Decisions/notes: Step 10's `qdrant-client` should pin to the 1.19 line to match the server. Step 96 adds api/worker/beat services to this file; those containers must override `MONGO_PORT=27017`, `REDIS_PORT=6379` and the `*_HOST` values to the service names.
+- Next: Step 8: Test infrastructure

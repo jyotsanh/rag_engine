@@ -46,8 +46,9 @@ class Settings(BaseSettings):
     SSRF_ALLOW_PRIVATE_NETWORKS: bool = False
 
     # ---- mongodb (jobs, pages, chunks, tenants) ---- #
+    # defaults match the host ports published by docker-compose.yml
     MONGO_HOST: str = "localhost"
-    MONGO_PORT: int = Field(default=27017, ge=1, le=65535)
+    MONGO_PORT: int = Field(default=27020, ge=1, le=65535)
     MONGO_USER: str | None = None
     MONGO_PASSWORD: SecretStr | None = None
     MONGO_DB: str = "rag_engine"
@@ -56,7 +57,7 @@ class Settings(BaseSettings):
 
     # ---- redis (rate limits, caches, cancel flags, celery) ---- #
     REDIS_HOST: str = "localhost"
-    REDIS_PORT: int = Field(default=6379, ge=1, le=65535)
+    REDIS_PORT: int = Field(default=6380, ge=1, le=65535)
     REDIS_PASSWORD: SecretStr | None = None
     REDIS_DB: int = Field(default=0, ge=0, le=15)
     REDIS_CELERY_BROKER_DB: int = Field(default=1, ge=0, le=15)
