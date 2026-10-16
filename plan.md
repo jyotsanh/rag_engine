@@ -259,3 +259,17 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Step 75 must set Celery `worker_hijack_root_logger=False` and call `setup_logging()` in the worker init signal.
   - Use `traceback.format_exception`; ty rejects `Formatter.formatException` with loguru's optional exception value.
 - Next: Step 5: Exceptions
+
+### Step 5: Exceptions  (2026-10-16)
+- Status: ✅ done
+- Built: `rag_engine/exceptions.py`:
+  - `AppBaseException(message, status_code, details, headers)`. Class-level `status_code` / `code` / `default_message` defaults mean subclasses need no `__init__` boilerplate.
+  - Subclasses: `BadRequestError` 400, `UnauthorizedError` 401 (adds `WWW-Authenticate: Bearer`), `ForbiddenError` 403, `QuotaExceededError` 403, `NotFoundError` 404, `ConflictError` 409, `AppValidationError` 422, `TooManyRequestsError` 429 (`retry_after` → `Retry-After` header + details), `UpstreamError` 502, `ServiceUnavailableError` 503.
+  - Error contract: `ErrorResponse{error: ErrorBody{code, message, details, request_id}}`, produced by `exc.to_response(request_id)`.
+- Tests: `TestExceptions_S5`: defaults for all 11 types, overrides without touching class defaults, details copied (no shared mutable state), feature-subclass pattern, auth/rate-limit headers, `to_response` contract round-trip, repr, catch-as-base. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 56 passed.
+- Decisions/notes:
+  - `code` is the stable client-facing identifier. Feature packages subclass a base type and override `code`/`default_message`, e.g. `knowledge_base_not_found(NotFoundError)`.
+  - Named `AppValidationError` to avoid clashing with pydantic's `ValidationError`.
+  - `UpstreamError` (502) is for external services we call (OpenAI, target sites); `ServiceUnavailableError` (503) is for our own infrastructure.
+  - Step 6's handlers must render `exc.to_response(get_log_context()["request_id"])` with `exc.headers`, map FastAPI `RequestValidationError` and unhandled exceptions into the same `ErrorResponse` shape, and document `ErrorResponse` in OpenAPI.
+- Next: Step 6: FastAPI app
