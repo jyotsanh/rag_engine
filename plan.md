@@ -224,3 +224,11 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
 - Tests: none. This step has no Python package; the first tests arrive in Step 2.
 - Decisions/notes: all stack decisions are recorded in the Decisions table above. pymupdf4llm (AGPL) is accepted for PDFs. Test class suffix is the plan step number (`_S<NN>`), not GitHub issue numbers.
 - Next: Step 2: uv scaffold
+
+### Step 2: uv scaffold  (2026-10-16)
+- Status: ✅ done
+- Built: `pyproject.toml` (hatchling, `rag_engine` package, `dev`/`server` scripts, ruff with E/W/F/I/B/UP/SIM/ASYNC/RUF, ty `[tool.ty.src]` over `rag_engine` + `tests`, pytest `--strict-markers --strict-config`), `uv.lock`, `rag_engine/__init__.py` (`dev()` reload / `server()` → `uvicorn.run("rag_engine.api.app:app")`), `tests/unit/test_scaffold.py`.
+- Deps: runtime `uvicorn[standard]`, `loguru`. Dev group: `pytest`, `pytest-asyncio`, `ruff`, `ty`. Python pinned `>=3.12,<3.13`. Other deps get added by the step that needs them.
+- Tests: `TestUvScaffold_S2`: import, console scripts registered, dev/server call uvicorn with the right args. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 5 passed.
+- Decisions/notes: host/port are module constants in `rag_engine/__init__.py`, and Step 3 must swap them for `settings.DEV_*`/`PROD_*`. `rag_engine.api.app:app` doesn't exist until Step 6, so `uv run dev` won't serve until then. The old ty keys `root`/`python` were dropped (ty 0.0.89 uses `[tool.ty.src] include` and finds `.venv` itself).
+- Next: Step 3: Settings

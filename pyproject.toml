@@ -1,0 +1,67 @@
+[project]
+name = "rag-engine"
+version = "0.1.0"
+description = "Multi-tenant service that crawls a website, chunks and embeds its content, and serves dense/hybrid search over it."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "Jyotsan", email = "jyotsan@getblys.com" }]
+dependencies = [
+    "loguru>=0.7.3",
+    "uvicorn[standard]>=0.40",
+]
+
+[project.scripts]
+dev = "rag_engine:dev"
+server = "rag_engine:server"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# rag_engine as package
+[tool.hatch.build.targets.wheel]
+packages = ["rag_engine"]
+
+[dependency-groups] # development dependencies are local-only, not in project requirements
+dev = [
+    "pytest>=8.4",
+    "pytest-asyncio>=1.2",
+    "ruff>=0.14",
+    "ty>=0.0.1a20",
+]
+
+### linting and formatting (ruff)
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "ASYNC", "RUF"]
+ignore = ["B008"] # allow Depends() defaults for FastAPI
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.ruff.lint.isort]
+known-first-party = ["rag_engine"]
+
+## type checking (astral ty)
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+include = ["rag_engine", "tests"]
+
+[tool.ty.analysis]
+respect-type-ignore-comments = true
+
+[tool.ty.terminal]
+output-format = "concise"
+
+## tests
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
