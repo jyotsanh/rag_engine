@@ -242,3 +242,20 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
 - Tests: `TestSettings_S3`: missing/short secrets, masked repr, defaults, env parsing (JSON lists, enums), empty-env fallback, unknown model rejected, inconsistent limits, prod SSRF guard, URL builders. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 26 passed.
 - Decisions/notes: `DEFAULT_EMBEDDING_MODEL` is a `Literal` for now, and Step 14's model registry should become its source of truth. Backend selector enums live in `config/enums.py`, and the later dispatchers import them from there. ty 0.0.89 does not flag missing required fields on `Settings()`, so no `# type: ignore` is needed. `.env` comments must sit on their own lines. Tests build `Settings(_env_file=None, ...)` so a developer's local `.env` never leaks in.
 - Next: Step 4: Logging
+
+### Step 4: Logging  (2026-10-16)
+- Status: ✅ done
+- Built: `rag_engine/config/logging.py`:
+  - `setup_logging(level, json_logs, stream)` is idempotent. JSON sink fields: timestamp, level, message, logger, function, line, request_id, job_id, tenant_id, extra, exception.
+  - Human format is used when `LOG_JSON=false`.
+  - `InterceptHandler` routes stdlib logging into loguru and keeps the original stdlib logger name in the `logger` field. uvicorn, fastapi, celery, kombu, httpx and pymongo loggers are reset to propagate.
+  - Context IDs live in contextvars, bound with `log_context(request_id=…, job_id=…, tenant_id=…)` and read with `get_log_context()`. A loguru patcher fills them in, and an explicit `logger.bind` takes precedence.
+  - Re-exported from `rag_engine.config`.
+  - `dev()`/`server()` call `setup_logging()` and pass `log_config=None` to uvicorn.
+- Tests: `TestLogging_S4`: JSON shape, context set and cleared, nesting restore, isolation across concurrent asyncio tasks, bind precedence, exception serialization, stdlib interception (with context), level filtering, human format, unknown-field guard. Scaffold tests now stub `setup_logging`. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 36 passed.
+- Decisions/notes:
+  - `diagnose` (variable values in tracebacks) is always off for JSON logs and on for human logs outside prod only, so secrets don't leak.
+  - With `reload=True`, uvicorn serves from a child process, so Step 6's app factory/lifespan must also call `setup_logging()`.
+  - Step 75 must set Celery `worker_hijack_root_logger=False` and call `setup_logging()` in the worker init signal.
+  - Use `traceback.format_exception`; ty rejects `Formatter.formatException` with loguru's optional exception value.
+- Next: Step 5: Exceptions

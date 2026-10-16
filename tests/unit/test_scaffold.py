@@ -30,6 +30,7 @@ class TestUvScaffold_S2:
     def test_dev_runs_uvicorn_with_reload(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Arrange
         calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        monkeypatch.setattr(rag_engine, "setup_logging", lambda **_: None)
         monkeypatch.setattr(rag_engine.uvicorn, "run", lambda *a, **kw: calls.append((a, kw)))
 
         # Act
@@ -39,16 +40,25 @@ class TestUvScaffold_S2:
         assert calls == [
             (
                 (rag_engine.APP_PATH,),
-                {"host": settings.DEV_HOST, "port": settings.DEV_PORT, "reload": True},
+                {
+                    "host": settings.DEV_HOST,
+                    "port": settings.DEV_PORT,
+                    "reload": True,
+                    "log_config": None,
+                },
             )
         ]
 
     def test_server_runs_uvicorn_without_reload(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        monkeypatch.setattr(rag_engine, "setup_logging", lambda **_: None)
         monkeypatch.setattr(rag_engine.uvicorn, "run", lambda *a, **kw: calls.append((a, kw)))
 
         rag_engine.server()
 
         assert calls == [
-            ((rag_engine.APP_PATH,), {"host": settings.PROD_HOST, "port": settings.PROD_PORT})
+            (
+                (rag_engine.APP_PATH,),
+                {"host": settings.PROD_HOST, "port": settings.PROD_PORT, "log_config": None},
+            )
         ]
