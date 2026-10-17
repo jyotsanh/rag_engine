@@ -9,6 +9,7 @@ from rag_engine.infrastructure import MongoDatabase
 from rag_engine.repositories import (
     ApiKeyRepository,
     KnowledgeBaseRepository,
+    SourceRepository,
     TenantRepository,
 )
 from rag_engine.security import ApiKeyHasher
@@ -45,3 +46,10 @@ def get_knowledge_base_repository(db: Database) -> KnowledgeBaseRepository:
 
 
 KnowledgeBases = Annotated[KnowledgeBaseRepository, Depends(get_knowledge_base_repository)]
+
+
+def get_source_repository(db: Database) -> SourceRepository:
+    return SourceRepository(db)
+
+
+Sources = Annotated[SourceRepository, Depends(get_source_repository)]

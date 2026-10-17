@@ -597,3 +597,25 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Cross-tenant access returns 404 (never 403) so a caller can't probe which KB ids exist.
   - `DELETE` returns the KB body (status `deleting`) rather than an empty 204, so clients can show what is being removed.
 - Next: Step 21: Source repo + API
+
+### Step 21: Source repo + API  (2026-10-17)
+- Status: ✅ done
+- Built:
+  - `rag_engine/repositories/sources.py`: `SourceRepository`, scoped by `(tenant_id, kb_id)`; sources being deleted are invisible.
+    - `get_or_create(tenant_id, kb_id, seed_url)` → `(source, created)`: finds the active source with that seed URL or inserts one. **Race-safe**: on a unique-index conflict it returns the winner's source.
+    - `get_active`, `list_active` (paginated), `count_active`.
+    - `mark_deleting` (atomic, frees the seed URL; a repeat → 404).
+  - `rag_engine/services/sources.py`: `SourceService` checks first that the KB is active and owned by the caller, so a missing, foreign or deleting KB hides all its sources (404 `knowledge_base_not_found`). Then list / get / delete.
+  - `rag_engine/api/routers/sources.py` (`/knowledge-bases/{kb_id}/sources`, tag `sources`):
+    - `GET` (paginated)
+    - `GET /{source_id}`
+    - `DELETE /{source_id}` → 202 with status `deleting`
+    - IDs validated by prefix.
+  - `rag_engine/api/schemas/sources.py`: `SourceResponse` (seed_url, status, `active_version`, `last_job_id`, stats; no tenant_id).
+  - `SourceNotFoundError` (`source_not_found`); deps `get_source_repository` / `Sources`.
+- Tests: `TestSourceRepository_S21` (4, integration): idempotent get_or_create, 10 concurrent calls → exactly one source and one `created=True` (repeated 3× to check for flakiness), same seed in another KB/tenant is a separate source, deleting frees the seed (a repeat delete → typed 404; record kept as `deleting`). `TestSourceApi_S21` (8): list pagination + get shape, delete 202 then hidden, a source is only reachable through its own KB (wrong KB path → 404, the source untouched), other tenant → 404 `knowledge_base_not_found` everywhere, deleted KB hides its sources, malformed ids 422, tenant key required. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 411 passed (86 s).
+- Decisions/notes:
+  - No create endpoint: sources come into being when a crawl is submitted (Step 84), which must **normalize the seed URL (Step 23) before `get_or_create`** so trivially different spellings map to one source.
+  - `set_active_version` / `last_job_id` / stats updates belong to Steps 78 and 84. Deleting a source with a crawl in flight must cancel that crawl (Step 87); deletion data cascade is Step 81.
+  - The suite now takes ~86 s; integration tests dominate. If it keeps growing, consider `pytest-xdist` with per-worker databases (currently fine).
+- Next: Step 22: Per-tenant API rate limiting

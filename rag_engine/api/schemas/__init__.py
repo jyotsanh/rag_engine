@@ -9,6 +9,7 @@ from .admin import (
     TenantResponse,
 )
 from .knowledge_bases import KnowledgeBaseCreate, KnowledgeBasePatch, KnowledgeBaseResponse
+from .sources import SourceResponse
 
 __all__ = [
     "ApiKeyCreate",
@@ -18,6 +19,7 @@ __all__ = [
     "KnowledgeBaseCreate",
     "KnowledgeBasePatch",
     "KnowledgeBaseResponse",
+    "SourceResponse",
     "TenantCreate",
     "TenantPatch",
     "TenantQuotasPatch",

@@ -7,11 +7,13 @@ from .exceptions import (
     InvalidCursorError,
     KnowledgeBaseNameTakenError,
     KnowledgeBaseNotFoundError,
+    SourceNotFoundError,
     TenantNameTakenError,
     TenantNotFoundError,
 )
 from .knowledge_bases import KnowledgeBaseRepository
 from .pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, Page, SortOrder
+from .sources import SourceRepository
 from .tenants import TenantRepository
 
 __all__ = [
@@ -30,6 +32,8 @@ __all__ = [
     "KnowledgeBaseRepository",
     "Page",
     "SortOrder",
+    "SourceNotFoundError",
+    "SourceRepository",
     "TenantNameTakenError",
     "TenantNotFoundError",
     "TenantRepository",

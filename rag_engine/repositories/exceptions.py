@@ -39,3 +39,8 @@ class KnowledgeBaseNotFoundError(DocumentNotFoundError):
 class KnowledgeBaseNameTakenError(ConflictError):
     code = "knowledge_base_name_taken"
     default_message = "A knowledge base with this name already exists"
+
+
+class SourceNotFoundError(DocumentNotFoundError):
+    code = "source_not_found"
+    default_message = "Source not found"
