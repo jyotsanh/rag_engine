@@ -4,9 +4,13 @@ from urllib.parse import quote
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from rag_engine.config.enums import EmbeddingProvider, Environment, RerankerType, VectorStoreType
-
-OpenAIEmbeddingModel = Literal["text-embedding-3-small", "text-embedding-3-large"]
+from rag_engine.config.enums import (
+    EmbeddingModelName,
+    EmbeddingProvider,
+    Environment,
+    RerankerType,
+    VectorStoreType,
+)
 
 
 class Settings(BaseSettings):
@@ -96,10 +100,16 @@ class Settings(BaseSettings):
     OPENAI_MAX_RETRIES: int = Field(default=6, ge=0)
     OPENAI_MAX_CONCURRENT_REQUESTS: int = Field(default=4, gt=0)
     # tenant default when the admin does not pick one; a KB locks its model at creation
-    DEFAULT_EMBEDDING_MODEL: OpenAIEmbeddingModel = "text-embedding-3-small"
+    DEFAULT_EMBEDDING_MODEL: EmbeddingModelName = EmbeddingModelName.TEXT_EMBEDDING_3_SMALL
 
     # ---- reranker ---- #
     ACTIVE_RERANKER: RerankerType = RerankerType.CROSS_ENCODER
+
+    # ---- tenant quota defaults (admins override per tenant) ---- #
+    TENANT_DEFAULT_MAX_KNOWLEDGE_BASES: int = Field(default=20, gt=0)
+    TENANT_DEFAULT_MAX_CONCURRENT_JOBS: int = Field(default=2, gt=0)
+    TENANT_DEFAULT_MAX_PAGES_PER_JOB: int = Field(default=2_000, gt=0)
+    TENANT_DEFAULT_API_RATE_LIMIT_PER_MINUTE: int = Field(default=120, gt=0)
 
     # ---- crawler ---- #
     CRAWL_USER_AGENT: str = "RagEngineBot/0.1 (+https://github.com/jyotsanh/rag_engine)"
@@ -125,6 +135,8 @@ class Settings(BaseSettings):
             raise ValueError("CRAWL_DEFAULT_MAX_PAGES must be <= CRAWL_HARD_MAX_PAGES")
         if self.CRAWL_DEFAULT_MAX_DEPTH > self.CRAWL_HARD_MAX_DEPTH:
             raise ValueError("CRAWL_DEFAULT_MAX_DEPTH must be <= CRAWL_HARD_MAX_DEPTH")
+        if self.TENANT_DEFAULT_MAX_PAGES_PER_JOB > self.CRAWL_HARD_MAX_PAGES:
+            raise ValueError("TENANT_DEFAULT_MAX_PAGES_PER_JOB must be <= CRAWL_HARD_MAX_PAGES")
         if self.CRAWL_MAX_PAGE_BYTES > self.CRAWL_MAX_TOTAL_BYTES:
             raise ValueError("CRAWL_MAX_PAGE_BYTES must be <= CRAWL_MAX_TOTAL_BYTES")
         if self.CELERY_TASK_SOFT_TIME_LIMIT_SECONDS >= self.CELERY_TASK_TIME_LIMIT_SECONDS:

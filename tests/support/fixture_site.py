@@ -33,6 +33,8 @@ from starlette.responses import (
 )
 from starlette.routing import Route
 
+from rag_engine.domain import PageReason, PageStatus
+
 SITE_ROOT = Path(__file__).parent.parent / "fixtures" / "site"
 
 LARGE_BODY_BYTES = 25 * 1024 * 1024  # above the 20 MiB CRAWL_MAX_PAGE_BYTES default
@@ -130,6 +132,31 @@ SITE_PAGES: dict[str, Expect] = {
     "mailto:support@acme.example": Expect.OUT_OF_SCOPE,
     "tel:+15550100": Expect.OUT_OF_SCOPE,
     "javascript:void(0)": Expect.OUT_OF_SCOPE,
+}
+
+
+# how each expectation is recorded on a `Page` (status, reason)
+EXPECTED_PAGE_OUTCOME: dict[Expect, tuple[PageStatus, PageReason | None]] = {
+    Expect.HTML: (PageStatus.SUCCEEDED, None),
+    Expect.JS_RENDERED: (PageStatus.SUCCEEDED, None),
+    Expect.DOCUMENT: (PageStatus.SUCCEEDED, None),
+    Expect.DOCUMENT_UNREADABLE: (PageStatus.FAILED, PageReason.DOCUMENT_UNREADABLE),
+    Expect.REDIRECT: (PageStatus.SUCCEEDED, None),
+    Expect.REDIRECT_LOOP: (PageStatus.FAILED, PageReason.REDIRECT_LOOP),
+    Expect.BLOCKED_SSRF: (PageStatus.FAILED, PageReason.SSRF_BLOCKED),
+    Expect.NOT_FOUND: (PageStatus.FAILED, PageReason.HTTP_CLIENT_ERROR),
+    Expect.SERVER_ERROR: (PageStatus.FAILED, PageReason.HTTP_SERVER_ERROR),
+    Expect.RETRY_THEN_OK: (PageStatus.SUCCEEDED, None),
+    Expect.RATE_LIMITED: (PageStatus.FAILED, PageReason.RATE_LIMITED),
+    Expect.TOO_LARGE: (PageStatus.FAILED, PageReason.TOO_LARGE),
+    Expect.UNSUPPORTED_TYPE: (PageStatus.SKIPPED, PageReason.UNSUPPORTED_CONTENT_TYPE),
+    Expect.DUPLICATE: (PageStatus.DUPLICATE, None),
+    Expect.CANONICAL_ELSEWHERE: (PageStatus.SKIPPED, PageReason.CANONICAL_ELSEWHERE),
+    Expect.ROBOTS_DISALLOWED: (PageStatus.SKIPPED, PageReason.ROBOTS_DISALLOWED),
+    Expect.OUT_OF_SCOPE: (PageStatus.SKIPPED, PageReason.OUT_OF_SCOPE),
+    Expect.NOFOLLOW: (PageStatus.SKIPPED, PageReason.NOFOLLOW),
+    Expect.SITEMAP_ONLY: (PageStatus.SUCCEEDED, None),
+    Expect.TIMEOUT: (PageStatus.FAILED, PageReason.TIMEOUT),
 }
 
 

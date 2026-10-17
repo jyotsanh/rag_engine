@@ -416,3 +416,39 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - redis-py's default retry/backoff on connection errors can exceed the 2s budget, so a Redis outage may show as `timeout` rather than `redis_unavailable`. Both mean not ready; the real client keeps its retries for transient blips.
   - Readiness has no caching; each probe pings all three (cheap calls). Revisit only if probe frequency becomes a load issue.
 - Next: Step 13: Domain models & enums
+
+### Step 13: Domain models & enums  (2026-10-17)
+- Status: ✅ done
+- Built (`rag_engine/domain/`):
+  - `enums.py`:
+    - `TenantStatus` (active/disabled), `ResourceStatus` (active/deleting, for KBs and sources).
+    - `JobStatus` (queued → running → finalizing → succeeded/failed/cancelled, `.is_terminal`) with `ACTIVE_JOB_STATUSES` / `TERMINAL_JOB_STATUSES`.
+    - `PageStatus` (queued, in_progress, succeeded, skipped, duplicate, failed).
+    - `PageReason`: 21 stable skip/failure codes — robots_disallowed, out_of_scope, nofollow, max_depth, max_pages, canonical_elsewhere, unsupported_content_type, empty_content, job_cancelled, too_large, redirect_loop, too_many_redirects, ssrf_blocked, http_client_error, http_server_error, rate_limited, timeout, network_error, render_failed, extraction_failed, document_unreadable.
+    - `ContentKind` (html, pdf, docx, pptx, xlsx), `RenderedWith` (http, browser).
+    - `EmbeddingModelName` lives in `config/enums.py` and is re-exported here; settings' `DEFAULT_EMBEDDING_MODEL` now uses it instead of the `Literal`.
+  - `types.py`:
+    - Prefixed id types `TenantId`/`ApiKeyId`/`KnowledgeBaseId`/`SourceId`/`JobId`/`PageId`/`ChunkId` (`<prefix>_<32 hex>`), so a `kb_id` can't hold a tenant id.
+    - `HttpUrlStr`: absolute http(s), host required, no whitespace or embedded credentials, ≤2048 chars, kept verbatim (normalization is Step 23).
+    - `Name`, `Description`, `PathPattern`, `Sha256Hex`, `NonNegativeInt`.
+  - Models (collection / id prefix / indexes):
+    - `Tenant` (`tenants`/`ten`; name unique case-insensitively via `TENANT_NAME_COLLATION`). Embedded `TenantQuotas` (max KBs, max concurrent jobs, max pages per job ≤ `CRAWL_HARD_MAX_PAGES`, API rate/min) defaulting from settings; `default_embedding_model`.
+    - `ApiKey` (`api_keys`/`key`; `key_prefix` globally unique; tenant index): `key_hash` (sha256 hex, hidden from repr), `last_used_at` / `expires_at` (must follow creation) / `revoked_at`, `is_usable(now)`.
+    - `KnowledgeBase` (`knowledge_bases`/`kb`; name unique per tenant **among active KBs** via a partial index, so a deleting KB frees its name): `embedding_model` + `embedding_dimensions` are **frozen** (locked at creation).
+    - `Source` (`sources`/`src`; seed_url unique per KB among active sources): `active_version` / `last_job_id` (job ids), `SourceStats`.
+    - `CrawlJob` (`crawl_jobs`/`job`; tenant, source and status+heartbeat indexes):
+      - `CrawlConfig` (max_pages/max_depth bounded by hard limits, ≤50 include/exclude patterns, optional webhook URL).
+      - `JobCounters`, `EmbeddingUsage`, `JobError`, attempts, cancel/started/heartbeat/finished timestamps.
+      - `version` = job id.
+      - Invariants: failed ⇒ error; terminal ⇔ finished_at.
+    - `Page` (`pages`/`page`; `(job_id, url_hash)` unique; job+status index): outcome fields (status, reason, reason_detail, http_status, final_url, content_type/kind, rendered_with, title, markdown, content_hash, canonical_url, duplicate_of, bytes, fetch_ms, attempts). Invariants: skipped/failed ⇔ reason; duplicate ⇒ duplicate_of; succeeded ⇒ content_kind + markdown.
+    - `Chunk` (`chunks`/`chk`; source+version index, `(page_id, ordinal)` unique): text, embed_text, heading_path (≤12), ordinal, token_count > 0, content_hash, version (job id).
+  - Settings: `TENANT_DEFAULT_MAX_KNOWLEDGE_BASES` (20), `_MAX_CONCURRENT_JOBS` (2), `_MAX_PAGES_PER_JOB` (2000, validated ≤ `CRAWL_HARD_MAX_PAGES`), `_API_RATE_LIMIT_PER_MINUTE` (120) + `.env.example`.
+  - `tests/support/fixture_site.py`: `EXPECTED_PAGE_OUTCOME` maps every fixture-site `Expect` to a `(PageStatus, PageReason)` pair, the oracle Step 54 asserts against.
+- Tests: `TestDomainModels_S13` (41, unit): registration with distinct names and prefixes, BSON round-trip per model, id-prefix enforcement, URL rejection matrix and verbatim storage, tenant defaults and quota limits, key repr/prefix/usability/expiry, frozen KB model, source version type, job defaults/config limits/status invariants, status sets partition, page invariants, every fixture outcome representable, chunk content rules, enum values snapshot. `TestDomainIndexes_S13` (6, integration): all 7 models round-trip in Mongo; case-insensitive tenant names; global key prefix; KB name freed when deleting; source seed per KB; page URL per job. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 262 passed.
+- Decisions/notes:
+  - Enum values are a stored and API contract (snapshot-tested). Renaming one needs a data migration.
+  - `Page.markdown` lives on the page document, so Mongo's 16 MB document limit applies. Step 47 must cap stored markdown (or move large bodies out) before persisting.
+  - The one-active-job-per-source partial unique index is deliberately left to Step 79.
+  - Queries on `Tenant.name` must pass `collation=TENANT_NAME_COLLATION` to use the unique index.
+- Next: Step 14: Embedding model registry
