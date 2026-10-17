@@ -12,8 +12,9 @@ The build runs over **100 prompts, one focused step per prompt**. Each step is b
 ## Decisions (from Q&A, all user-confirmed)
 | Area | Decision |
 |---|---|
-| Language | Python 3.12, uv + hatchling, package `rag_engine`, house style (pydantic-settings singleton, loguru, ruff + ty, `[dependency-groups]`, `uv run dev/server`, no Makefile) |
+| Language | Python 3.14 (changed from 3.12 by the user on 2026-10-17), uv + hatchling, package `rag_engine`, house style (pydantic-settings singleton, loguru, ruff + ty, `[dependency-groups]`, `uv run dev/server`, no Makefile) |
 | Interface | FastAPI REST API (Swagger `/docs`) + async jobs |
+| ASGI server | uvicorn 0.54 with `loop="zuvloop"` (Zig libuv loop) and `http="zttp"` (Zig HTTP/1.1/2/3 parser), both by the uvicorn maintainer (Kludex), 0.0.x pre-release; user decision 2026-10-17 |
 | Queue | Celery + Redis (queues: `crawl`, `maintenance`, `webhooks`; Celery beat for periodic tasks) |
 | Crawl scope | Whole site: seed URL + sitemap, per-job `max_pages`, `max_depth`, include/exclude globs |
 | JS sites | httpx first; if the page looks like a JS shell, re-render it with Playwright Chromium |
@@ -347,3 +348,34 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - SPA content lives inside the `<script>`; a JS-shell detector must ignore script text.
   - `pymupdf.PDF_ENCRYPT_AES_256` exists only at runtime, hence the blanket ignore in the builder.
 - Next: Step 10: Mongo infrastructure
+
+### Step 10: Mongo infrastructure  (2026-10-17)
+- Status: ✅ done
+- Pre-step: the user switched to **Python 3.14** and uvicorn `loop="zuvloop"` / `http="zttp"` (uncommitted when this step started).
+  - Checked that both packages are genuine: `zuvloop` wheels carry a PyPI trusted-publishing attestation from GitHub `Kludex/zuvloop`; `zttp` has a real `Kludex/zttp` repo with a publish workflow but no attestations; uvicorn 0.54 supports both natively. The user confirmed the change was intentional.
+  - Follow-ups: scaffold tests now expect `loop`/`http`; ruff `target-version = "py314"` (dropped quoted annotations, since PEP 649 makes them lazy); Decisions table updated. Baseline suite green on 3.14.5.
+- Built:
+  - `rag_engine/domain/base.py`:
+    - `MongoDocument` base with `collection_name` / `id_prefix` / `indexes` ClassVars.
+    - IDs are `"<prefix>_<uuid7 hex>"`: time-ordered, so `_id` doubles as the pagination key.
+    - `created_at` / `updated_at` are UTC, truncated to milliseconds so BSON round-trips compare equal.
+    - `to_mongo()` / `from_mongo()`; `validate_assignment`; `extra="ignore"` for rolling deploys.
+    - Concrete subclasses auto-register (`registered_documents()`); two models can't claim one collection.
+  - `rag_engine/infrastructure/mongo.py`: `MongoConnection` (one `AsyncMongoClient` per process, tz-aware codec options, `connect()` pings and fails fast, `ping()`, `ensure_indexes()` (idempotent, all registered models), `close()`), plus type alias `MongoDatabase`.
+  - `infrastructure/exceptions.py`: `DatabaseUnavailableError` (503).
+  - `infrastructure/lifecycle.py`: `Infrastructure` protocol plus `AppInfrastructure` (start = connect + ensure indexes; Redis and Qdrant attach in Steps 11 and 74).
+  - `rag_engine/repositories/base.py`: `BaseRepository[T]` with insert (`DuplicateKeyError` → `DuplicateDocumentError` 409), get / get_or_raise (per-repo `not_found_error`), find_one / find (sort, limit), count, update, delete, delete_many (refuses an empty filter), paginate.
+    - `update` validates the merged document before `$set`, bumps `updated_at` and rejects `_id`/`created_at`.
+    - Every method takes `scope=` (AND-ed filter); tenant repos pass `{"tenant_id": ...}`.
+  - `repositories/pagination.py`: `Page[T]` (items, next_cursor); opaque base64url cursor `{after, order}` (wrong order or garbage → `InvalidCursorError` 422); limit 1–200; fetches limit+1 rows so there's never an empty trailing page.
+  - `repositories/exceptions.py`.
+  - `api/app.py`: `create_app(infrastructure_factory=AppInfrastructure)`. The lifespan starts the infrastructure before serving, stores it on `app.state.infrastructure` and stops it on shutdown. Startup fails if Mongo is down (verified: `uv run server` with Mongo unreachable exits code 3 after ~2s with "Application startup failed").
+  - Settings: `MONGO_SERVER_SELECTION_TIMEOUT_MS`, `MONGO_CONNECT_TIMEOUT_MS`, `MONGO_MAX_POOL_SIZE` (+ `.env.example`).
+  - `tests/support/fakes.py`: `NoopInfrastructure`; `test_app.py` uses it.
+- Deps: runtime `pymongo` 4.19 (native asyncio API).
+- Tests: `TestMongoDocument_S10` (17, unit): uuid7 prefixed ids, sort order, BSON mapping, round-trip ignoring unknown fields, ms UTC timestamps, assignment validation, registry and collision guard, cursor round-trip / malformed / wrong order, lifespan start/stop, lifespan aborts on failure. `TestMongoInfrastructure_S10` (17, integration): connect/ping/close, unreachable fails fast without leaving a client, idempotent indexes, CRUD round-trip, unique → 409, custom not-found error, tenant scope on get/count/update/delete, update validation and immutables, update into a unique conflict, find sort/limit, delete_many guard, pagination both orders across pages, exact multiple has no trailing empty page, bad limit/cursor, real app lifespan creates indexes. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 175 passed.
+- Decisions/notes:
+  - Test-only document models must use unique `collection_name`s (prefix with `s<step>_`) because of the global registry.
+  - Repositories own query logic and raise typed errors; services/routers never touch `collection` directly.
+  - Step 12's readiness endpoint should call `app.state.infrastructure.mongo.ping()`.
+- Next: Step 11: Redis infrastructure

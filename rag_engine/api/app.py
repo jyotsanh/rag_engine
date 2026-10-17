@@ -1,4 +1,4 @@
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -14,17 +14,27 @@ from rag_engine.api.middlewares import (
 )
 from rag_engine.api.routers import api_router
 from rag_engine.config import logger, settings, setup_logging
+from rag_engine.infrastructure import AppInfrastructure, Infrastructure
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-    """Owns process-wide resources; infrastructure clients attach to `app.state` here."""
+    """Starts backing services before serving and stops them on shutdown."""
     logger.info("starting {} ({})", settings.PROJECT_NAME, settings.ENVIRONMENT)
-    yield
-    logger.info("shutting down {}", settings.PROJECT_NAME)
+    infrastructure: Infrastructure = app.state.infrastructure_factory()
+    await infrastructure.start()
+    app.state.infrastructure = infrastructure
+    try:
+        yield
+    finally:
+        logger.info("shutting down {}", settings.PROJECT_NAME)
+        await infrastructure.stop()
 
 
-def create_app() -> FastAPI:
+def create_app(
+    infrastructure_factory: Callable[[], Infrastructure] = AppInfrastructure,
+) -> FastAPI:
+    """Build the API. Tests pass a fake `infrastructure_factory` to run without services."""
     # uvicorn --reload serves from a child process: configure logging here too
     setup_logging()
 
@@ -34,6 +44,7 @@ def create_app() -> FastAPI:
         openapi_url=f"{settings.API_V1_STR}/openapi.json",
         lifespan=lifespan,
     )
+    app.state.infrastructure_factory = infrastructure_factory
 
     # added last = outermost: RequestId wraps ProcessTime so the access log carries the ID
     if settings.BACKEND_CORS_ORIGINS:

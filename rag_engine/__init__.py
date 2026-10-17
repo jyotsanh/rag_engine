@@ -25,6 +25,8 @@ def dev() -> None:
         reload=True,
         log_config=None,
         access_log=False,  # ProcessTimeMiddleware writes the access log with request_id
+        loop="zuvloop",
+        http="zttp",
     )
 
 
@@ -40,6 +42,8 @@ def server() -> None:
         port=settings.PROD_PORT,
         log_config=None,
         access_log=False,
+        loop="zuvloop",
+        http="zttp",
     )
 
 

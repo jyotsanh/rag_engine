@@ -46,6 +46,8 @@ class TestUvScaffold_S2:
                     "reload": True,
                     "log_config": None,
                     "access_log": False,
+                    "loop": "zuvloop",
+                    "http": "zttp",
                 },
             )
         ]
@@ -65,6 +67,8 @@ class TestUvScaffold_S2:
                     "port": settings.PROD_PORT,
                     "log_config": None,
                     "access_log": False,
+                    "loop": "zuvloop",
+                    "http": "zttp",
                 },
             )
         ]

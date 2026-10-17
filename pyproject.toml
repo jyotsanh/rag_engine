@@ -3,14 +3,17 @@ name = "rag-engine"
 version = "0.1.0"
 description = "Multi-tenant service that crawls a website, chunks and embeds its content, and serves dense/hybrid search over it."
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
-authors = [{ name = "Jyotsan", email = "jyotsan@getblys.com" }]
+requires-python = ">=3.14"
+authors = [{ name = "jyotsanh", email = "hamaljyotsan@gmail.com" }]
 dependencies = [
     "fastapi>=0.120",
     "loguru>=0.7.3",
     "pydantic>=2.12",
     "pydantic-settings>=2.13",
+    "pymongo>=4.19",
     "uvicorn[standard]>=0.40",
+    "zttp>=0.0.34",
+    "zuvloop>=0.0.17",
 ]
 
 [project.scripts]
@@ -42,7 +45,7 @@ dev = [
 
 ### linting and formatting (ruff)
 [tool.ruff]
-target-version = "py312"
+target-version = "py314"
 line-length = 100
 
 [tool.ruff.lint]
@@ -60,7 +63,7 @@ known-first-party = ["rag_engine"]
 
 ## type checking (astral ty)
 [tool.ty.environment]
-python-version = "3.12"
+python-version = "3.14"
 
 [tool.ty.src]
 include = ["rag_engine", "tests"]

@@ -16,6 +16,7 @@ from rag_engine.api import create_app
 from rag_engine.api.middlewares import PROCESS_TIME_HEADER, REQUEST_ID_HEADER
 from rag_engine.config import logger, settings, setup_logging
 from rag_engine.exceptions import NotFoundError, TooManyRequestsError
+from tests.support.fakes import NoopInfrastructure
 
 API = settings.API_V1_STR
 
@@ -27,7 +28,7 @@ class _Payload(BaseModel):
 
 def _build_app() -> FastAPI:
     """The real app plus throwaway routes that exercise each error path."""
-    app = create_app()
+    app = create_app(NoopInfrastructure)
 
     @app.get("/_test/not-found")
     async def not_found() -> None:
@@ -197,7 +198,7 @@ class TestFastApiApp_S6:
         assert "ErrorResponse" in spec["components"]["schemas"]
 
     async def test_lifespan_logs_startup_and_shutdown(self, log_stream: io.StringIO) -> None:
-        app = create_app()
+        app = create_app(NoopInfrastructure)
         setup_logging(level="DEBUG", json_logs=True, stream=log_stream)
 
         async with LifespanManager(app):
@@ -212,7 +213,7 @@ class TestFastApiApp_S6:
     ) -> None:
         # Arrange
         monkeypatch.setattr(settings, "BACKEND_CORS_ORIGINS", ["https://dash.example.com"])
-        app = create_app()
+        app = create_app(NoopInfrastructure)
         transport = httpx.ASGITransport(app=app)
 
         # Act

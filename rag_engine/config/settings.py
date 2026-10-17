@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     MONGO_DB: str = "rag_engine"
     # full URI overrides HOST/PORT/USER/PASSWORD when set
     MONGO_URI: SecretStr | None = None
+    MONGO_SERVER_SELECTION_TIMEOUT_MS: int = Field(default=5_000, gt=0)
+    MONGO_CONNECT_TIMEOUT_MS: int = Field(default=5_000, gt=0)
+    MONGO_MAX_POOL_SIZE: int = Field(default=100, gt=0)
 
     # ---- redis (rate limits, caches, cancel flags, celery) ---- #
     REDIS_HOST: str = "localhost"

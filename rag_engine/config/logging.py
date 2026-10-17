@@ -77,14 +77,14 @@ def get_log_context() -> dict[str, str | None]:
     return {name: var.get() for name, var in _context_vars.items()}
 
 
-def _patch_record(record: "Record") -> None:
+def _patch_record(record: Record) -> None:
     """Fill context IDs from contextvars unless explicitly bound via `logger.bind`."""
     for name, value in get_log_context().items():
         if record["extra"].get(name) is None:
             record["extra"][name] = value
 
 
-def _serialize(record: "Record") -> str:
+def _serialize(record: Record) -> str:
     extra = {
         k: v
         for k, v in record["extra"].items()

@@ -349,7 +349,7 @@ class FixtureSite:
             self._state.requests.clear()
             self._state.flaky_hits = 0
 
-    def start(self) -> "FixtureSite":
+    def start(self) -> FixtureSite:
         self._thread.start()
         deadline = time.monotonic() + 10
         while not self._server.started:
