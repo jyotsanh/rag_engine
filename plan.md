@@ -397,3 +397,22 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Celery broker/result DBs (1/2) are separate and owned by Celery (Step 75); this client never touches them.
   - If a later step needs binary values (e.g. packed vectors in Step 92), add a second client with `decode_responses=False` rather than changing this one.
 - Next: Step 12: Readiness
+
+### Step 12: Readiness  (2026-10-17)
+- Status: ✅ done
+- Built:
+  - `rag_engine/infrastructure/qdrant.py`: `QdrantConnection` (one `AsyncQdrantClient` per process from the `QDRANT_*` settings; gRPC by default; `check_compatibility=False` to skip the blocking handshake; `connect()` pings and fails fast without leaving a half-open client; `ping()` uses the authenticated `get_collections()`, so a wrong key fails at startup; `close()`).
+    - Pulled forward from Step 74 because readiness must ping Qdrant. Step 74 still owns collection bootstrap; Steps 67–73 receive this client.
+  - `infrastructure/health.py`: `check_readiness(checks, budget_seconds)` runs every ping concurrently, each under `asyncio.timeout`.
+    - Returns `ReadinessReport{ready, dependencies: {name: DependencyStatus{status ok|error, latency_ms, error}}}`.
+    - Errors are stable codes only (`timeout`, `database_unavailable`, `redis_unavailable`, `vector_store_unavailable`, `unexpected_error`), never exception messages. Failures are logged as warnings with dependency/latency.
+  - `infrastructure/lifecycle.py`: `Infrastructure` protocol gained `health_checks()`. `AppInfrastructure(mongo, redis, qdrant)` starts Mongo → indexes → Redis → Qdrant, stops in reverse, cleans up on failed start, and exposes `{"mongo", "redis", "qdrant"}` pings.
+  - `infrastructure/exceptions.py`: `VectorStoreUnavailableError` (503).
+  - `api/routers/health.py`: `GET /api/v1/health/ready` → 200 when all checks pass, else 503 with the same `ReadinessReport` body (documented in OpenAPI). Unauthenticated (for probes). Liveness `GET /health` stays independent of dependencies.
+  - Settings: `READINESS_CHECK_TIMEOUT_SECONDS` (default 2, max 30) + `.env.example`.
+  - `tests/support/fakes.py`: `NoopInfrastructure(checks)`.
+- Tests: `TestReadiness_S12` (11, unit): all ok, error code per dependency, three hanging checks time out concurrently (<0.6s for a 0.2s budget), crash contained with no leaked message, no checks = ready, endpoint 200/503 bodies, liveness unaffected, configured budget honored, OpenAPI documents the 503 body, `AppInfrastructure` exposes 3 checks. `TestReadinessIntegration_S12` (6, integration): Qdrant connect/ping/close; wrong API key fails at connect over both gRPC and REST; unreachable Qdrant fails; real app → 200 with all `ok`; Qdrant key rotated plus Redis unreachable after startup → 503 with Mongo `ok`, `redis_unavailable`, `vector_store_unavailable`. `TestRedisKeyspace_S11` start/stop ordering now includes Qdrant. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 215 passed.
+- Decisions/notes:
+  - redis-py's default retry/backoff on connection errors can exceed the 2s budget, so a Redis outage may show as `timeout` rather than `redis_unavailable`. Both mean not ready; the real client keeps its retries for transient blips.
+  - Readiness has no caching; each probe pings all three (cheap calls). Revisit only if probe frequency becomes a load issue.
+- Next: Step 13: Domain models & enums

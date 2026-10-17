@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     LOG_LEVEL: Literal["TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     LOG_JSON: bool = True
+    # each dependency ping in GET /health/ready must answer within this budget
+    READINESS_CHECK_TIMEOUT_SECONDS: float = Field(default=2.0, gt=0, le=30)
 
     # Production HOST & PORT
     PROD_HOST: str = "0.0.0.0"

@@ -13,3 +13,10 @@ class RedisUnavailableError(ServiceUnavailableError):
 
     code = "redis_unavailable"
     default_message = "Redis is unavailable"
+
+
+class VectorStoreUnavailableError(ServiceUnavailableError):
+    """The vector store (Qdrant) could not be reached or rejected our credentials."""
+
+    code = "vector_store_unavailable"
+    default_message = "The vector store is unavailable"

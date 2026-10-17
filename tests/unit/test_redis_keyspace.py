@@ -81,6 +81,7 @@ class TestRedisKeyspace_S11:
         infra = AppInfrastructure(
             mongo=_FakeService("mongo", calls),  # type: ignore
             redis=_FakeService("redis", calls),  # type: ignore
+            qdrant=_FakeService("qdrant", calls),  # type: ignore
         )
 
         await infra.start()
@@ -90,6 +91,8 @@ class TestRedisKeyspace_S11:
             "mongo.connect",
             "mongo.ensure_indexes",
             "redis.connect",
+            "qdrant.connect",
+            "qdrant.close",
             "redis.close",
             "mongo.close",
         ]
@@ -99,9 +102,11 @@ class TestRedisKeyspace_S11:
         infra = AppInfrastructure(
             mongo=_FakeService("mongo", calls),  # type: ignore
             redis=_FakeService("redis", calls, fail_on_connect=True),  # type: ignore
+            qdrant=_FakeService("qdrant", calls),  # type: ignore
         )
 
         with pytest.raises(RedisUnavailableError):
             await infra.start()
 
-        assert calls[-2:] == ["redis.close", "mongo.close"]
+        assert "qdrant.connect" not in calls
+        assert calls[-3:] == ["qdrant.close", "redis.close", "mongo.close"]
