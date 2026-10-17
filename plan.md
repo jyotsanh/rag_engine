@@ -491,3 +491,25 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Step 16 must retry `generate()` on `DuplicateDocumentError` for the (astronomically unlikely) prefix collision.
   - Step 17 must: `parse_api_key` the header (None → 401) → look up by prefix → if no key, `burn()` and 401 → `verify` → if `needs_rehash`, store `hash()` → check `is_usable()` + tenant active. Every failure gets the same generic 401 so callers can't tell which check failed.
 - Next: Step 16: Tenant & ApiKey repositories
+
+### Step 16: Tenant & ApiKey repositories  (2026-10-17)
+- Status: ✅ done
+- Built:
+  - `rag_engine/repositories/tenants.py`: `TenantRepository`
+    - `create()` (duplicate → `TenantNameTakenError` 409, details `{name}`).
+    - `get_by_name()` (trimmed, case-insensitive via `TENANT_NAME_COLLATION`, so it uses the unique index).
+    - `update()` (rename into a taken name → `TenantNameTakenError`).
+    - `set_status()`; not found → `TenantNotFoundError` (`tenant_not_found`).
+  - `rag_engine/repositories/api_keys.py`: `ApiKeyRepository`
+    - `issue(tenant_id, hasher, name, expires_at)` → `(ApiKey, GeneratedApiKey)`; retries a prefix collision up to 3 times, then raises `DuplicateDocumentError`.
+    - `get_by_prefix()`; `list_for_tenant()` (paginated, hides revoked unless `include_revoked`); `count_active()` (excludes revoked and expired).
+    - `revoke(key_id, tenant_id)`: tenant-scoped, idempotent (keeps the first `revoked_at`).
+    - `touch_last_used()`: atomic and throttled to once per `LAST_USED_RESOLUTION` (1 min), so auth doesn't write on every request.
+    - `rehash()`: stores the current-pepper hash after a retired-pepper match.
+  - `repositories/exceptions.py`: `TenantNotFoundError`, `TenantNameTakenError`, `ApiKeyNotFoundError`.
+  - **Fix in `BaseRepository`**: `DuplicateDocumentError.details` used to embed Mongo's raw error (conflicting values plus server message), which reached API clients. Now it's `{collection, fields}` with field names only (shared `_duplicate()` for insert and update).
+- Tests: `TestTenantRepository_S16` (6, integration): case-insensitive lookup, duplicate → typed 409, rename conflict, status and quotas update, typed not-found, duplicate details carry field names but no values. `TestApiKeyRepository_S16` (8, integration): only the hash is stored (plaintext absent from the raw doc), issue → parse → lookup → verify round-trip, retry on 2 collisions, give up after repeated collisions, list/count exclude revoked/expired/other tenants, revoke is tenant-scoped and idempotent, last-used throttling, rehash after pepper rotation. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 322 passed.
+- Decisions/notes:
+  - No per-tenant cap on the number of API keys yet; add one in Step 18's admin service if wanted.
+  - `touch_last_used` and `rehash` aren't tenant-scoped: they're called by auth (Step 17) after the key was already resolved from its prefix.
+- Next: Step 17: Auth dependencies

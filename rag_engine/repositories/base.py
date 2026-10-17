@@ -40,6 +40,13 @@ class BaseRepository[T: MongoDocument]:
     def _load(self, raw: Mapping[str, Any]) -> T:
         return self.model.from_mongo(dict(raw))  # type: ignore
 
+    def _duplicate(self, exc: DuplicateKeyError) -> DuplicateDocumentError:
+        """Name the conflicting fields only; values and server messages never reach clients."""
+        fields = sorted((exc.details or {}).get("keyPattern", {}))
+        return DuplicateDocumentError(
+            details={"collection": self.model.collection_name, "fields": fields}
+        )
+
     @staticmethod
     def _where(filter_: Filter | None, scope: Filter | None) -> dict[str, Any]:
         return {**(filter_ or {}), **(scope or {})}
@@ -48,9 +55,7 @@ class BaseRepository[T: MongoDocument]:
         try:
             await self.collection.insert_one(document.to_mongo())
         except DuplicateKeyError as exc:
-            raise DuplicateDocumentError(
-                details={"collection": self.model.collection_name, "key": exc.details}
-            ) from exc
+            raise self._duplicate(exc) from exc
         except PyMongoError as exc:
             raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
         return document
@@ -102,9 +107,7 @@ class BaseRepository[T: MongoDocument]:
                 return_document=ReturnDocument.AFTER,
             )
         except DuplicateKeyError as exc:
-            raise DuplicateDocumentError(
-                details={"collection": self.model.collection_name, "key": exc.details}
-            ) from exc
+            raise self._duplicate(exc) from exc
         if raw is None:  # deleted between read and write
             raise self.not_found_error(details={"id": id_})
         return self._load(raw)

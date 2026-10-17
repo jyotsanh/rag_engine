@@ -14,3 +14,18 @@ class DuplicateDocumentError(ConflictError):
 class InvalidCursorError(AppValidationError):
     code = "invalid_cursor"
     default_message = "Pagination cursor is invalid"
+
+
+class TenantNotFoundError(DocumentNotFoundError):
+    code = "tenant_not_found"
+    default_message = "Tenant not found"
+
+
+class TenantNameTakenError(ConflictError):
+    code = "tenant_name_taken"
+    default_message = "A tenant with this name already exists"
+
+
+class ApiKeyNotFoundError(DocumentNotFoundError):
+    code = "api_key_not_found"
+    default_message = "API key not found"
