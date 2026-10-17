@@ -452,3 +452,23 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - The one-active-job-per-source partial unique index is deliberately left to Step 79.
   - Queries on `Tenant.name` must pass `collation=TENANT_NAME_COLLATION` to use the unique index.
 - Next: Step 14: Embedding model registry
+
+### Step 14: Embedding model registry  (2026-10-17)
+- Status: ✅ done
+- Built (`rag_engine/embeddings/`):
+  - `models.py`:
+    - `EmbeddingModelSpec` (frozen): name, provider, `native_dimensions`, `supports_dimension_reduction`, `max_input_tokens` (8191), `max_batch_inputs` (2048), `max_batch_tokens` (300k), `tokenizer_encoding` (`cl100k_base`), and a derived `min_dimensions`.
+    - `EMBEDDING_MODELS`: read-only registry for `text-embedding-3-small` (1536) and `text-embedding-3-large` (3072).
+    - `EmbeddingSpace(model, dimensions)` is the unit of vector compatibility. Its `.key` (e.g. `text-embedding-3-large__1024`) is collection-name safe and is what Step 68 names Qdrant collections by.
+    - `get_model_spec()` accepts an enum or a string.
+    - `resolve_space(model, dims=None)`: `None` means native size. Reduced sizes are allowed between `MIN_REDUCED_DIMENSIONS` (256) and native.
+    - `request_dimensions(space)`: the value to send as OpenAI's `dimensions` parameter, `None` at native size.
+  - `exceptions.py`: `UnsupportedEmbeddingModelError` (lists the supported models) and `UnsupportedEmbeddingDimensionsError` (requested/min/max), both 422.
+  - `domain/knowledge_base.py`: a validator checks that `embedding_dimensions` is valid for the model (re-raised as `ValueError` so pydantic reports a normal `ValidationError`); new `embedding_space` property.
+- Tests: `TestEmbeddingModelRegistry_S14` (22, unit): registry covers every model name and provider, default model registered, OpenAI spec values, immutability, string lookup, unknown model error, native default, reduced range accepted/rejected, stable distinct space keys, `dimensions` only sent when reduced, KB validation + `embedding_space`. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 284 passed.
+- Decisions/notes:
+  - 256 as the minimum reduced size is a product decision (below it retrieval quality drops sharply); change `MIN_REDUCED_DIMENSIONS` if needed.
+  - `tiktoken` is not added yet; it downloads encoding files on first use. Step 57 adds it, and Step 95 must bake the encoding cache (`TIKTOKEN_CACHE_DIR`) into the images.
+  - Limits are OpenAI's published ones; Step 62's batcher must respect both `max_batch_inputs` and `max_batch_tokens`.
+  - Step 19 should call `resolve_space(model, requested_dims)` when creating a KB so API clients get the typed 422 with min/max details.
+- Next: Step 15: API key service
