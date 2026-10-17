@@ -8,12 +8,16 @@ from .admin import (
     TenantQuotasPatch,
     TenantResponse,
 )
+from .knowledge_bases import KnowledgeBaseCreate, KnowledgeBasePatch, KnowledgeBaseResponse
 
 __all__ = [
     "ApiKeyCreate",
     "ApiKeyCreatedResponse",
     "ApiKeyResponse",
     "ApiKeyState",
+    "KnowledgeBaseCreate",
+    "KnowledgeBasePatch",
+    "KnowledgeBaseResponse",
     "TenantCreate",
     "TenantPatch",
     "TenantQuotasPatch",

@@ -6,7 +6,11 @@ from typing import Annotated
 from fastapi import Depends, Request
 
 from rag_engine.infrastructure import MongoDatabase
-from rag_engine.repositories import ApiKeyRepository, TenantRepository
+from rag_engine.repositories import (
+    ApiKeyRepository,
+    KnowledgeBaseRepository,
+    TenantRepository,
+)
 from rag_engine.security import ApiKeyHasher
 
 
@@ -34,3 +38,10 @@ def get_api_key_repository(db: Database) -> ApiKeyRepository:
 
 Tenants = Annotated[TenantRepository, Depends(get_tenant_repository)]
 ApiKeys = Annotated[ApiKeyRepository, Depends(get_api_key_repository)]
+
+
+def get_knowledge_base_repository(db: Database) -> KnowledgeBaseRepository:
+    return KnowledgeBaseRepository(db)
+
+
+KnowledgeBases = Annotated[KnowledgeBaseRepository, Depends(get_knowledge_base_repository)]

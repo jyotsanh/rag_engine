@@ -578,3 +578,22 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Under a race the recount can roll back *both* overshooting creates (fail-safe: never above the quota, may briefly reject one extra request). The caller just retries.
   - Deleting a KB only hides it and frees the name. Step 20 enqueues the cascade task once Celery exists (Step 75); until then deleting KBs stay as hidden records.
 - Next: Step 20: KB API
+
+### Step 20: KB API  (2026-10-17)
+- Status: ✅ done
+- Built:
+  - `rag_engine/api/routers/knowledge_bases.py` (`/knowledge-bases`, tag `knowledge-bases`, every route needs a tenant key, 401/403/404/409 documented):
+    - `POST /knowledge-bases` (201)
+    - `GET /knowledge-bases` (paginated, newest first)
+    - `GET /knowledge-bases/{kb_id}`
+    - `PATCH /knowledge-bases/{kb_id}` (name/description only)
+    - `DELETE /knowledge-bases/{kb_id}` → **202 Accepted** with status `deleting` (hidden immediately, name freed; Step 81 cascades the data).
+    - IDs are validated by prefix (malformed or wrong-prefix → 422).
+  - `rag_engine/api/schemas/knowledge_bases.py`: `KnowledgeBaseCreate` (`embedding_model`/`embedding_dimensions` optional, documented as permanent), `KnowledgeBasePatch` (≥1 field, no nulls), `KnowledgeBaseResponse` (no `tenant_id`). Requests use `extra="forbid"`.
+  - `rag_engine/api/params.py`: shared `Limit` / `Cursor` query params, now used by the admin and KB routers.
+  - `api/deps`: `get_knowledge_base_repository` / `KnowledgeBases`.
+- Tests: `TestKnowledgeBaseApi_S20` (14, integration, two tenants bootstrapped through the real admin API): no key / admin key → 401, create with explicit space, tenant default at native size, 6 invalid bodies (schema 422 vs typed `unsupported_embedding_dimensions`), duplicate 409 + quota 403 with details, list pagination + get, patch rename keeps the space, locked/empty/null patches → 422, delete 202 → 404 on repeat/get, hidden from list, name reusable, malformed ids 422. `TestKnowledgeBaseTenantIsolation_S20` (4): another tenant gets 404 on get/patch/delete, indistinguishable from a missing KB and the owner's KB untouched; listings tenant-scoped even with identical names; quota is per tenant; disabled tenant → 403. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 399 passed (72 s).
+- Decisions/notes:
+  - Cross-tenant access returns 404 (never 403) so a caller can't probe which KB ids exist.
+  - `DELETE` returns the KB body (status `deleting`) rather than an empty 204, so clients can show what is being removed.
+- Next: Step 21: Source repo + API

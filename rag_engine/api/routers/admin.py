@@ -5,6 +5,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Path, Query, Response, status
 
 from rag_engine.api.deps import AdminAuth, ApiKeys, Hasher, Tenants
+from rag_engine.api.params import Cursor, Limit
 from rag_engine.api.schemas import (
     ApiKeyCreate,
     ApiKeyCreatedResponse,
@@ -16,7 +17,7 @@ from rag_engine.api.schemas import (
 from rag_engine.domain import TenantStatus
 from rag_engine.domain.types import ApiKeyId, TenantId
 from rag_engine.exceptions import ErrorResponse
-from rag_engine.repositories import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, Page
+from rag_engine.repositories import DEFAULT_PAGE_SIZE, Page
 from rag_engine.services import TenantAdminService
 
 _ERRORS: dict[int | str, dict[str, Any]] = {
@@ -33,8 +34,6 @@ def get_service(tenants: Tenants, keys: ApiKeys, hasher: Hasher) -> TenantAdminS
 Service = Annotated[TenantAdminService, Depends(get_service)]
 TenantPath = Annotated[TenantId, Path(description="Tenant id, e.g. `ten_…`.")]
 KeyPath = Annotated[ApiKeyId, Path(description="API key id, e.g. `key_…`.")]
-Limit = Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)]
-Cursor = Annotated[str | None, Query(description="`next_cursor` from the previous page.")]
 
 
 @router.post("/tenants", status_code=status.HTTP_201_CREATED, summary="Create a tenant")
