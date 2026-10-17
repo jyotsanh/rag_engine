@@ -29,3 +29,13 @@ class TenantNameTakenError(ConflictError):
 class ApiKeyNotFoundError(DocumentNotFoundError):
     code = "api_key_not_found"
     default_message = "API key not found"
+
+
+class KnowledgeBaseNotFoundError(DocumentNotFoundError):
+    code = "knowledge_base_not_found"
+    default_message = "Knowledge base not found"
+
+
+class KnowledgeBaseNameTakenError(ConflictError):
+    code = "knowledge_base_name_taken"
+    default_message = "A knowledge base with this name already exists"

@@ -559,3 +559,22 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - The key-cap check is count-then-insert, so two concurrent admin requests could exceed the cap by one. Acceptable for an operator-only endpoint.
   - Changing a tenant's `default_embedding_model` affects only KBs created afterwards (documented in the schema).
 - Next: Step 19: KnowledgeBase repo + service
+
+### Step 19: KnowledgeBase repo + service  (2026-10-17)
+- Status: ✅ done
+- Built:
+  - `rag_engine/repositories/knowledge_bases.py`: `KnowledgeBaseRepository`. Every method takes the tenant id, and KBs being deleted are invisible to reads.
+    - `create()` (duplicate → `KnowledgeBaseNameTakenError` 409), `get_active()`, `list_active()` (paginated), `count_active()`.
+    - `update_active()` (rename conflict → 409; a deleting KB → 404).
+    - `mark_deleting()`: atomic active → deleting, frees the name; a second call → 404.
+    - `remove()`: hard delete, for create rollback and the Step 81 cascade.
+  - `rag_engine/services/knowledge_bases.py`: `KnowledgeBaseService`
+    - `create(tenant, name, description, embedding_model?, embedding_dimensions?)`: model = explicit or the tenant default; `resolve_space()` gives typed 422s (`unsupported_embedding_model` / `unsupported_embedding_dimensions` with min/max); native size when dimensions are omitted.
+    - Quota check counts → inserts → recounts and rolls back its own insert if concurrent creates overshot, so `max_knowledge_bases` holds under races (403 `quota_exceeded {quota, limit}`).
+    - `get`, `list`, `update` (name/description only; model, dimensions, status or tenant → 422 `AppValidationError` with the field list), `delete` (marks deleting; data stays until Step 81's cascade).
+  - `repositories/exceptions.py`: `KnowledgeBaseNotFoundError` (`knowledge_base_not_found`), `KnowledgeBaseNameTakenError` (`knowledge_base_name_taken`).
+- Tests: `TestKnowledgeBaseService_S19` (11, integration): tenant default model at native size, explicit model + reduced dimensions (space key), invalid model/dimensions → typed 422 with nothing stored, name unique per tenant and freed by delete, quota counts only active KBs, 8 concurrent creates against a quota of 2 never exceed it (repeated 5× to check for flakiness), tenant-scoped get that hides deleting KBs, active-only paginated listing, name/description update, locked-field 422, rename conflict, a deleting KB can't be updated or deleted again (data kept), another tenant can't delete. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 381 passed.
+- Decisions/notes:
+  - Under a race the recount can roll back *both* overshooting creates (fail-safe: never above the quota, may briefly reject one extra request). The caller just retries.
+  - Deleting a KB only hides it and frees the name. Step 20 enqueues the cascade task once Celery exists (Step 75); until then deleting KBs stay as hidden records.
+- Next: Step 20: KB API
