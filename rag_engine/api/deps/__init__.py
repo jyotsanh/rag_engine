@@ -1,4 +1,5 @@
 from .auth import (
+    API_RATE_LIMIT_WINDOW_SECONDS,
     AdminAuth,
     CurrentTenant,
     InvalidCredentialsError,
@@ -6,6 +7,7 @@ from .auth import (
     TenantDisabledError,
     require_admin,
     require_tenant,
+    require_tenant_within_rate_limit,
 )
 from .infrastructure import (
     ApiKeys,
@@ -23,6 +25,7 @@ from .infrastructure import (
 )
 
 __all__ = [
+    "API_RATE_LIMIT_WINDOW_SECONDS",
     "AdminAuth",
     "ApiKeys",
     "CurrentTenant",
@@ -42,4 +45,5 @@ __all__ = [
     "get_tenant_repository",
     "require_admin",
     "require_tenant",
+    "require_tenant_within_rate_limit",
 ]

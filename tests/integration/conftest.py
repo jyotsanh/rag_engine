@@ -19,6 +19,7 @@ from redis import Redis
 from testcontainers.community.mongodb import MongoDbContainer
 from testcontainers.community.qdrant import QdrantContainer
 from testcontainers.community.redis import RedisContainer
+from testcontainers.core.wait_strategies import LogMessageWaitStrategy
 
 from rag_engine.config import Settings
 from tests.conftest import OverrideSettings
@@ -46,13 +47,19 @@ def mongo_service(docker_available: None) -> Iterator[MongoService]:
     # WiredTiger opens a file per collection and index, and every test gets its own
     # database: the Docker default of 1024 runs out (EMFILE → mongod aborts)
     container.with_kwargs(ulimits=[docker.types.Ulimit(name="nofile", soft=64000, hard=64000)])
+    # the image starts a temporary mongod to create the root user, then restarts it:
+    # "Waiting for connections" is logged twice and only the second one is the real server
+    container.waiting_for(LogMessageWaitStrategy("Waiting for connections", times=2))
     with container:
-        yield MongoService(
+        service = MongoService(
             host=container.get_container_host_ip(),
             port=int(container.get_exposed_port(27017)),
             username=container.username,
             password=container.password,
         )
+        with MongoClient(service.url, serverSelectionTimeoutMS=20_000) as client:
+            client.admin.command("ping")  # authenticated round-trip before any test runs
+        yield service
 
 
 @pytest.fixture(scope="session")

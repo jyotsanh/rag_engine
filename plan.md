@@ -619,3 +619,22 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - `set_active_version` / `last_job_id` / stats updates belong to Steps 78 and 84. Deleting a source with a crawl in flight must cancel that crawl (Step 87); deletion data cascade is Step 81.
   - The suite now takes ~86 s; integration tests dominate. If it keeps growing, consider `pytest-xdist` with per-worker databases (currently fine).
 - Next: Step 22: Per-tenant API rate limiting
+
+### Step 22: Per-tenant API rate limiting  (2026-10-17)
+- Status: ✅ done
+- Built:
+  - `rag_engine/security/rate_limit.py`: `SlidingWindowRateLimiter`, an **exact sliding window**: one Lua script per hit trims entries older than the window, counts, and only records the request if under the limit (denied requests don't consume capacity). It sets `PEXPIRE` = window and uses the **Redis server clock** (`TIME`), so API replicas with skewed clocks agree. Returns `RateLimitDecision{allowed, limit, remaining, retry_after (s, ≥1 when denied), window_seconds}` with `.headers()`.
+  - `api/deps/auth.py`: `require_tenant_within_rate_limit`. **`CurrentTenant` now means authenticated + rate limited**, so every tenant route is covered automatically.
+    - Limit = `tenant.quotas.api_rate_limit_per_minute` over `API_RATE_LIMIT_WINDOW_SECONDS` = 60, keyed `rag:api_rl:<tenant_id>`.
+    - Success responses carry `X-RateLimit-Limit` / `-Remaining` / `-Reset`.
+    - Over quota → 429 `rate_limited` with `Retry-After` + the same headers + details `{limit, window_seconds, retry_after}`.
+    - **Fails open** if Redis errors (logged at error level): readiness already reports the outage, and the limiter must not turn a Redis blip into a full API outage.
+    - Admin routes and unauthenticated requests aren't counted.
+  - `TooManyRequestsError` accepts extra `headers`.
+- **Test-infra fix:** an intermittent teardown error (2 of 6 runs) was a container readiness race. The official Mongo image starts a temporary `mongod` to create the root user and then restarts it, so "Waiting for connections" is logged **twice**; testcontainers returned after the first. Step 18's 2 s teardown timeout exposed it. The fixture now waits for the 2nd occurrence and performs an authenticated ping before yielding (8/8 clean runs afterwards).
+- Tests: `TestSlidingWindowLimiter_S22` (7, integration, real Redis): allow-then-deny with remaining counts and retry_after, window slides after 1 s, denials don't consume capacity, 60 concurrent hits against a limit of 10 → exactly 10 allowed, independent subjects + key TTL, bad parameters rejected. `TestTenantApiRateLimit_S22` (6, real app): success headers, 4th request with quota 3 → 429 with Retry-After/headers/details, tenants limited independently, admin routes unlimited, unauthenticated requests don't count, fails open with Redis down. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 424 passed (92 s).
+- Decisions/notes:
+  - The sliding log stores one ZSET entry per allowed request (≤ the per-minute quota per tenant), which is negligible memory at these limits.
+  - `X-RateLimit-Reset` on allowed requests reports the window length (an upper bound), not the exact time until the oldest entry expires.
+  - The limiter instance is cached on `app.state.rate_limiter` (built lazily from the Redis client).
+- Next: Step 23: URL normalization

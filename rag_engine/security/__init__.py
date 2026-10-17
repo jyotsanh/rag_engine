@@ -9,6 +9,7 @@ from .api_keys import (
     display_hint,
     parse_api_key,
 )
+from .rate_limit import RateLimitDecision, SlidingWindowRateLimiter
 
 __all__ = [
     "KEY_SCHEME",
@@ -17,6 +18,8 @@ __all__ = [
     "ApiKeyHasher",
     "GeneratedApiKey",
     "ParsedApiKey",
+    "RateLimitDecision",
+    "SlidingWindowRateLimiter",
     "VerificationResult",
     "display_hint",
     "parse_api_key",

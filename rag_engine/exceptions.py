@@ -151,13 +151,16 @@ class TooManyRequestsError(AppBaseException):
         message: str | None = None,
         retry_after: int | None = None,
         details: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
-        headers = {"Retry-After": str(max(retry_after, 0))} if retry_after is not None else None
+        merged_headers = dict(headers or {})
+        if retry_after is not None:
+            merged_headers["Retry-After"] = str(max(retry_after, 0))
         merged = {
             **(details or {}),
             **({"retry_after": retry_after} if retry_after is not None else {}),
         }
-        super().__init__(message, details=merged, headers=headers)
+        super().__init__(message, details=merged, headers=merged_headers)
         self.retry_after = retry_after
 
 

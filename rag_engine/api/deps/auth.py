@@ -13,14 +13,17 @@ import hmac
 from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from rag_engine.api.deps.infrastructure import ApiKeys, Hasher, Tenants
 from rag_engine.config import bind_log_context, logger, settings
 from rag_engine.domain import ApiKey, Tenant
-from rag_engine.exceptions import ForbiddenError, UnauthorizedError
-from rag_engine.security import parse_api_key
+from rag_engine.exceptions import ForbiddenError, TooManyRequestsError, UnauthorizedError
+from rag_engine.infrastructure import RedisNamespace
+from rag_engine.security import SlidingWindowRateLimiter, parse_api_key
+
+API_RATE_LIMIT_WINDOW_SECONDS = 60
 
 
 class InvalidCredentialsError(UnauthorizedError):
@@ -117,5 +120,41 @@ async def require_tenant(
     return TenantContext(tenant=tenant, api_key=record)
 
 
+async def require_tenant_within_rate_limit(
+    ctx: Annotated[TenantContext, Depends(require_tenant)],
+    request: Request,
+    response: Response,
+) -> TenantContext:
+    """Authenticated tenant, counted against `quotas.api_rate_limit_per_minute`.
+
+    Fails open if Redis is unavailable: readiness already reports the outage, and
+    the limiter must not turn a Redis blip into a full API outage.
+    """
+    redis = request.app.state.infrastructure.redis
+    limiter: SlidingWindowRateLimiter | None = getattr(request.app.state, "rate_limiter", None)
+    try:
+        if limiter is None:
+            limiter = request.app.state.rate_limiter = SlidingWindowRateLimiter(redis.client)
+        decision = await limiter.hit(
+            redis.keys.key(RedisNamespace.API_RATE_LIMIT, ctx.tenant_id),
+            limit=ctx.tenant.quotas.api_rate_limit_per_minute,
+            window_seconds=API_RATE_LIMIT_WINDOW_SECONDS,
+        )
+    except Exception:
+        logger.opt(exception=True).error("rate limiter unavailable; allowing request")
+        return ctx
+    if not decision.allowed:
+        logger.info("tenant rate limit exceeded")
+        raise TooManyRequestsError(
+            "API rate limit exceeded",
+            retry_after=decision.retry_after,
+            details={"limit": decision.limit, "window_seconds": decision.window_seconds},
+            headers=decision.headers(),
+        )
+    response.headers.update(decision.headers())
+    return ctx
+
+
 AdminAuth = Depends(require_admin)
-CurrentTenant = Annotated[TenantContext, Depends(require_tenant)]
+# every tenant route uses this: authentication + per-tenant rate limit
+CurrentTenant = Annotated[TenantContext, Depends(require_tenant_within_rate_limit)]
