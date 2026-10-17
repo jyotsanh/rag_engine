@@ -10,6 +10,7 @@ from pymongo import ASCENDING, IndexModel
 from rag_engine.api import create_app
 from rag_engine.config import Settings
 from rag_engine.domain import MongoDocument
+from rag_engine.exceptions import AppValidationError
 from rag_engine.infrastructure import AppInfrastructure, DatabaseUnavailableError, MongoConnection
 from rag_engine.repositories import (
     BaseRepository,
@@ -140,8 +141,9 @@ class TestMongoInfrastructure_S10:
     async def test_update_validates_values(self, repo: _WidgetRepository) -> None:
         widget = await repo.insert(_Widget(tenant_id="t1", sku="A"))
 
-        with pytest.raises(ValueError, match="quantity"):
+        with pytest.raises(AppValidationError) as invalid:
             await repo.update(widget.id, {"quantity": "many"})
+        assert invalid.value.details["errors"][0]["loc"] == ("quantity",)
         with pytest.raises(ValueError, match="immutable"):
             await repo.update(widget.id, {"created_at": None})
 

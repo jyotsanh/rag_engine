@@ -24,6 +24,8 @@ uv run pytest -q -m integration                          # starts containers onc
 uv run pytest -q --run-live -m live                      # real OpenAI / public sites
 ```
 
+Every test has a 120 s timeout (`pytest-timeout`), so a hang fails the stuck test by name.
+
 ## Fixtures
 | Fixture | Scope | Purpose |
 |---|---|---|

@@ -531,3 +531,31 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Model invariants also run when loading from Mongo: a stored document that violates one (e.g. `expires_at` before `created_at`) makes reads fail. Writes always go through validation, so this only happens with manual DB edits.
   - Use `ctx.scope` as the `scope=` argument on every tenant-owned repository call (Steps 19+).
 - Next: Step 18: Admin API
+
+### Step 18: Admin API  (2026-10-17)
+- Status: ✅ done
+- Built:
+  - `rag_engine/api/routers/admin.py` (prefix `/admin`, tag `admin`, every route behind `AdminAuth`, 401/403/404/409 documented as `ErrorResponse`):
+    - `POST /admin/tenants` (201)
+    - `GET /admin/tenants` (cursor pagination, `?status=`)
+    - `GET /admin/tenants/{tenant_id}`
+    - `PATCH /admin/tenants/{tenant_id}` (name, status, default model, partial quotas merged into the current ones)
+    - `POST /admin/tenants/{tenant_id}/keys` (201, plaintext `api_key` returned once, `Cache-Control: no-store`)
+    - `GET /admin/tenants/{tenant_id}/keys` (`?include_revoked=`)
+    - `DELETE /admin/tenants/{tenant_id}/keys/{key_id}` (idempotent revoke, returns the key)
+    - Path IDs are validated by prefix (malformed → 422).
+  - `rag_engine/api/schemas/admin.py`: `TenantCreate`, `TenantPatch` (≥1 field, no explicit nulls), `TenantQuotasPatch`, `TenantResponse`, `ApiKeyCreate` (`expires_at` must be timezone-aware and in the future), `ApiKeyResponse` (hint, `state` active/revoked/expired; never the hash), `ApiKeyCreatedResponse`. Requests use `extra="forbid"`.
+  - `rag_engine/services/tenant_admin.py`: `TenantAdminService` (quota merge with typed 422, per-tenant key cap → 403 `quota_exceeded {quota, limit}`, tenant existence checks, audit log lines with tenant/key ids).
+  - Settings: `TENANT_MAX_ACTIVE_API_KEYS` (default 10) + `.env.example`.
+  - `BaseRepository.update`: model validation failures now raise `AppValidationError` (422) instead of a raw pydantic `ValueError` (which surfaced as 500). Error details drop input/ctx/url so they stay JSON-serializable and never echo values. The Step 10 test was updated accordingly.
+- **Incident fixed in this step:** the full suite hung. Root cause: the Mongo test container ran out of file descriptors (Docker default `nofile` = 1024). WiredTiger keeps a file per collection and index, every test gets its own DB, and Step 18's tests crossed the limit → `EMFILE` → mongod fatal assertion (msgid 50853), exit 139. Every later test then waited 30 s in teardown on pymongo's default server-selection timeout.
+  - Test Mongo container: `nofile` 64000 (MongoDB's recommendation).
+  - **`docker-compose.yml` Mongo: `ulimits.nofile` 64000**, since production would hit the same wall as tenants, KBs and indexes grow.
+  - Teardown clients use short timeouts (Mongo 2 s, Redis 2/5 s, Qdrant 5 s).
+  - Added `pytest-timeout` (120 s per test) so future hangs fail by name.
+  - Removed the containers left behind by the killed runs.
+- Tests: `TestAdminTenantsApi_S18` (18, integration): every route rejects a wrong key, create with defaults / model / partial quotas, 6 invalid bodies → 422, duplicate → 409, get / 404 / malformed id 422, pagination and status filter, patch merges quotas and bumps `updated_at`, 4 invalid patches → 422, rename conflict 409 / missing 404. `TestAdminKeysApi_S18` (8, integration): plaintext once + no-store and never in listings, tenant key rejected on admin routes, expiry validation, key cap 403 then OK after revoke, revoked hidden unless asked, revoke idempotent and tenant-scoped, unknown tenant 404, OpenAPI shows 7 admin ops under `AdminKey`. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 370 passed (52 s).
+- Decisions/notes:
+  - The key-cap check is count-then-insert, so two concurrent admin requests could exceed the cap by one. Acceptable for an operator-only endpoint.
+  - Changing a tenant's `default_embedding_model` affects only KBs created afterwards (documented in the schema).
+- Next: Step 19: KnowledgeBase repo + service

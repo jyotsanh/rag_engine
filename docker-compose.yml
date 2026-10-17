@@ -25,6 +25,12 @@ services:
       - "127.0.0.1:${MONGO_PORT:-27020}:27017"
     volumes:
       - mongo_data:/data/db
+    # MongoDB's recommended limit: WiredTiger keeps a file per collection and index,
+    # and the Docker default (1024) aborts mongod with EMFILE as data grows
+    ulimits:
+      nofile:
+        soft: 64000
+        hard: 64000
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
       interval: 10s

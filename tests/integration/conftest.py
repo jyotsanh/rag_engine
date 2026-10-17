@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Iterator
 
 import docker
+import docker.types
 import pytest
 from pymongo import MongoClient
 from qdrant_client import QdrantClient
@@ -42,6 +43,9 @@ def docker_available() -> None:
 @pytest.fixture(scope="session")
 def mongo_service(docker_available: None) -> Iterator[MongoService]:
     container = MongoDbContainer(MONGO_IMAGE, username="rag", password=secrets.token_hex(12))
+    # WiredTiger opens a file per collection and index, and every test gets its own
+    # database: the Docker default of 1024 runs out (EMFILE → mongod aborts)
+    container.with_kwargs(ulimits=[docker.types.Ulimit(name="nofile", soft=64000, hard=64000)])
     with container:
         yield MongoService(
             host=container.get_container_host_ip(),
@@ -106,7 +110,8 @@ def _reset_services(
     qdrant: QdrantService,
     configured: Settings,
 ) -> None:
-    with MongoClient(mongo.url) as client:
+    # short timeouts: if a service died mid-run, fail fast instead of 30s per test
+    with MongoClient(mongo.url, serverSelectionTimeoutMS=2_000) as client:
         client.drop_database(db_name)
     redis_dbs = {
         configured.REDIS_DB,
@@ -114,9 +119,16 @@ def _reset_services(
         configured.REDIS_CELERY_RESULT_DB,
     }
     for db in redis_dbs:
-        with Redis(host=redis.host, port=redis.port, password=redis.password, db=db) as client:
+        with Redis(
+            host=redis.host,
+            port=redis.port,
+            password=redis.password,
+            db=db,
+            socket_connect_timeout=2,
+            socket_timeout=5,
+        ) as client:
             client.flushdb()
-    client = QdrantClient(url=qdrant.url, api_key=qdrant.api_key, https=False)
+    client = QdrantClient(url=qdrant.url, api_key=qdrant.api_key, https=False, timeout=5)
     try:
         for collection in client.get_collections().collections:
             client.delete_collection(collection.name)

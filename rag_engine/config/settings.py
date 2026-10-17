@@ -112,6 +112,8 @@ class Settings(BaseSettings):
     TENANT_DEFAULT_MAX_CONCURRENT_JOBS: int = Field(default=2, gt=0)
     TENANT_DEFAULT_MAX_PAGES_PER_JOB: int = Field(default=2_000, gt=0)
     TENANT_DEFAULT_API_RATE_LIMIT_PER_MINUTE: int = Field(default=120, gt=0)
+    # hard cap on usable (not revoked, not expired) API keys per tenant
+    TENANT_MAX_ACTIVE_API_KEYS: int = Field(default=10, gt=0, le=1000)
 
     # ---- crawler ---- #
     CRAWL_USER_AGENT: str = "RagEngineBot/0.1 (+https://github.com/jyotsanh/rag_engine)"

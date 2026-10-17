@@ -37,6 +37,7 @@ dev = [
     "pymupdf>=1.26",
     "pytest>=8.4",
     "pytest-asyncio>=1.2",
+    "pytest-timeout>=2.4",
     "python-docx>=1.2",
     "python-pptx>=1.0",
     "ruff>=0.14",
@@ -80,6 +81,8 @@ output-format = "concise"
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --strict-config"
 asyncio_mode = "auto"
+# a hung test fails by name instead of stalling the whole run
+timeout = 120
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "unit: fast, isolated; no containers or external network, loopback fixture site allowed (auto-applied under tests/unit)",

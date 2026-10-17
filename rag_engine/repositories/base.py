@@ -3,11 +3,13 @@
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
+from pydantic import ValidationError
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from rag_engine.domain.base import MongoDocument, utc_now
+from rag_engine.exceptions import AppValidationError
 from rag_engine.infrastructure.exceptions import DatabaseUnavailableError
 from rag_engine.infrastructure.mongo import MongoDatabase
 from rag_engine.repositories.exceptions import DocumentNotFoundError, DuplicateDocumentError
@@ -97,7 +99,16 @@ class BaseRepository[T: MongoDocument]:
             raise ValueError(f"immutable fields cannot be updated: {sorted(forbidden)}")
         current = await self.get_or_raise(id_, scope=scope)
         # validate the merged document so invalid values never reach the database
-        merged = self.model.model_validate({**current.to_mongo(), **changes})
+        try:
+            merged = self.model.model_validate({**current.to_mongo(), **changes})
+        except ValidationError as exc:
+            raise AppValidationError(
+                details={
+                    "errors": exc.errors(
+                        include_input=False, include_url=False, include_context=False
+                    )
+                }
+            ) from exc
         stored = merged.to_mongo()
         update_set = {field: stored[field] for field in changes} | {"updated_at": utc_now()}
         try:
