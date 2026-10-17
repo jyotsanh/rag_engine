@@ -379,3 +379,21 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Repositories own query logic and raise typed errors; services/routers never touch `collection` directly.
   - Step 12's readiness endpoint should call `app.state.infrastructure.mongo.ping()`.
 - Next: Step 11: Redis infrastructure
+
+### Step 11: Redis infrastructure  (2026-10-17)
+- Status: ✅ done
+- Built:
+  - `rag_engine/infrastructure/redis.py`:
+    - `RedisConnection`: one async pool on the app DB (`REDIS_DB`), `decode_responses=True`, socket/connect timeouts, max connections, health check every 30s, client name. `connect()` pings and fails fast, leaving no half-open client. `ping()` maps any `RedisError`/`OSError` (incl. bad password) to `RedisUnavailableError` (503). `delete_namespace(ns)` uses SCAN + batched UNLINK and never runs KEYS/FLUSHDB. `close()`.
+    - `RedisKeyspace`: `key(namespace, *parts)` → `<prefix>:<namespace>:<part>...`. Parts can't be empty or contain whitespace, control chars or `:`; the error points to `digest()` (sha256, 32 hex chars) for URLs and origins. `pattern(namespace)` gives the SCAN glob.
+    - `RedisNamespace` StrEnum, one member per key family with the step that uses it: `api_rl` (22), `robots` (29), `domain_rl` (30), `job_cancel` (52), `query_emb` (92), `lock`.
+  - `infrastructure/lifecycle.py`: `AppInfrastructure(mongo, redis)` starts Mongo → indexes → Redis and stops in reverse. If any start fails it closes whatever was opened and re-raises.
+  - `infrastructure/exceptions.py`: `RedisUnavailableError`.
+  - Settings: `REDIS_KEY_PREFIX` (validated `^[a-z0-9_-]{1,32}$`, default `rag`), `REDIS_SOCKET_TIMEOUT_SECONDS`, `REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS`, `REDIS_MAX_CONNECTIONS` (+ `.env.example`).
+- Deps: runtime `redis` 8.1 (redis-py asyncio).
+- Tests: `TestRedisKeyspace_S11` (16, unit): key format, unsafe parts, separator hint, required part, digest stable/distinct/short, pattern, prefix validation, start/stop ordering, failed start closes opened services. `TestRedisInfrastructure_S11` (7, integration): connect/ping/close, unreachable fails fast, wrong password → 503, decoded strings + TTL, uses the configured DB, `delete_namespace` over 1,234 keys (multiple batches) leaves other namespaces and other prefixes alone, real app lifespan connects Redis. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 198 passed.
+- Decisions/notes:
+  - Code must build Redis keys only through `connection.keys.key(...)`. A new key family gets a `RedisNamespace` member first.
+  - Celery broker/result DBs (1/2) are separate and owned by Celery (Step 75); this client never touches them.
+  - If a later step needs binary values (e.g. packed vectors in Step 92), add a second client with `decode_responses=False` rather than changing this one.
+- Next: Step 12: Readiness

@@ -6,3 +6,10 @@ class DatabaseUnavailableError(ServiceUnavailableError):
 
     code = "database_unavailable"
     default_message = "The database is unavailable"
+
+
+class RedisUnavailableError(ServiceUnavailableError):
+    """Redis could not be reached or failed at the connection level."""
+
+    code = "redis_unavailable"
+    default_message = "Redis is unavailable"

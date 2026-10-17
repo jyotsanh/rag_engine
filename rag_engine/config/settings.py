@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     REDIS_DB: int = Field(default=0, ge=0, le=15)
     REDIS_CELERY_BROKER_DB: int = Field(default=1, ge=0, le=15)
     REDIS_CELERY_RESULT_DB: int = Field(default=2, ge=0, le=15)
+    # every app key starts with "<prefix>:" so one Redis can be shared and scanned safely
+    REDIS_KEY_PREFIX: str = Field(default="rag", pattern=r"^[a-z0-9_-]{1,32}$")
+    REDIS_SOCKET_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0)
+    REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0)
+    REDIS_MAX_CONNECTIONS: int = Field(default=100, gt=0)
 
     # ---- celery ---- #
     CELERY_TASK_SOFT_TIME_LIMIT_SECONDS: int = Field(default=3 * 60 * 60, gt=0)
