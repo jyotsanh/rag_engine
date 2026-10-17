@@ -638,3 +638,25 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - `X-RateLimit-Reset` on allowed requests reports the window length (an upper bound), not the exact time until the oldest entry expires.
   - The limiter instance is cached on `app.state.rate_limiter` (built lazily from the Redis client).
 - Next: Step 23: URL normalization
+
+### Step 23: URL normalization  (2026-10-17)
+- Status: ✅ done
+- Built: `rag_engine/crawling/url.py` (new `crawling` package):
+  - `normalize_url(url, base=None)` → canonical absolute URL, or `UrlNormalizationError` (a `ValueError`). Rules, in order:
+    1. resolve against `base`; strip outer whitespace and remove internal tab/CR/LF
+    2. scheme lowercased, http/https only
+    3. **credentials rejected** (not silently dropped)
+    4. host lowercased, IDNA 2008/UTS #46 via the `idna` package, trailing dot removed, IPv6 kept bracketed and lowercased
+    5. default ports dropped; invalid ports rejected
+    6. path: RFC 3986 dot-segment removal; empty → `/`; percent-encoding normalized (uppercase hex, unreserved decoded, unsafe and non-ASCII → UTF-8 escapes)
+    7. query: tracking params stripped (`utm_*`, `pk_*`, `mtm_*` prefixes plus ~27 click IDs such as `gclid`, `fbclid`, `msclkid`, `mc_cid`, HubSpot `__hs*`), the rest sorted by key then value with blank values kept, `?` dropped when empty
+    8. fragment dropped
+  - `url_hash(normalized)` = sha256 hex (the `Page.url_hash` / frontier key); `normalize_and_hash()`.
+  - **Policy choices**: trailing and repeated slashes are **preserved** (servers may serve different resources; duplicates are caught by redirects and content hashing in Step 46). Ambiguous params like `ref` are **kept** (some sites use them for content), so the fixture site's tracked link normalizes to `/docs/getting-started.html?ref=home`.
+- Deps: runtime `idna` 3.20; dev `hypothesis` 6.170.
+- Tests: `TestUrlNormalization_S23` (58, unit): 21 canonical-form cases, 11 query cases (sorting, duplicate keys, tracking removal, blank values, `+` vs `%2B`, encoded `&`), fixture-site tracked link, 7 relative resolutions, 14 rejections (non-http schemes, credentials, missing host, bad ports/hosts, broken IPv6), hash consistency. **Hypothesis properties** (300 examples each over unicode hosts, odd path segments including `.`/`..`, query pairs, ports, fragments): idempotent; output is ASCII, lowercase host, absolute path, no fragment and accepted by the `Source` model; invariant under shuffled params, injected tracking params, upper-cased scheme/host and fragments. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 482 passed.
+- Decisions/notes:
+  - Step 84 must run the submitted seed URL through `normalize_url` before `SourceRepository.get_or_create`; reject with 422 on `UrlNormalizationError`.
+  - `+` in queries is read as a space (form encoding) and re-emitted as `%20`; a literal plus must be `%2B`. This is the common server interpretation.
+  - The tracking list is a code constant. Make it a setting later only if tenants need per-site overrides.
+- Next: Step 24: Scope rules

@@ -7,6 +7,7 @@ requires-python = ">=3.14"
 authors = [{ name = "jyotsanh", email = "hamaljyotsan@gmail.com" }]
 dependencies = [
     "fastapi>=0.120",
+    "idna>=3.10",
     "loguru>=0.7.3",
     "pydantic>=2.12",
     "pydantic-settings>=2.13",
@@ -33,6 +34,7 @@ packages = ["rag_engine"]
 dev = [
     "asgi-lifespan>=2.1",
     "httpx>=0.28",
+    "hypothesis>=6.140",
     "openpyxl>=3.1",
     "pymupdf>=1.26",
     "pytest>=8.4",
