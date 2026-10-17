@@ -73,6 +73,20 @@ def log_context(**ids: str | None) -> Generator[None]:
             var.reset(token)
 
 
+def bind_log_context(**ids: str | None) -> None:
+    """Set context IDs for the rest of the current task without a reset.
+
+    For FastAPI dependencies: each request runs in its own task/context copy, so
+    the values cannot leak into other requests, and a context-manager reset could
+    run in a different context than the set.
+    """
+    unknown = set(ids) - set(CONTEXT_FIELDS)
+    if unknown:
+        raise ValueError(f"unknown log context fields: {sorted(unknown)}")
+    for name, value in ids.items():
+        _context_vars[name].set(value)
+
+
 def get_log_context() -> dict[str, str | None]:
     return {name: var.get() for name, var in _context_vars.items()}
 
@@ -171,4 +185,11 @@ def setup_logging(
         std_logger.propagate = False
 
 
-__all__ = ["InterceptHandler", "get_log_context", "log_context", "logger", "setup_logging"]
+__all__ = [
+    "InterceptHandler",
+    "bind_log_context",
+    "get_log_context",
+    "log_context",
+    "logger",
+    "setup_logging",
+]

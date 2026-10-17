@@ -513,3 +513,21 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - No per-tenant cap on the number of API keys yet; add one in Step 18's admin service if wanted.
   - `touch_last_used` and `rehash` aren't tenant-scoped: they're called by auth (Step 17) after the key was already resolved from its prefix.
 - Next: Step 17: Auth dependencies
+
+### Step 17: Auth dependencies  (2026-10-17)
+- Status: ✅ done
+- Built:
+  - `rag_engine/api/deps/infrastructure.py`: `get_db` (from `app.state.infrastructure.mongo`), `get_api_key_hasher` (one per process, overridable), repository deps; Annotated aliases `Database`, `Hasher`, `Tenants`, `ApiKeys`.
+  - `rag_engine/api/deps/auth.py`:
+    - `require_admin` (`AdminAuth`): `Authorization: Bearer <ADMIN_API_KEY>`, compared in constant time over SHA-256 digests so the comparison time doesn't depend on input length.
+    - `require_tenant` (`CurrentTenant` → `TenantContext{tenant, api_key, tenant_id, scope}`): parse → lookup by prefix (unknown → `burn()`) → verify → usable (not revoked/expired) → tenant exists → binds `tenant_id` to the log context → tenant active → re-hash if a retired pepper matched → `touch_last_used`.
+    - Every authentication failure is the same 401 `invalid_credentials` / "Missing or invalid API key" / empty details / `WWW-Authenticate: Bearer`.
+    - **A valid key whose tenant is disabled → 403 `tenant_disabled`.** This changes the Step 15 note: the holder has already proven the secret, so 403 leaks nothing and tells operators why a working key stopped working.
+    - OpenAPI security schemes `AdminKey` and `TenantApiKey` (HTTP bearer), so Swagger's Authorize button works.
+  - `config/logging.py`: `bind_log_context(**ids)` sets context IDs without a reset (safe in FastAPI dependencies; each request has its own context copy).
+- Tests: `TestAdminAuth_S17` (11, unit): correct admin key → 200; 9 wrong shapes (missing, empty, wrong, ±1 char, Basic, no scheme, tenant-format key, `X-API-Key`) → uniform 401 without echoing the key; OpenAPI schemes and per-route security. `TestTenantAuth_S17` (11, integration, real app + Mongo): valid key → tenant and `tenant_id` in the log context; missing/malformed, unknown prefix (`burn` called), wrong secret, revoked, expired, deleted tenant → identical 401; disabled tenant → 403; `last_used_at` set; retired-pepper key accepted and re-hashed; admin key rejected as a tenant key. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 344 passed.
+- Decisions/notes:
+  - FastAPI resolves `require_tenant`'s sub-dependencies (repositories → `get_db`) before the header is parsed, so tenant routes need `app.state.infrastructure.mongo`. Unit tests of tenant routes must override `get_api_key_repository`/`get_tenant_repository` (or use integration tests).
+  - Model invariants also run when loading from Mongo: a stored document that violates one (e.g. `expires_at` before `created_at`) makes reads fail. Writes always go through validation, so this only happens with manual DB edits.
+  - Use `ctx.scope` as the `scope=` argument on every tenant-owned repository call (Steps 19+).
+- Next: Step 18: Admin API

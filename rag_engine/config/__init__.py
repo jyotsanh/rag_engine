@@ -7,7 +7,13 @@ from .enums import (
 )
 from .settings import Settings, settings
 
-from .logging import get_log_context, log_context, logger, setup_logging  # isort: skip
+from .logging import (  # isort: skip
+    bind_log_context,
+    get_log_context,
+    log_context,
+    logger,
+    setup_logging,
+)
 
 __all__ = [
     "EmbeddingModelName",
@@ -16,6 +22,7 @@ __all__ = [
     "RerankerType",
     "Settings",
     "VectorStoreType",
+    "bind_log_context",
     "get_log_context",
     "log_context",
     "logger",
