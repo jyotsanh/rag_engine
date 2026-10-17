@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     ADMIN_API_KEY: SecretStr = Field(min_length=32)
     # server-side pepper mixed into tenant API key hashes
     API_KEY_PEPPER: SecretStr = Field(min_length=32)
+    # retired peppers still accepted during rotation; keys verified with one get re-hashed
+    API_KEY_PEPPER_PREVIOUS: list[SecretStr] = []
     # outbound fetches (crawler, robots, webhooks) may only target these ports
     SSRF_ALLOWED_PORTS: list[int] = [80, 443]
     # ONLY for tests/local fixture sites — never enable in prod
@@ -143,6 +145,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 "CELERY_TASK_SOFT_TIME_LIMIT_SECONDS must be < CELERY_TASK_TIME_LIMIT_SECONDS"
             )
+        if any(len(p.get_secret_value()) < 32 for p in self.API_KEY_PEPPER_PREVIOUS):
+            raise ValueError("every API_KEY_PEPPER_PREVIOUS entry must be >= 32 characters")
         if self.ENVIRONMENT is Environment.PROD and self.SSRF_ALLOW_PRIVATE_NETWORKS:
             raise ValueError("SSRF_ALLOW_PRIVATE_NETWORKS must be false in prod")
         return self

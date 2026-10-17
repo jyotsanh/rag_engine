@@ -472,3 +472,22 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Limits are OpenAI's published ones; Step 62's batcher must respect both `max_batch_inputs` and `max_batch_tokens`.
   - Step 19 should call `resolve_space(model, requested_dims)` when creating a KB so API clients get the typed 422 with min/max details.
 - Next: Step 15: API key service
+
+### Step 15: API key service  (2026-10-17)
+- Status: ✅ done
+- Built:
+  - `rag_engine/security/api_keys.py`:
+    - Key format `rk_<prefix>_<secret>`: 12-char base62 public prefix (lookup) plus 43-char base62 secret (~256 bits), from `secrets`.
+    - `ApiKeyHasher`:
+      - `generate()` → `GeneratedApiKey(plaintext: SecretStr, prefix, key_hash)`; plaintext and hash hidden from repr.
+      - `hash()` = `HMAC-SHA256(API_KEY_PEPPER, full key)` hex. The pepper lives only in settings, so a DB leak alone can't be brute-forced.
+      - `verify(plaintext, stored_hash)` → `VerificationResult(valid, needs_rehash)`: `hmac.compare_digest` against the current pepper **and** every retired pepper (always all of them, so timing doesn't reveal which matched). A match on a retired pepper sets `needs_rehash`.
+      - `burn()` performs equivalent hashing work when a prefix isn't found, so unknown-prefix and wrong-secret responses take the same time.
+    - `parse_api_key(raw)` → `ParsedApiKey(prefix, plaintext)` or `None` (trims whitespace; accepts prefix 8–16 and secret 32–64 to match the `ApiKey` model; rejects other schemes, bad characters, extra parts, a `Bearer ` prefix).
+    - `display_hint(prefix)` → `rk_<prefix>_…` for listings.
+  - Settings: `API_KEY_PEPPER_PREVIOUS: list[SecretStr]` (each ≥32 chars) for zero-downtime pepper rotation; `.env.example` documents the procedure (move the old pepper into the list, set a new one; keys re-hash on next use).
+- Tests: `TestApiKeyService_S15` (24, unit): exact format, 500 unique keys/prefixes, secrets hidden from repr, the hash equals the HMAC spec, pepper changes the hash, a generated key fits the `ApiKey` model, valid/wrong-secret/other-key verify, rotation accepted with `needs_rehash` then a clean re-hash, old keys rejected without the previous pepper, previous-pepper validation, burn, parse ok + 10 malformed cases, display hint. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 308 passed.
+- Decisions/notes:
+  - Step 16 must retry `generate()` on `DuplicateDocumentError` for the (astronomically unlikely) prefix collision.
+  - Step 17 must: `parse_api_key` the header (None → 401) → look up by prefix → if no key, `burn()` and 401 → `verify` → if `needs_rehash`, store `hash()` → check `is_usable()` + tenant active. Every failure gets the same generic 401 so callers can't tell which check failed.
+- Next: Step 16: Tenant & ApiKey repositories
