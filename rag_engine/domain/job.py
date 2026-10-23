@@ -12,6 +12,7 @@ from rag_engine.domain.types import (
     KnowledgeBaseId,
     NonNegativeInt,
     PathPattern,
+    PathPrefix,
     SourceId,
     TenantId,
 )
@@ -31,6 +32,14 @@ class CrawlConfig(BaseModel):
         default_factory=lambda: settings.CRAWL_DEFAULT_MAX_DEPTH,
         ge=0,
         le=settings.CRAWL_HARD_MAX_DEPTH,
+    )
+    include_subdomains: bool = Field(
+        default=False,
+        description="Also crawl other hosts under the seed's registrable domain "
+        "(e.g. docs.acme.com for acme.com). `www.` always counts as the same host.",
+    )
+    path_prefix: PathPrefix | None = Field(
+        default=None, description="Only crawl URLs whose path starts with this, e.g. `/docs/`."
     )
     include_patterns: list[PathPattern] = Field(default_factory=list, max_length=MAX_PATTERNS)
     exclude_patterns: list[PathPattern] = Field(default_factory=list, max_length=MAX_PATTERNS)

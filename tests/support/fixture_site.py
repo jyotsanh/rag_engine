@@ -118,9 +118,10 @@ SITE_PAGES: dict[str, Expect] = {
     "/rate-limited": Expect.RATE_LIMITED,
     "/slow": Expect.TIMEOUT,
     "/large.html": Expect.TOO_LARGE,
-    "/files/large.bin": Expect.TOO_LARGE,
-    "/data.json": Expect.UNSUPPORTED_TYPE,
-    "/images/logo.png": Expect.UNSUPPORTED_TYPE,
+    "/files/huge-catalog.pdf": Expect.TOO_LARGE,  # declares its size up front
+    "/api/widgets": Expect.UNSUPPORTED_TYPE,  # no extension; JSON body
+    "/data.json": Expect.OUT_OF_SCOPE,  # asset extension: skipped before fetching
+    "/images/logo.png": Expect.OUT_OF_SCOPE,
     "/dup-a.html": Expect.HTML,
     "/dup-b.html": Expect.DUPLICATE,  # whichever of dup-a/dup-b is fetched second
     "/canonical-variant.html": Expect.CANONICAL_ELSEWHERE,
@@ -253,7 +254,7 @@ def build_app(state: _State) -> Starlette:
         # no Content-Length: the size limit must be enforced while streaming
         return StreamingResponse(_chunks(), media_type="text/html; charset=utf-8")
 
-    async def large_bin(request: Request) -> Response:
+    async def huge_pdf(request: Request) -> Response:
         await record(request)
 
         async def zeros() -> AsyncIterator[bytes]:
@@ -263,9 +264,13 @@ def build_app(state: _State) -> Starlette:
 
         return StreamingResponse(
             zeros(),
-            media_type="application/octet-stream",
+            media_type="application/pdf",
             headers={"Content-Length": str(LARGE_BODY_BYTES)},
         )
+
+    async def api_widgets(request: Request) -> Response:
+        await record(request)
+        return Response(b'{"widgets": ["WX-2048", "WX-4096"]}', media_type="application/json")
 
     async def gz_sitemap(request: Request) -> Response:
         await record(request)
@@ -317,7 +322,8 @@ def build_app(state: _State) -> Starlette:
         Route("/rate-limited", rate_limited),
         Route("/slow", slow),
         Route("/large.html", large_html),
-        Route("/files/large.bin", large_bin),
+        Route("/files/huge-catalog.pdf", huge_pdf),
+        Route("/api/widgets", api_widgets),
         Route("/sitemap-docs.xml.gz", gz_sitemap),
         Route("/app/advanced", app_advanced),
         Route("/{path:path}", static),

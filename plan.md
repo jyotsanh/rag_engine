@@ -660,3 +660,31 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - `+` in queries is read as a space (form encoding) and re-emitted as `%20`; a literal plus must be `%2B`. This is the common server interpretation.
   - The tracking list is a code constant. Make it a setting later only if tenants need per-site overrides.
 - Next: Step 24: Scope rules
+
+### Step 24: Scope rules  (2026-10-23)
+- Status: ✅ done
+- Built:
+  - `rag_engine/crawling/scope.py`: `CrawlScope` (built per job via `CrawlScope.for_job(seed_url, CrawlConfig)` or `from_config`) → `check(normalized_url, depth)` → `ScopeDecision{allowed, reason: PageReason, detail: ScopeRejection}`. Checks run in this order:
+    1. scheme (http/https)
+    2. **host**: same host as the seed, with `www.` ≡ the bare domain; scheme and port are ignored. With `include_subdomains`, any host under the seed's **registrable domain** via the Public Suffix List (`tldextract`, **bundled snapshot, never downloaded**, **private section on**, so `foo.github.io` ≠ `bar.github.io`). Unknown suffixes fall back to the last two labels; IPs and single-label hosts match exactly only.
+    3. asset extensions (`ASSET_EXTENSIONS`: images, CSS/JS/JSON/XML/feeds/wasm, fonts, audio/video, archives/binaries; PDF/Office documents stay in scope)
+    4. `path_prefix` (literal)
+    5. exclude globs (they win)
+    6. include globs (none = everything)
+    7. depth > `max_depth` → `max_depth`
+  - Rejections use `PageReason.OUT_OF_SCOPE` / `MAX_DEPTH` plus a `ScopeRejection` detail for `Page.reason_detail`: `other_host`, `asset_extension`, `outside_path_prefix`, `excluded_pattern`, `not_included`, `unsupported_scheme`, `too_deep`.
+  - `with_seed_host(host)` re-anchors the scope when the seed redirects to another host (Step 50 must call it after the seed fetch).
+  - `registrable_domain()` (cached).
+  - `domain/types.py`: `compile_glob` lives here (`*` within a segment, `**` across, `?` one char, everything else literal) to avoid a domain↔crawling import cycle. `PathPattern` now **validates** globs (must start with `/`). New `PathPrefix` (starts with `/`, no query/fragment/globs/spaces).
+  - `CrawlConfig`: new `include_subdomains: bool = False` and `path_prefix: PathPrefix | None`, so bad patterns get a 422 at submission.
+- **Fixture site adjusted** (scope now skips asset extensions before fetching):
+  - `/files/large.bin` → `/files/huge-catalog.pdf` (25 MiB `application/pdf` with Content-Length; still `TOO_LARGE`).
+  - New `/api/widgets` (no extension, JSON body) is now the `UNSUPPORTED_TYPE` case.
+  - `/data.json` and `/images/logo.png` → `OUT_OF_SCOPE` (asset).
+  - The Step 9 log entry above still says `large.bin`; this note supersedes it.
+- Deps: runtime `tldextract` 5.4.
+- Tests: `TestCrawlScope_S24` (55, unit): same-host matrix (scheme/port/www ignored; subdomains, suffix tricks and look-alikes rejected), www seed, 9 `include_subdomains` cases (co.uk, github.io private suffix, unknown TLD, IPs, single label), registrable domain, literal path prefix, 9 glob-semantics cases, exclude beats include, no includes = all, 6 asset paths skipped, documents/pages kept, asset list excludes documents, depth limit, scope reported before depth, non-http scheme, re-anchoring, `for_job`, 5 bad `CrawlConfig` patterns → `ValidationError`, and **every fixture-site URL's scope outcome matches `SITE_PAGES`**. Fixture-site tests updated for the new routes. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 538 passed (127 s; integration timing varies 90–130 s run to run).
+- Decisions/notes:
+  - `.json` / `.xml` count as assets for link-following. Sitemaps (XML) are fetched by Step 31's discovery, not via link scope.
+  - Robots rules are not part of scope (Step 29); the engine checks scope first, then robots.
+- Next: Step 25: SSRF guard

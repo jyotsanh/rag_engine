@@ -181,14 +181,18 @@ class TestFixtureSite_S9:
 
         assert received > 20 * 1024 * 1024
 
-    def test_large_bin_declares_content_length(self, http: httpx.Client) -> None:
-        with http.stream("GET", "/files/large.bin") as response:
+    def test_huge_pdf_declares_content_length(self, http: httpx.Client) -> None:
+        with http.stream("GET", "/files/huge-catalog.pdf") as response:
             assert int(response.headers["content-length"]) == LARGE_BODY_BYTES
-            assert response.headers["content-type"] == "application/octet-stream"
+            assert response.headers["content-type"] == "application/pdf"
 
     @pytest.mark.parametrize(
         ("path", "content_type"),
-        [("/data.json", "application/json"), ("/images/logo.png", "image/png")],
+        [
+            ("/api/widgets", "application/json"),
+            ("/data.json", "application/json"),
+            ("/images/logo.png", "image/png"),
+        ],
     )
     def test_unsupported_types(self, http: httpx.Client, path: str, content_type: str) -> None:
         assert http.get(path).headers["content-type"] == content_type
