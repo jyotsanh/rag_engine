@@ -710,3 +710,23 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - The guard decides once per URL. **Step 26 must connect only to `VettedTarget.addresses`** (DNS-rebinding defence) and re-vet every redirect hop. Playwright requests are checked in Step 35, webhooks in Step 83.
   - Step 84 uses `vet()` on the submitted seed URL to return a 422 `url_not_allowed` up front.
 - Next: Step 26: SSRF-safe HTTP client
+
+### Step 26: SSRF-safe HTTP client  (2026-10-23)
+- Status: ✅ done
+- Built: `rag_engine/security/safe_http.py`
+  - `PinnedNetworkBackend` (httpcore `AsyncNetworkBackend`): `connect_tcp(host, port)` connects **only to the IPs pinned for that host by the guard**, trying them in vetted order (falls back on connect failure). Unvetted hosts and unix sockets raise `UnvettedHostError`. httpcore still passes the hostname for `Host`, **TLS SNI and certificate verification**, so pinning doesn't weaken TLS. Pins are a bounded LRU (10k).
+  - `_PinnedTransport`: a minimal httpx transport over an `httpcore.AsyncConnectionPool` with that backend (HTTP/1.1, default certifi SSL context, pool size `max(2×CRAWL_CONCURRENCY, 10)`, keep-alive 30 s), mapping httpcore errors to httpx `TimeoutException` / `NetworkError` / `ProtocolError`.
+  - `SafeHttpClient.stream_get(url, headers)` (async context manager → `SafeResponse{response (unread), chain, url}`):
+    - every hop is `SsrfGuard.vet()`-ed then pinned before connecting
+    - redirects (301/302/303/307/308) are followed manually with intermediate responses closed
+    - loops raise `RedirectLoopError`; more than `CRAWL_MAX_REDIRECTS` raises `TooManyRedirectsError` (both carry `.chain`)
+    - `User-Agent: CRAWL_USER_AGENT`, `Accept-Encoding: gzip, deflate`, connect/read timeouts from settings
+  - **Deliberately not `httpx.AsyncClient`**: no cookie jar (it would leak cookies between tenants' crawls), no auth, no `HTTP(S)_PROXY` env handling (a proxy would bypass pinning).
+- Fixture site: unlinked open redirect `/redirect-to?url=…` for tests (doesn't affect `SITE_PAGES`).
+- Deps: dev `trustme` (test CA + certificates).
+- Tests: `TestSafeHttpClient_S26` (14, unit, loopback): an OS-unresolvable `acme.test` stub-pinned to 127.0.0.1 is fetched (proves pinning) with the `Host` header and User-Agent preserved and DNS resolved exactly once; redirect chain reported; loop detected; redirect cap; redirect to the metadata IP blocked **before any connection**; open redirect to a host resolving to metadata blocked (second hop never contacted); redirect to `file://` blocked; strict guard blocks hop 1 with zero requests reaching the server; backend refuses unvetted hosts and unix sockets; bounded pin LRU; fallback from a refusing pinned IP to the next. **Real TLS** (uvicorn + trustme CA): connection pinned to 127.0.0.1 verifies the cert for `secure.test` and sends `Host: secure.test`; the same server reached as `other.test` fails verification (proves SNI/verification use the hostname, not the IP); an untrusted CA fails. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 622 passed (104 s).
+- Decisions/notes:
+  - HTTP/2 off for now (crawling many origins gets little from multiplexing; fewer moving parts). Revisit only with evidence.
+  - Only GET is exposed. Step 83's webhook delivery adds a POST path that does **not** follow redirects.
+  - Step 27 builds on `stream_get` for streaming size caps, content-type checks and charset detection, and must map `RedirectLoopError` → `redirect_loop`, `TooManyRedirectsError` → `too_many_redirects`, `SsrfBlockedError` → `ssrf_blocked`, `HostResolutionError`/`httpx.NetworkError` → `network_error`, `httpx.TimeoutException` → `timeout`.
+- Next: Step 27: HTTP fetcher

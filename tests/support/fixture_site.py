@@ -212,6 +212,11 @@ def build_app(state: _State) -> Starlette:
 
         return endpoint
 
+    async def redirect_to(request: Request) -> Response:
+        """Open redirect (unlinked): lets tests point a hop at any host."""
+        await record(request)
+        return RedirectResponse(request.query_params["url"], status_code=302)
+
     async def error(request: Request) -> Response:
         await record(request)
         return HTMLResponse(_html("Error", "<h1>Internal error</h1>"), status_code=500)
@@ -317,6 +322,7 @@ def build_app(state: _State) -> Starlette:
         Route("/loop-a", redirect("/loop-b", 302)),
         Route("/loop-b", redirect("/loop-a", 302)),
         Route("/redirect-metadata", redirect(METADATA_URL, 302)),
+        Route("/redirect-to", redirect_to),
         Route("/error", error),
         Route("/flaky", flaky),
         Route("/rate-limited", rate_limited),

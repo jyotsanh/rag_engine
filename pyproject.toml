@@ -45,6 +45,7 @@ dev = [
     "python-pptx>=1.0",
     "ruff>=0.14",
     "testcontainers[mongodb,qdrant,redis]>=4.13",
+    "trustme>=1.2",
     "ty>=0.0.1a20",
 ]
 
