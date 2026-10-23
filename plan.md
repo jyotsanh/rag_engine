@@ -688,3 +688,25 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - `.json` / `.xml` count as assets for link-following. Sitemaps (XML) are fetched by Step 31's discovery, not via link scope.
   - Robots rules are not part of scope (Step 29); the engine checks scope first, then robots.
 - Next: Step 25: SSRF guard
+
+### Step 25: SSRF guard  (2026-10-23)
+- Status: ✅ done
+- Built: `rag_engine/security/ssrf.py`
+  - `SsrfGuard(config, resolver, dns_timeout_seconds)`:
+    - `check_static(url)`: scheme http/https; port in `SSRF_ALLOWED_PORTS`; blocked hostnames (`localhost`, `*.localhost`, `metadata`, `metadata.google.internal`, `instance-data[.ec2.internal]`).
+    - `vet(url)` → `VettedTarget{scheme, host, port, addresses}`: IP literals skip DNS; otherwise **all** A/AAAA records are resolved (with a timeout) and **every one must pass**, so one private record blocks the host (defeats mixed public/private DNS answers). Returns the de-duplicated vetted IPs for Step 26 to pin. IPv6 zone ids are stripped.
+  - `classify(ip, allow_private)` returns `None` or an `SsrfRejection`:
+    - **Cloud metadata IPs are always blocked**: 169.254.169.254, 169.254.170.2, 169.254.169.123, 100.100.100.200, 192.0.0.192, fd00:ec2::254/23.
+    - Embedded IPv4 is unwrapped and checked: IPv4-mapped, **NAT64** (`64:ff9b::/96`, which reports `is_global=True` even for 127.0.0.1), 6to4, Teredo. 6to4/Teredo are rejected as reserved even when the inner IP is public.
+    - Unspecified and multicast are always blocked (`ff0e::` also reports `is_global=True`).
+    - Global unicast is allowed.
+    - Loopback, link-local and **explicitly defined** private ranges (RFC 1918, CGNAT 100.64/10, ULA fc00::/7) are allowed only with `SSRF_ALLOW_PRIVATE_NETWORKS`.
+    - Everything else (240/4, broadcast, TEST-NETs, benchmarking, 2001:db8::/32…) is reserved and always blocked.
+  - `SSRF_ALLOW_PRIVATE_NETWORKS` (forbidden in prod) also lifts the port allowlist so tests can reach the fixture site on its random loopback port, but metadata names and IPs stay blocked.
+  - Errors: `SsrfBlockedError` (`AppValidationError`, 422 `url_not_allowed`, details `{reason, host}`, **never the resolved IPs**, so the guard can't be used as a DNS oracle; `.rejection` for `Page.reason_detail`). `HostResolutionError` for DNS failure/timeout is a network error, not an SSRF verdict (→ `PageReason.NETWORK_ERROR`).
+- **Bug caught while writing tests:** the first draft used `ipaddress.is_private` for "private networks", but it also covers reserved, broadcast and documentation ranges, so with private networks allowed `240.0.0.1` / `255.255.255.255` / TEST-NETs would have passed. Replaced with the explicit `PRIVATE_NETWORKS` list and covered by tests.
+- Tests: `TestSsrfGuard_S25` (70, unit): 35-address classification matrix (public v4/v6, loopback, RFC 1918, CGNAT, ULA, link-local, 3 metadata, unspecified, multicast incl. `ff0e::1`, broadcast/240/TEST-NET/benchmarking/documentation, IPv4-mapped, NAT64 → loopback and → metadata, 6to4, Teredo); 13-case `allow_private` matrix (private/loopback allowed; metadata, reserved, multicast, unspecified still blocked); vetted addresses de-duplicated; one private record blocks a host (no IP in error details); IP literals skip DNS; DNS failure and timeout → `HostResolutionError`; no records → blocked; zone id stripped; 11 static rejections (file/ftp/gopher, ports 22/6379/8443, localhost names, metadata names incl. upper-case + trailing dot); configured extra port allowed; allow-private permits loopback/localhost and any port but not metadata by IP or name; real system resolver on localhost; fixture site reachable only with private networks allowed, and its metadata redirect target blocked even then. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 608 passed (91 s).
+- Decisions/notes:
+  - The guard decides once per URL. **Step 26 must connect only to `VettedTarget.addresses`** (DNS-rebinding defence) and re-vet every redirect hop. Playwright requests are checked in Step 35, webhooks in Step 83.
+  - Step 84 uses `vet()` on the submitted seed URL to return a 422 `url_not_allowed` up front.
+- Next: Step 26: SSRF-safe HTTP client
