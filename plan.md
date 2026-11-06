@@ -900,3 +900,42 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Sitemap bodies are held in memory up to `SITEMAP_MAX_BYTES` (50 MiB) one at a time. Inflated output is the same order, since `iterparse` reads from an in-memory buffer.
   - Discovery is sequential by design (politeness, simplicity). A site with 50 child sitemaps at a 0.5 s interval takes ~25 s.
 - Next: Step 32: Link extraction
+
+### Step 32: Link extraction  (2026-11-06)
+- Status: ✅ done
+- Built: `rag_engine/crawling/links.py` (exported from `rag_engine.crawling`)
+  - `LinkExtractor(config).extract(html, page_url, *, scope, depth, headers=None) -> PageLinks`:
+    - Sources: `<a href>`, `<area href>`, and the `<meta http-equiv="refresh">` target (`LinkSource`).
+    - Relative URLs resolve against the **first `<base>` with an href** (itself resolved against the page), else the page's final URL. Then `normalize_url`, de-dupe (first anchor text kept), self-links (incl. `#fragment`) dropped.
+    - `scope.check(url, depth + 1)`. Rejections are kept with their `ScopeDecision`, so `MAX_DEPTH` stays distinct from `OUT_OF_SCOPE`. Non-http(s) schemes (mailto/tel/javascript/data/ftp) are `rejected` as `unsupported_scheme` with the raw URL, matching the fixture's `OUT_OF_SCOPE` expectations. Hrefs that aren't URLs count as `invalid`.
+    - **nofollow policy** (`CRAWL_RESPECT_NOFOLLOW`, default on):
+      - `rel~=nofollow`, and page-wide nofollow from `<meta name="robots|ragenginebot">` or `X-Robots-Tag`, move in-scope links to `nofollow` instead of `follow`.
+      - A URL linked both ways on a page is followed.
+      - `noindex`/`none` are reported as `PageLinks.noindex` for extraction.
+      - `ugc`/`sponsored` are hints, not directives: followed.
+    - `parse_x_robots_tag(value, token)`: directives with no UA prefix or with our token. A `ua:` prefix scopes the following directives. Valued directives (`unavailable_after:` …) aren't mistaken for UA prefixes.
+    - Canonical: `<link rel="canonical">` wins over a `Link: <…>; rel="canonical"` header (`canonical_from_link_header`). It is resolved against the base and normalized, but **not scope-checked**. `canonical_is_self` is provided.
+    - `Link{url, text (collapsed, ≤200 chars), source, is_document}`: `is_document` comes from the URL extension (`EXTENSION_KINDS`). Document links are followed like pages; the content type decides later.
+    - `CRAWL_MAX_LINKS_PER_PAGE` (5000) caps the candidates; `capped` is flagged.
+    - Parsing: lxml `document_fromstring` on **bytes** with an explicit UTF-8 parser. lxml rejects `str` that carries an XML encoding declaration (XHTML). Empty/garbage HTML gives an empty result, never an exception.
+  - `filter_urls(urls, page_url, scope, depth)`: the same normalize/scope/dedupe for links found outside HTML (Step 41 PDF link annotations, etc.).
+- **Bug fixes found while testing:**
+  - `normalize_url(url, base=…)` (Step 23) leaked a raw `ValueError` from `urljoin` for malformed IPv6 netlocs (`https://[bad`). A page with such a `<base>`/canonical/href would have crashed extraction. It now raises `UrlNormalizationError`. The link classifier also guards its own `urljoin`/`urlsplit`.
+  - `TestHttpFetcher_S27::test_dns_failure_is_a_network_error` used real DNS and failed once when the resolver was slower than the 3 s fetch cap (it got `timeout` instead of `network_error`). It now uses a stub resolver.
+- Settings: `CRAWL_RESPECT_NOFOLLOW` (true), `CRAWL_MAX_LINKS_PER_PAGE` (5000, ≤100 000). `.env.example` updated.
+- Deps: runtime `lxml` (was transitive via python-docx/pptx; Step 39 trafilatura needs it too). Dev `types-lxml` (ty can't see the compiled `lxml.etree` otherwise).
+- Tests: `TestLinkExtraction_S32` (62, unit):
+  - Resolution: relative/`..`/protocol-relative/query/fragment resolution; normalization + dedupe; page URL normalized.
+  - `<base>`: 4 cases (absolute path, relative, first href wins, empty) and a base on another host moving links out of scope.
+  - Scope and URL validity: depth+1 with reasons; 5 non-http schemes rejected, not invalid; invalid/empty/missing hrefs.
+  - nofollow: rel nofollow incl. a multi-token rel; follow wins in both orders; policy off; 7 meta robots cases; 9 `X-Robots-Tag` parses; header applied.
+  - Canonical: relative + tracking-stripped, self-canonical, Link header and HTML precedence, 5 header parses.
+  - Other sources and limits: 3 meta-refresh formats and the no-URL refresh; `<area>`; document flags; anchor text; link cap.
+  - Robustness: 5 malformed inputs; XHTML with an encoding declaration; malformed base/canonical ignored (regression); `normalize_url` raises its own error (regression); `filter_urls`.
+  - Fixture site: home page (pages, the `?ref=home` variant, 7 document links, only `nofollow-target` held back, all 7 rejections documented `OUT_OF_SCOPE` in `SITE_PAGES`, `#downloads` dropped); `reference.html`'s relative `deep/level4.html`; `canonical-variant.html` → getting-started.
+  - Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 934 passed (124 s).
+- Decisions/notes:
+  - **Step 50 (engine)**: enqueue `follow` at `depth + 1`. Record `nofollow` URLs as `skipped/nofollow` **only if no followable link reaches them by the end of the crawl** (the frontier's unique index makes "followed later" win). Record `rejected` per `decision.reason/detail` if the job wants them in the report (they can be numerous: consider counts only).
+  - **Step 39 (HTML extractor)** should reuse `PageLinks.noindex` (skip indexing, still follow links unless nofollow), and Step 46 uses `canonical_url` for `canonical_elsewhere`.
+  - The JS-rendered DOM (Step 36) goes through the same `extract()` with the rendered HTML.
+- Next: Step 33: JS-shell detector

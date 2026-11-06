@@ -1,5 +1,6 @@
 """HTTP fetcher against the fixture site: kinds, sizes, timeouts, charsets, typed errors."""
 
+import socket
 import time
 from collections.abc import AsyncIterator
 
@@ -23,7 +24,7 @@ from rag_engine.crawling.fetchers import (
     parse_retry_after,
 )
 from rag_engine.domain import ContentKind, PageReason, RenderedWith
-from rag_engine.security import SafeHttpClient
+from rag_engine.security import SafeHttpClient, SsrfGuard
 from tests.conftest import OverrideSettings
 from tests.support.fixture_site import FixtureSite
 
@@ -225,9 +226,14 @@ class TestHttpFetcher_S27:
 
         assert exc.value.reason is PageReason.NETWORK_ERROR
 
-    async def test_dns_failure_is_a_network_error(self, fetcher: HttpFetcher) -> None:
-        with pytest.raises(NetworkFetchError) as exc:
-            await fetcher.fetch("http://does-not-exist.invalid/")
+    async def test_dns_failure_is_a_network_error(self, config: Settings) -> None:
+        # stub resolver: real DNS made this flaky when the machine's resolver was slow
+        async def resolver(host: str, port: int) -> list[str]:
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+        async with SafeHttpClient(config, guard=SsrfGuard(config, resolver=resolver)) as client:
+            with pytest.raises(NetworkFetchError) as exc:
+                await HttpFetcher(client, config).fetch("http://does-not-exist.invalid/")
 
         assert exc.value.detail == "dns"
 

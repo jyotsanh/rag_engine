@@ -143,6 +143,10 @@ class Settings(BaseSettings):
     CRAWL_RETRY_MAX_DELAY_SECONDS: float = Field(default=30.0, gt=0)
     # a longer Retry-After than this makes the page fail instead of waiting (or retrying early)
     CRAWL_RETRY_AFTER_MAX_SECONDS: float = Field(default=120.0, ge=0)
+    # skip links marked rel="nofollow" (and every link on meta/X-Robots-Tag nofollow pages)
+    CRAWL_RESPECT_NOFOLLOW: bool = True
+    # link candidates considered per page; link farms beyond this are cut (and flagged)
+    CRAWL_MAX_LINKS_PER_PAGE: int = Field(default=5_000, gt=0, le=100_000)
     CRAWL_RENDER_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
     # sitemaps: per-file byte cap (compressed download and inflated; protocol max is 50 MB),
     # files fetched per discovery, and sitemap-index nesting (the protocol allows 1)

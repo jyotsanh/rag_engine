@@ -11,6 +11,7 @@ dependencies = [
     "fastapi>=0.120",
     "idna>=3.10",
     "loguru>=0.7.3",
+    "lxml>=6.1.3",
     "protego>=0.7.0",
     "pydantic>=2.12",
     "pydantic-settings>=2.13",
@@ -50,6 +51,7 @@ dev = [
     "testcontainers[mongodb,qdrant,redis]>=4.13",
     "trustme>=1.2",
     "ty>=0.0.1a20",
+    "types-lxml>=2026.2.16",
 ]
 
 ### linting and formatting (ruff)

@@ -129,11 +129,11 @@ def normalize_url(url: str, base: str | None = None) -> str:
     if not isinstance(url, str):
         raise UrlNormalizationError("URL must be a string")
     raw = _INTERNAL_WHITESPACE.sub("", url.strip())
-    if base is not None:
-        raw = urljoin(_INTERNAL_WHITESPACE.sub("", base.strip()), raw)
-    if not raw:
-        raise UrlNormalizationError("URL is empty")
     try:
+        if base is not None:
+            raw = urljoin(_INTERNAL_WHITESPACE.sub("", base.strip()), raw)
+        if not raw:
+            raise UrlNormalizationError("URL is empty")
         parts = urlsplit(raw)
         port = parts.port
     except ValueError as exc:
