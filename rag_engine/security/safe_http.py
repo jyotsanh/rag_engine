@@ -201,12 +201,49 @@ class SafeHttpClient:
     async def __aexit__(self, *exc: object) -> None:
         await self.aclose()
 
-    def _request(self, url: str, headers: dict[str, str] | None) -> httpx.Request:
-        merged = {"User-Agent": self._user_agent, "Accept-Encoding": "gzip, deflate"}
+    def _request(
+        self,
+        url: str,
+        headers: dict[str, str] | None,
+        method: str = "GET",
+        content: bytes | None = None,
+    ) -> httpx.Request:
+        merged = {"User-Agent": self._user_agent}
         merged |= headers or {}
+        # only encodings httpx can decode here; a browser would advertise br/zstd too
+        merged["Accept-Encoding"] = "gzip, deflate"
         return httpx.Request(
-            "GET", url, headers=merged, extensions={"timeout": self._timeout.as_dict()}
+            method,
+            url,
+            headers=merged,
+            content=content,
+            extensions={"timeout": self._timeout.as_dict()},
         )
+
+    @contextlib.asynccontextmanager
+    async def send_once(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        content: bytes | None = None,
+    ) -> AsyncGenerator[httpx.Response]:
+        """One vetted, pinned request; redirects are **returned, not followed**.
+
+        For callers that handle redirects themselves (the headless browser re-requests
+        every hop, and each hop comes back through here to be vetted). Body unread.
+        Raises `SsrfBlockedError` / `HostResolutionError` and httpx transport errors.
+        """
+        target = await self._guard.vet(url)
+        self._backend.pin(target)
+        response = await self._transport.handle_async_request(
+            self._request(url, headers, method=method, content=content)
+        )
+        try:
+            yield response
+        finally:
+            await response.aclose()
 
     @contextlib.asynccontextmanager
     async def stream_get(

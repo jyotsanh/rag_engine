@@ -31,7 +31,8 @@ async def make_pool(override_settings: OverrideSettings) -> AsyncIterator[MakePo
     pools: list[BrowserPool] = []
 
     def make(**overrides: object) -> BrowserPool:
-        config: Settings = override_settings(**overrides)
+        # the fixture site lives on loopback, which the browser's SSRF guard (S35) blocks
+        config: Settings = override_settings(SSRF_ALLOW_PRIVATE_NETWORKS=True, **overrides)
         pool = BrowserPool(config)
         pools.append(pool)
         return pool
@@ -243,8 +244,10 @@ class TestBrowserPool_S34:
             with pytest.raises(RenderError) as exc:
                 await job.render(f"http://127.0.0.1:{port}/")
 
-        assert "ERR_CONNECTION_REFUSED" in str(exc.value)
+        # S35: the request is made by our client; its failure reaches the page as an abort
+        assert "net::ERR_" in str(exc.value)
         assert exc.value.reason is PageReason.RENDER_FAILED
+        assert job.stats.blocked["network"] == 1
 
     # ---- process binding ---- #
 

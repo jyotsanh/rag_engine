@@ -1,5 +1,6 @@
 """SSRF-safe HTTP client: IP pinning, Host/SNI preservation, redirect vetting."""
 
+import json
 import socket
 import ssl
 import threading
@@ -290,3 +291,42 @@ class TestSafeHttpClient_S26:
         with pytest.raises(httpx.NetworkError):
             async with client, client.stream_get(f"https://secure.test:{tls_server.port}/"):
                 pass
+
+
+class TestSendOnce_S35:
+    """S35 — `SafeHttpClient.send_once`: one vetted, pinned hop that returns redirects."""
+
+    async def test_redirect_is_returned_not_followed(
+        self, config: Settings, fixture_site: FixtureSite
+    ) -> None:
+        async with (
+            SafeHttpClient(config) as client,
+            client.send_once("GET", fixture_site.url("/redirect-me")) as response,
+        ):
+            assert response.status_code == 301
+            assert response.headers["location"].endswith("/docs/getting-started.html")
+
+        assert fixture_site.hits("/docs/getting-started.html") == 0
+
+    async def test_method_and_body_are_sent(
+        self, config: Settings, fixture_site: FixtureSite
+    ) -> None:
+        async with (
+            SafeHttpClient(config) as client,
+            client.send_once(
+                "POST", fixture_site.url("/browser/echo"), content=b"hello world"
+            ) as response,
+        ):
+            echoed = json.loads(await response.aread())
+
+        assert echoed == {"method": "POST", "cookie": None, "body_bytes": 11}
+
+    async def test_hop_is_vetted_before_connecting(self, config: Settings) -> None:
+        client, resolver = _client(config, {"evil.test": ["169.254.169.254"]})
+
+        async with client:
+            with pytest.raises(SsrfBlockedError):
+                async with client.send_once("GET", "http://evil.test/"):
+                    pass
+
+        assert resolver.calls == ["evil.test"]

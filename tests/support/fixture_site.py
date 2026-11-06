@@ -26,6 +26,7 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import (
     HTMLResponse,
+    JSONResponse,
     PlainTextResponse,
     RedirectResponse,
     Response,
@@ -67,6 +68,39 @@ body{font-family:Fx,sans-serif}</style>
     "font.woff2": (b"wOF2" + b"\x00" * 64, "font/woff2"),
     "clip.mp4": (b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64, "video/mp4"),
     "logo.png": (_PNG_1X1, "image/png"),
+    # Step 35: in-page SSRF / policy probes; each result lands in <body data-*>
+    "ssrf.html": (
+        b"""<!doctype html><html><head><title>Probes</title></head><body><h1>Probes</h1>
+<script>
+async function probe(name, url, opts) {
+  try { await fetch(url, opts); document.body.dataset[name] = "ok"; }
+  catch (e) { document.body.dataset[name] = "blocked"; }
+}
+(async () => {
+  await probe("metadata", "http://169.254.169.254/latest/meta-data/");
+  await probe("metaname", "http://metadata.google.internal/computeMetadata/v1/");
+  await probe("evil", "http://evil.test/");
+  await probe("same", "/browser/echo");
+  await probe("post", "/browser/echo", {method: "POST", body: "hello"});
+  await probe("put", "/browser/echo", {method: "PUT", body: "x"});
+  await probe("del", "/browser/echo", {method: "DELETE"});
+  await new Promise((done) => {
+    const ws = new WebSocket("ws://" + location.host + "/browser/ws");
+    ws.onopen = () => { document.body.dataset.ws = "open"; done(); };
+    ws.onclose = () => { document.body.dataset.ws = document.body.dataset.ws || "closed"; done(); };
+    setTimeout(done, 3000);
+  });
+  try {
+    const registration = await navigator.serviceWorker.register("/browser/sw.js");
+    document.body.dataset.sw = registration ? "registered" : "blocked";
+  } catch (e) { document.body.dataset.sw = "blocked"; }
+  document.body.dataset.done = "1";
+})();
+</script></body></html>""",
+        "text/html; charset=utf-8",
+    ),
+    "sw.js": (b"self.addEventListener('fetch', () => {});", "text/javascript"),
+    "download.bin": (b"\x00" * 1024, "application/octet-stream"),
 }
 
 # ---- sitemap edge cases, served (unlinked) at /sitemaps/<name>; Step 31 tests ---- #
@@ -403,7 +437,31 @@ def build_app(state: _State) -> Starlette:
 
     async def browser_asset(request: Request) -> Response:
         await record(request)
-        asset = BROWSER_ASSETS.get(request.path_params["name"])
+        name = request.path_params["name"]
+        if name == "echo":  # what reached the server: method, cookies, body size
+            body = await request.body()
+            return JSONResponse(
+                {
+                    "method": request.method,
+                    "cookie": request.headers.get("cookie"),
+                    "body_bytes": len(body),
+                }
+            )
+        if name == "set-cookie":
+            response = HTMLResponse(_html("Cookies", "<h1>Cookies set</h1>"))
+            response.set_cookie("first", "1")
+            response.set_cookie("second", "2")
+            return response
+        if name == "download.bin":
+            body, media_type = BROWSER_ASSETS[name]
+            return Response(
+                body,
+                headers={
+                    "Content-Type": media_type,
+                    "Content-Disposition": 'attachment; filename="download.bin"',
+                },
+            )
+        asset = BROWSER_ASSETS.get(name)
         if asset is None:
             return HTMLResponse(_html("Not found", "<h1>Not found</h1>"), status_code=404)
         body, media_type = asset
@@ -492,7 +550,11 @@ def build_app(state: _State) -> Starlette:
         Route("/drip", drip),
         Route("/sitemap-docs.xml.gz", gz_sitemap),
         Route("/sitemaps/{name:str}", sitemap_edge),
-        Route("/browser/{name:str}", browser_asset),
+        Route(
+            "/browser/{name:str}",
+            browser_asset,
+            methods=["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
+        ),
         Route("/app/advanced", app_advanced),
         Route("/{path:path}", static),
     ]

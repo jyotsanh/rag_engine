@@ -999,3 +999,40 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
 - **Test-robustness fix (Step 30)**: `test_acquire_really_waits` failed once under heavy machine load (load average ~11 from other apps), because it asserted a minimum gap between *wake-up* times. It now asserts only load-proof facts: elapsed ≥ 9 intervals (sleeps never end early) and booked slots never closer than one interval.
 - Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 983 passed (344 s on a heavily loaded machine; the browser tests alone take ~53 s, and the suite without them took 105 s at Step 33). No leftover Chromium processes after the run.
 - Next: Step 35: Browser SSRF enforcement
+
+### Step 35: Browser SSRF enforcement  (2026-11-06)
+- Status: ✅ done
+- Design decision: **Chromium never opens a connection itself.** The plan text says "`context.route` validates every request host". But validating then `route.continue_()` leaves a DNS-rebinding window: Chromium re-resolves after our check. So the router **performs** every allowed request through the pinned client and `route.fulfill`s the response.
+- Built:
+  - `SafeHttpClient.send_once(method, url, headers=, content=)` (`security/safe_http.py`): one vetted + pinned hop, with redirects **returned, not followed**. `Accept-Encoding` is forced to `gzip, deflate` (what httpx decodes; browsers advertise br/zstd).
+  - `fetchers/browser.py` router, per request:
+    1. Blocked resource type → abort.
+    2. Method not in `ALLOWED_METHODS` = GET/HEAD/POST/OPTIONS → abort `method:<M>`. POST stays allowed because GraphQL reads use it.
+    3. Optional `request_guard`.
+    4. `_fetch` via `send_once`, with the `CRAWL_MAX_PAGE_BYTES` cap on decoded bytes and the `CRAWL_FETCH_TIMEOUT_SECONDS` cap. Then `route.fulfill(status, headers, body)`. Content-encoding/length/hop-by-hop headers are dropped, and repeated `Set-Cookie` values are newline-joined (`_fulfill_headers`).
+    - Failures abort with Chromium error codes and a `ContextStats.blocked` key: `ssrf:<rejection>` (blockedbyclient), `dns` (namenotresolved), `timeout`, `network`, `too_large`, `too_many_redirects`.
+    - Request headers from the browser are forwarded (incl. `cookie`), minus host/hop-by-hop/content-length/accept-encoding/pseudo-headers.
+  - **Redirects (found by the backstop test):** a fulfilled 3xx is followed by Chromium *outside* interception. The dead proxy caught it (`ERR_PROXY_CONNECTION_FAILED`). Now:
+    - **Main-frame navigation:** the router parks the vetted `Location` and aborts. The new `BrowserJobContext.goto(page, url)` (used by `render`) re-navigates, so `page.url`/relative links/`location` stay right and each hop is vetted. Loops and `CRAWL_MAX_REDIRECTS` raise `RenderError`.
+    - **Subresources and iframes:** followed server-side hop by hop, each vetted. 303 (and POST on 301/302) becomes GET. **`Cookie`/`Authorization` are dropped when a hop changes origin.**
+  - **Backstop:** Chromium is launched with `--proxy-server=http://127.0.0.1:<port>` on a socket that is **bound but never listening** (connections refused instantly) plus `--proxy-bypass-list=<-loopback>`. Any traffic that escapes routing (preconnect, prefetch, a stray `continue_`) dies. Also `--dns-prefetch-disable` and `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`.
+  - Context options: `accept_downloads=False`, `service_workers="block"` (`register()` then resolves to `undefined` and the script is never fetched). `context.route_web_socket("**/*")` closes every WebSocket (1008) without connecting.
+  - The pool owns a `SafeHttpClient` (created on launch, closed on `stop()`, dropped on fork) and the dead-proxy socket. `BrowserPool(config, ssrf_guard=...)` accepts a guard (stub resolvers in tests).
+- Fixture site: `/browser/ssrf.html` probe page (metadata IP, metadata name, `evil.test`, same-origin GET/POST/PUT/DELETE, WebSocket, service worker → `data-*` results); `/browser/echo` (method/cookie/body size, all methods); `/browser/set-cookie` (two cookies); `/browser/sw.js`; `/browser/download.bin` (attachment).
+- Tests:
+  - `TestBrowserSsrf_S35` (14, browser; stub resolver with `site.test`, `evil.test` → metadata, and `rebind.test` → loopback then metadata):
+    - The browser never resolves or connects itself: an OS-unknown `site.test` page and its subresources load only via our client, with the Host header preserved.
+    - The strict guard blocks a loopback document with 0 server hits.
+    - In-page probes: metadata IP/name/`evil.test` blocked, PUT/DELETE blocked (never reach the server), GET/POST ok, WebSocket closed, service worker blocked.
+    - Redirects: every navigation hop vetted (chain followed; metadata hop blocked after hop 1 hit); navigation loop and redirect cap; subresource redirects followed and vetted.
+    - **DNS rebinding**: the document is pinned to the first answer, and the rebound subresources are blocked with no connection.
+    - Credentials not carried across origins (same-origin hop keeps the cookie).
+    - Download refused; traffic outside routing dies at the dead proxy; cookies round-trip; gzip decoded; oversized response aborted; `_fulfill_headers`.
+  - `TestSendOnce_S35` (3, unit): 301 returned not followed; method+body sent; hop vetted before connecting.
+  - Step 34 browser tests now set `SSRF_ALLOW_PRIVATE_NETWORKS=True` (the fixture is loopback). The refused-connection test now asserts the forwarded `network` abort.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1000 passed (192 s). The browser suite went 53 s → 41 s for 31 tests. No leftover Chromium processes.
+- Decisions/notes:
+  - All browser traffic is buffered in Python per resource (≤ `CRAWL_MAX_PAGE_BYTES`). Fine for documents/scripts/XHR with images/fonts/media blocked. Streaming media would need a different path, and it's blocked anyway.
+  - Main-frame redirects triggered by JS *after* load (`location.href = …` during the networkidle wait) are parked and not followed. Step 36 decides whether to follow them, and meta-refresh targets are already outlinks (Step 32).
+  - Intermediate `Set-Cookie` headers on server-side-followed subresource redirects are not applied (rarely matters for crawling).
+- Next: Step 36: Auto fetcher
