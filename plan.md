@@ -859,3 +859,44 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Retries (Step 28) must also go through `acquire`, so retry traffic counts against the host budget.
   - Robots.txt and sitemap fetches are **not** rate-limited for now. They are one request per origin per TTL; Step 31 may put sitemap fetches through the limiter if a site has many child sitemaps.
 - Next: Step 31: Sitemap discovery
+
+### Step 31: Sitemap discovery  (2026-11-06)
+- Status: ✅ done
+- Built: `rag_engine/crawling/sitemap.py` (exported from `rag_engine.crawling`)
+  - `SitemapDiscoverer(fetcher, robots=None, limiter=None, config, policy)`:
+    - `discover(seed_url, scope, max_urls=None)`: the seed origin's robots.txt `Sitemap:` lines (if robots is `ok`/`stale`), then `/sitemap.xml`.
+    - `read(sitemap_urls, scope, max_urls=None)`: explicitly given sitemaps.
+    - Traversal: breadth-first over sitemap indexes, sitemaps de-duplicated by normalized URL (loops and self-references are ignored), fetched **sequentially** through `call_with_retries` and, when given, `DomainRateLimiter.acquire(crawl_delay=robots.crawl_delay)`.
+    - Which sitemaps may be fetched:
+      - robots-declared ones may be on any host (cross-submission).
+      - Index children and the fallback must pass `scope.allows_host` (else `out_of_scope_host`) and that host's robots.txt (else `robots_disallowed`, not fetched).
+    - The guessed `/sitemap.xml` is silent when it returns 4xx or a soft-404 page. A 5xx there is reported.
+  - Page URLs: normalized, de-duplicated, then `scope.check(url, depth=0)`. `<loc>` whitespace is stripped; non-crawlable locs are counted as `invalid`. robots.txt rules for pages are **not** applied here (the engine does that per URL).
+  - `SitemapReport`: `entries` (`SitemapEntry{url, lastmod (aware UTC), sitemap}`), `urls`, `sitemaps_read`, `failures` (`SitemapFailure{sitemap, problem, detail}`), `out_of_scope`, `invalid`, `duplicates`, `caps_hit` (`max_urls` / `max_files` / `entries_per_file`). A broken sitemap is reported and skipped; discovery carries on.
+  - `SitemapProblem`: `fetch_failed` (detail `"<PageReason>: <detail>"`), `too_large`, `invalid_xml`, `forbidden_xml`, `unsupported_format`, `too_deep`, `out_of_scope_host`, `robots_disallowed`.
+  - `parse_sitemap(bytes) -> ParsedSitemap{kind, items, capped}`:
+    - `urlset` / `sitemapindex` XML is parsed **incrementally** with defusedxml `iterparse(forbid_dtd=True)`, so DTDs and entities are refused (no billion laughs, no XXE). The root is cleared per entry, so 50k-entry files stay flat in memory.
+    - Namespace-agnostic (missing or wrong `xmlns` is fine). BOM tolerated. Plain-text URL-list sitemaps are supported.
+    - RSS/Atom/HTML → `unsupported_format`. Capped at `MAX_ENTRIES_PER_FILE` = 50 000 (protocol).
+  - `inflate(body, max_bytes)`: gzip detected by **magic bytes**, since `.gz` sitemaps are usually served as `application/gzip`, not `Content-Encoding`. Inflated through `zlib.decompressobj(max_length)`, so a bomb never allocates more than the cap. A **truncated stream** raises `invalid_xml`: zlib returns the partial data without error, and a test caught this.
+  - `parse_lastmod`: W3C datetime/date → aware UTC; garbage → `None`.
+- Refactor: the `RawFetcher` protocol moved from `robots.py` to `fetchers/http.py` (next to `RawResponse`). Re-exported unchanged.
+- Settings: `SITEMAP_MAX_BYTES` (50 MiB, applies to the download and to the inflated body), `SITEMAP_MAX_FILES` (50, ≤1000), `SITEMAP_MAX_DEPTH` (3, index nesting; the protocol allows 1, real sites nest). `.env.example` updated.
+- Deps: runtime `defusedxml`.
+- Fixture site: unlinked `/sitemaps/<name>` edge cases: `loop-index.xml`, `mixed.xml` (no namespace, lastmod variants, duplicate/invalid/missing locs) and `mixed.xml.gz` (`application/x-gzip`), `nested-1..3.xml`, `foreign-index.xml`, `urls.txt`, `feed.xml`, `broken.xml`, `laughs.xml`, `soft-404.html`, `bomb.xml.gz` (4 MiB inflated), `big.xml?n=N`.
+- Tests: `TestSitemapDiscovery_S31` (48, unit):
+  - Parsing: lastmod matrix; urlset/index; optional namespace + BOM; text sitemap; 8 unusable documents (rss, atom, html, words, truncated, garbage, entities, XXE); per-file cap; inflate passthrough, bomb, garbage and truncated gzip.
+  - Fixture site:
+    - Full discovery: the 8 expected URLs, the 3 sitemaps read in order incl. gzip, 1 offsite out of scope, no failure for the absent fallback.
+    - Caps: `path_prefix` scope; `max_urls` stops before fetching the next sitemap; `max_files`; per-file cap at 50 000 on a 50 100-URL file.
+    - No robots → fallback only; loop / duplicates / invalid with lastmods; x-gzip; nesting depth cap; foreign children (offsite, other host, robots-disallowed child never requested).
+    - Broken sitemaps: 8 kinds reported while the next sitemap is still read. `/error` retried per the policy with the reason in the detail. A sitemap listed twice is fetched once.
+    - Every sitemap fetch goes through the limiter with the robots crawl delay.
+  - Scripted fetcher: fallback soft-404 silent vs 503 reported; fallback urlset used.
+- **Fix to a Step 30 test:** `test_concurrent_workers_get_evenly_spaced_slots` failed once under full-suite load. It asserted the last booking's wait as ≈19.5 s ± 0.2, but waits are measured from each booking's own arrival. I removed that assertion and widened the interval to 2 s so all 40 bookings land inside one slot. It still asserts exact spacing and the total span.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 872 passed (124 s).
+- Decisions/notes:
+  - **Step 48/50**: seed the frontier with `report.urls` as sitemap-priority entries at depth 0 (scope was checked with `depth=0`). `lastmod` is available for later incremental crawls. Store `report.failures`/`caps_hit` on the job for the per-page/job report (Step 53).
+  - Sitemap bodies are held in memory up to `SITEMAP_MAX_BYTES` (50 MiB) one at a time. Inflated output is the same order, since `iterparse` reads from an in-memory buffer.
+  - Discovery is sequential by design (politeness, simplicity). A site with 50 child sitemaps at a 0.5 s interval takes ~25 s.
+- Next: Step 32: Link extraction

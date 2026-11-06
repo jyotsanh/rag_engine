@@ -43,6 +43,58 @@ SLOW_DEFAULT_SECONDS = 5.0
 METADATA_URL = "http://169.254.169.254/latest/meta-data/"
 
 _TEMPLATED_SUFFIXES = {".html", ".xml", ".txt"}
+
+# ---- sitemap edge cases, served (unlinked) at /sitemaps/<name>; Step 31 tests ---- #
+SITEMAP_BOMB_BYTES = 4 * 1024 * 1024  # inflated size of /sitemaps/bomb.xml.gz
+_SM_NS = 'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
+
+
+def _urlset(*locs: str, namespace: bool = True) -> str:
+    entries = "".join(f"<url><loc>{loc}</loc></url>" for loc in locs)
+    return f'<?xml version="1.0"?><urlset {_SM_NS if namespace else ""}>{entries}</urlset>'
+
+
+def _sitemap_index(*locs: str) -> str:
+    entries = "".join(f"<sitemap><loc>{loc}</loc></sitemap>" for loc in locs)
+    return f'<?xml version="1.0"?><sitemapindex {_SM_NS}>{entries}</sitemapindex>'
+
+
+SITEMAP_EDGE_CASES: dict[str, str] = {
+    # index listing itself (loop) and one child
+    "loop-index.xml": _sitemap_index(
+        "{{BASE}}/sitemaps/loop-index.xml", "{{BASE}}/sitemaps/mixed.xml"
+    ),
+    # no namespace; lastmod variants; duplicate, invalid and non-http locs
+    "mixed.xml": (
+        '<?xml version="1.0"?><urlset>'
+        "<url><loc> {{BASE}}/terms.html </loc><lastmod>2024-05-01</lastmod></url>"
+        "<url><loc>{{BASE}}/privacy.html</loc><lastmod>2024-05-01T10:30:00+02:00</lastmod></url>"
+        "<url><loc>{{BASE}}/terms.html?utm_source=x</loc><lastmod>yesterday</lastmod></url>"
+        "<url><loc>mailto:support@acme.example</loc></url>"
+        "<url><loc>http://</loc></url>"
+        "<url><lastmod>2024-01-01</lastmod></url>"
+        "</urlset>"
+    ),
+    "nested-1.xml": _sitemap_index("{{BASE}}/sitemaps/nested-2.xml"),
+    "nested-2.xml": _sitemap_index("{{BASE}}/sitemaps/nested-3.xml"),
+    "nested-3.xml": _urlset("{{BASE}}/docs/"),
+    # children on hosts outside a 127.0.0.1 crawl, and one robots.txt disallows
+    "foreign-index.xml": _sitemap_index(
+        "https://offsite.example/sitemap.xml",
+        "{{OTHER_HOST}}/sitemaps/mixed.xml",
+        "{{BASE}}/private/sitemap.xml",
+        "{{BASE}}/sitemaps/nested-3.xml",
+    ),
+    "urls.txt": "{{BASE}}/about.html\n\n{{BASE}}/blog/post-2.html\nhttps://offsite.example/x\n",
+    "feed.xml": '<?xml version="1.0"?><rss version="2.0"><channel><title>t</title></channel></rss>',
+    "broken.xml": '<?xml version="1.0"?><urlset><url><loc>{{BASE}}/about.html</loc></url>',
+    "laughs.xml": (
+        '<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol">'
+        '<!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">]>'
+        "<urlset><url><loc>&lol2;</loc></url></urlset>"
+    ),
+    "soft-404.html": "<!doctype html><html><body>Not here</body></html>",
+}
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".xml": "application/xml",
@@ -324,6 +376,34 @@ def build_app(state: _State) -> Starlette:
         raw = _render(request, (SITE_ROOT / "sitemap-docs.xml").read_bytes())
         return Response(gzip.compress(raw, mtime=0), media_type="application/gzip")
 
+    async def sitemap_edge(request: Request) -> Response:
+        await record(request)
+        name = request.path_params["name"]
+        if name == "big.xml":  # ?n=<count> generated page URLs
+            base, _ = _base_urls(request)
+            count = int(request.query_params.get("n", "10"))
+            locs = (f"{base}/generated/page-{i}.html" for i in range(count))
+            return Response(_urlset(*locs).encode(), media_type="application/xml")
+        if name == "bomb.xml.gz":
+            payload = b"<urlset>" + b" " * SITEMAP_BOMB_BYTES + b"</urlset>"
+            return Response(
+                gzip.compress(payload, compresslevel=9, mtime=0), media_type="application/gzip"
+            )
+        if name == "mixed.xml.gz":
+            raw = _render(request, SITEMAP_EDGE_CASES["mixed.xml"].encode())
+            return Response(gzip.compress(raw, mtime=0), media_type="application/x-gzip")
+        if name not in SITEMAP_EDGE_CASES:
+            return HTMLResponse(_html("Not found", "<h1>Not found</h1>"), status_code=404)
+        body = _render(request, SITEMAP_EDGE_CASES[name].encode())
+        media = (
+            "text/html"
+            if name.endswith(".html")
+            else "text/plain"
+            if name.endswith(".txt")
+            else "application/xml"
+        )
+        return Response(body, media_type=media)
+
     async def app_advanced(request: Request) -> Response:
         await record(request)
         return HTMLResponse(
@@ -378,6 +458,7 @@ def build_app(state: _State) -> Starlette:
         Route("/bom-page", bom_page),
         Route("/drip", drip),
         Route("/sitemap-docs.xml.gz", gz_sitemap),
+        Route("/sitemaps/{name:str}", sitemap_edge),
         Route("/app/advanced", app_advanced),
         Route("/{path:path}", static),
     ]

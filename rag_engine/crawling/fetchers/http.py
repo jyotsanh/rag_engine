@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
+from typing import Protocol
 
 import httpx
 
@@ -85,6 +86,14 @@ class RawResponse:
     truncated: bool  # cut at max_bytes (only with truncate=True)
     bytes_downloaded: int
     elapsed_ms: int
+
+
+class RawFetcher(Protocol):
+    """What robots.txt and sitemap discovery need from a fetcher (`HttpFetcher`)."""
+
+    async def fetch_raw(
+        self, url: str, *, accept: str, max_bytes: int, truncate: bool = False
+    ) -> RawResponse: ...
 
 
 def _raise_for_status(response: httpx.Response, url: str) -> None:

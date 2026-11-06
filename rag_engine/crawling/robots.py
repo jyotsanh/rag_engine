@@ -28,7 +28,7 @@ from protego import Protego
 from redis.asyncio import Redis
 
 from rag_engine.config import Settings, settings
-from rag_engine.crawling.fetchers import FetchError, HttpStatusError, RawResponse
+from rag_engine.crawling.fetchers import FetchError, HttpStatusError, RawFetcher
 from rag_engine.crawling.retry import (
     RetriesExhaustedError,
     RetryPolicy,
@@ -145,14 +145,6 @@ class RobotsRules:
     @property
     def sitemaps(self) -> tuple[str, ...]:
         return tuple(self._parser.sitemaps) if self._parser is not None else ()
-
-
-class RawFetcher(Protocol):
-    """What robots needs from a fetcher (`HttpFetcher` in production)."""
-
-    async def fetch_raw(
-        self, url: str, *, accept: str, max_bytes: int, truncate: bool = False
-    ) -> RawResponse: ...
 
 
 class RobotsStore(Protocol):

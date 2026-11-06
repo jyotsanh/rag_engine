@@ -144,6 +144,11 @@ class Settings(BaseSettings):
     # a longer Retry-After than this makes the page fail instead of waiting (or retrying early)
     CRAWL_RETRY_AFTER_MAX_SECONDS: float = Field(default=120.0, ge=0)
     CRAWL_RENDER_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
+    # sitemaps: per-file byte cap (compressed download and inflated; protocol max is 50 MB),
+    # files fetched per discovery, and sitemap-index nesting (the protocol allows 1)
+    SITEMAP_MAX_BYTES: int = Field(default=50 * 1024 * 1024, gt=0)
+    SITEMAP_MAX_FILES: int = Field(default=50, gt=0, le=1000)
+    SITEMAP_MAX_DEPTH: int = Field(default=3, ge=0, le=10)
     # RFC 9309 §2.4: a cached robots.txt should not be used for more than 24 hours
     ROBOTS_CACHE_TTL_SECONDS: int = Field(default=60 * 60, gt=0, le=24 * 60 * 60)
     # 5xx/network failures (complete disallow) are re-checked sooner than good copies

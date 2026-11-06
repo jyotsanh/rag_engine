@@ -10,7 +10,7 @@ from .errors import (
     TooManyRedirectsFetchError,
     UnsupportedContentTypeError,
 )
-from .http import FetchResult, HttpFetcher, RawResponse, parse_retry_after
+from .http import FetchResult, HttpFetcher, RawFetcher, RawResponse, parse_retry_after
 
 __all__ = [
     "ACCEPT_HEADER",
@@ -21,6 +21,7 @@ __all__ = [
     "HttpFetcher",
     "HttpStatusError",
     "NetworkFetchError",
+    "RawFetcher",
     "RawResponse",
     "RedirectLoopFetchError",
     "SsrfFetchError",

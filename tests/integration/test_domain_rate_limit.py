@@ -72,10 +72,11 @@ class TestDomainRateLimiter_S30:
     async def test_concurrent_workers_get_evenly_spaced_slots(
         self, make_limiter: MakeLimiter, other_worker_redis: RedisConnection
     ) -> None:
-        # 0.5 s slots: all 40 bookings land well inside the first slot, so a backlog exists
-        # and every gap is exact (an idle bucket would legitimately give a larger gap)
-        worker_a = make_limiter(CRAWL_PER_DOMAIN_RPS=2.0)
-        worker_b = make_limiter(other_worker_redis, CRAWL_PER_DOMAIN_RPS=2.0)
+        # 2 s slots: all 40 bookings land inside the first slot even on a loaded machine, so a
+        # backlog exists and every gap is exact (an idle bucket would legitimately give a
+        # larger gap). Only bookings are made, nothing sleeps.
+        worker_a = make_limiter(CRAWL_PER_DOMAIN_RPS=0.5)
+        worker_b = make_limiter(other_worker_redis, CRAWL_PER_DOMAIN_RPS=0.5)
         for worker in (worker_a, worker_b):  # load the script on both connection pools
             await worker.reserve("https://warm-up.example/")
 
@@ -85,8 +86,8 @@ class TestDomainRateLimiter_S30:
 
         starts = [r.start_at for r in reservations]
         assert len(set(starts)) == 40  # no two requests share a slot
-        assert _gaps(starts) == pytest.approx([0.5] * 39, abs=1e-6)
-        assert max(r.wait_seconds for r in reservations) == pytest.approx(19.5, abs=0.2)
+        assert _gaps(starts) == pytest.approx([2.0] * 39, abs=1e-6)
+        assert max(starts) - min(starts) == pytest.approx(78.0, abs=1e-6)
 
     async def test_acquire_really_waits(
         self, make_limiter: MakeLimiter, other_worker_redis: RedisConnection

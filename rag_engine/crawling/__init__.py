@@ -1,3 +1,4 @@
+from .fetchers import RawFetcher
 from .rate_limit import (
     DomainRateLimiter,
     RateLimitWaitExceededError,
@@ -16,7 +17,6 @@ from .retry import (
 from .robots import (
     ROBOTS_MAX_BYTES,
     CachedRobots,
-    RawFetcher,
     RedisRobotsStore,
     RobotsCache,
     RobotsRules,
@@ -32,6 +32,20 @@ from .scope import (
     ScopeRejection,
     registrable_domain,
 )
+from .sitemap import (
+    MAX_ENTRIES_PER_FILE,
+    ParsedSitemap,
+    SitemapCap,
+    SitemapDiscoverer,
+    SitemapEntry,
+    SitemapFailure,
+    SitemapParseError,
+    SitemapProblem,
+    SitemapReport,
+    inflate,
+    parse_lastmod,
+    parse_sitemap,
+)
 from .url import (
     TRACKING_PARAMS,
     TRACKING_PREFIXES,
@@ -43,6 +57,7 @@ from .url import (
 
 __all__ = [
     "ASSET_EXTENSIONS",
+    "MAX_ENTRIES_PER_FILE",
     "ROBOTS_MAX_BYTES",
     "TRACKING_PARAMS",
     "TRACKING_PREFIXES",
@@ -51,6 +66,7 @@ __all__ = [
     "CrawlScope",
     "DomainRateLimiter",
     "FailureKind",
+    "ParsedSitemap",
     "RateLimitWaitExceededError",
     "RawFetcher",
     "RedisRobotsStore",
@@ -64,12 +80,22 @@ __all__ = [
     "RobotsStore",
     "ScopeDecision",
     "ScopeRejection",
+    "SitemapCap",
+    "SitemapDiscoverer",
+    "SitemapEntry",
+    "SitemapFailure",
+    "SitemapParseError",
+    "SitemapProblem",
+    "SitemapReport",
     "UrlNormalizationError",
     "call_with_retries",
     "classify",
+    "inflate",
     "normalize_and_hash",
     "normalize_url",
     "origin_of",
+    "parse_lastmod",
+    "parse_sitemap",
     "rate_limit_host",
     "registrable_domain",
     "robots_token",
