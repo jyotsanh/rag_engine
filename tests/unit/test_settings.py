@@ -107,6 +107,8 @@ class TestSettings_S3:
             {"ROBOTS_UNREACHABLE_CACHE_TTL_SECONDS": 600, "ROBOTS_CACHE_TTL_SECONDS": 300},
             {"ROBOTS_CACHE_TTL_SECONDS": 2 * 24 * 60 * 60},
             {"CRAWL_CONCURRENCY": 0},
+            {"CRAWL_PER_DOMAIN_BURST": 0},
+            {"CRAWL_PER_DOMAIN_RPS": 0},
             {"PROD_PORT": 70_000},
         ],
     )

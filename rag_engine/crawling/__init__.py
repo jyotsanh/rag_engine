@@ -1,3 +1,9 @@
+from .rate_limit import (
+    DomainRateLimiter,
+    RateLimitWaitExceededError,
+    Reservation,
+    rate_limit_host,
+)
 from .retry import (
     Classification,
     FailureKind,
@@ -43,9 +49,12 @@ __all__ = [
     "CachedRobots",
     "Classification",
     "CrawlScope",
+    "DomainRateLimiter",
     "FailureKind",
+    "RateLimitWaitExceededError",
     "RawFetcher",
     "RedisRobotsStore",
+    "Reservation",
     "RetriesExhaustedError",
     "RetryDecision",
     "RetryPolicy",
@@ -61,6 +70,7 @@ __all__ = [
     "normalize_and_hash",
     "normalize_url",
     "origin_of",
+    "rate_limit_host",
     "registrable_domain",
     "robots_token",
     "url_hash",

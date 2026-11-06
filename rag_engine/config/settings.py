@@ -125,7 +125,12 @@ class Settings(BaseSettings):
     CRAWL_MAX_PAGE_BYTES: int = Field(default=20 * 1024 * 1024, gt=0)
     CRAWL_MAX_TOTAL_BYTES: int = Field(default=2 * 1024 * 1024 * 1024, gt=0)
     CRAWL_CONCURRENCY: int = Field(default=8, gt=0)
-    CRAWL_PER_DOMAIN_RPS: float = Field(default=2.0, gt=0)
+    # per-host politeness shared by all workers: at most this many requests per second...
+    CRAWL_PER_DOMAIN_RPS: float = Field(default=2.0, gt=0, le=100)
+    # ...after an initial burst of this many (1 = strictly spaced; robots crawl-delay forces 1)
+    CRAWL_PER_DOMAIN_BURST: int = Field(default=1, ge=1, le=100)
+    # robots.txt Crawl-delay is honoured up to this; a larger value would stall the job
+    CRAWL_MAX_CRAWL_DELAY_SECONDS: float = Field(default=30.0, gt=0)
     CRAWL_CONNECT_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0)
     CRAWL_READ_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
     # wall-clock cap per fetch incl. redirects; stops servers that drip bytes under the read timeout

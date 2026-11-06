@@ -833,3 +833,29 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 50 (engine)**: check `rules_for(url)` per URL (cheap after the first). An `unreachable` seed origin skips every page as `robots_disallowed`; the job summary should surface `rules.status`/`detail` so users see "robots.txt unreachable", not a silent empty crawl.
   - Cross-worker duplicate fetches are possible when two workers miss at the same instant (no Redis lock). That's harmless: at most one extra robots.txt request per worker.
 - Next: Step 30: Per-domain rate limiter
+
+### Step 30: Per-domain rate limiter  (2026-11-06)
+- Status: ✅ done
+- Built: `rag_engine/crawling/rate_limit.py` (exported from `rag_engine.crawling`)
+  - `DomainRateLimiter(redis, keys, config, sleep)`: a **GCRA token bucket** in one Lua script on the Redis clock. The state is a hash `domain_rl:<digest(host)>` = `{tat, paused_until}` in **integer microseconds**, written with `string.format('%d')` (Lua's `tostring` would turn 16-digit values into `1.7e+15`). The key expires once the bucket is idle.
+    - `reserve(url, crawl_delay=None, max_wait=None) -> Reservation{host, granted, wait_seconds, start_at, interval_seconds, burst}` **books** the next slot in a single round-trip. Concurrent callers across workers get distinct, evenly spaced start times (FIFO, no polling or thundering herd). If the wait would exceed `max_wait`, nothing is booked and `granted=False`.
+    - `acquire(...)`: reserve, then sleep until the slot. Past `max_wait` it raises `RateLimitWaitExceededError` (with the reservation). A caller cancelled mid-sleep leaves its slot unused, which costs one interval at most.
+    - `interval_for(crawl_delay)` = max(1/`CRAWL_PER_DOMAIN_RPS`, min(crawl_delay, `CRAWL_MAX_CRAWL_DELAY_SECONDS`)). `burst_for()` is 1 whenever the site sets a crawl delay, else `CRAWL_PER_DOMAIN_BURST`.
+    - `pause(url, seconds)`: holds **every worker** off a host (for 429/503 `Retry-After`). It never shortens an existing pause, is capped at `CRAWL_RETRY_AFTER_MAX_SECONDS`, and returns the remaining pause.
+  - `rate_limit_host(url)`: the politeness key is the normalized **host** (IDNA, lower-case). Scheme and port are ignored, so http/https/:8080 of one host share a bucket. The key is not per tenant: two tenants crawling one site share its budget.
+- Settings: `CRAWL_PER_DOMAIN_RPS` now `le=100`. New: `CRAWL_PER_DOMAIN_BURST` (1, 1..100) and `CRAWL_MAX_CRAWL_DELAY_SECONDS` (30), which clamps hostile `Crawl-delay` values, as flagged in Step 29. `.env.example` updated.
+- Tests:
+  - `TestDomainRateLimitRules_S30` (10, unit): host key incl. ports/IDN/IPv6; interval and burst matrix (RPS, shorter delay ignored but no bursts, longer delay wins, 86400 clamped to 30); negative `max_wait` rejected.
+  - `TestDomainRateLimiter_S30` (14, integration, real Redis):
+    - Spacing: first request immediate, then exactly one interval apart. **40 concurrent bookings from two independent connection pools ("workers") get 40 distinct slots spaced exactly 0.5 s**. `acquire` really waits (10 requests ≥ 0.4 s).
+    - Burst of 3 then spaced; crawl delay overrides both RPS and burst; hosts independent, ports shared; an idle bucket refills.
+    - `max_wait`: a refused reservation books nothing; `acquire` raises past `max_wait`.
+    - Pause: holds the other worker and other requests queue behind it; never shortened; capped; zero is a no-op.
+    - Redis state: key TTL ≤ interval with only the `tat` field; microsecond state stored as exact digits (333 333 µs spacing).
+  - 2 new settings-validator cases.
+  - Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 824 passed (136 s).
+- Decisions/notes:
+  - **Step 50 (engine)** order per URL: scope → `robots.rules_for(url)` → `limiter.acquire(url, crawl_delay=rules.crawl_delay, max_wait=…)` → fetch. With a `max_wait` (e.g. a few seconds), a slow host can't pin a concurrency slot: on `RateLimitWaitExceededError`, re-queue the URL with `retry_at = reservation.start_at`. On an `HttpStatusError` with `retry_after`, call `limiter.pause(url, retry_after)` as well as the Step 28 per-URL decision.
+  - Retries (Step 28) must also go through `acquire`, so retry traffic counts against the host budget.
+  - Robots.txt and sitemap fetches are **not** rate-limited for now. They are one request per origin per TTL; Step 31 may put sitemap fetches through the limiter if a site has many child sitemaps.
+- Next: Step 31: Sitemap discovery
