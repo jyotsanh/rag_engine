@@ -1,0 +1,5 @@
+User-agent: *
+Disallow: /private/
+Crawl-delay: 0.1
+
+Sitemap: {{BASE}}/sitemap_index.xml

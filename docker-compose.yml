@@ -1,76 +1,93 @@
-# Phase 1 brings up MongoDB + the RAG Engine API. Services for later phases are
-# stubbed below (commented) so the topology is visible; uncomment as each lands.
+# Backing services for local development and integration tests.
+#   docker compose up -d --wait     # start and block until every healthcheck passes
+#   docker compose down             # stop (data kept in named volumes)
+#   docker compose down -v          # stop and wipe data
+#
+# Host ports and credentials come from `.env` (compose interpolates it automatically),
+# the same variables `Settings` reads, so `uv run dev` on the host reaches these
+# containers with no extra config. Ports bind to 127.0.0.1 only.
+# Step 96 adds the api / worker / beat services on top of these.
+
+name: rag_engine
+
+x-restart: &restart
+  restart: unless-stopped
 
 services:
   mongo:
-    image: mongo:7
+    <<: *restart
+    image: mongo:8.0
     container_name: rag_engine_mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:?set MONGO_USER in .env}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?set MONGO_PASSWORD in .env}
     ports:
-      # host 27020 → container 27017, matching settings.MONGO_PORT so a local
-      # `uv run dev` and the containerised api both reach the same instance.
-      - "27020:27017"
+      - "127.0.0.1:${MONGO_PORT:-27020}:27017"
     volumes:
       - mongo_data:/data/db
+    # MongoDB's recommended limit: WiredTiger keeps a file per collection and index,
+    # and the Docker default (1024) aborts mongod with EMFILE as data grows
+    ulimits:
+      nofile:
+        soft: 64000
+        hard: 64000
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 6
       start_period: 20s
-    restart: unless-stopped
 
-  api:
-    build: .
-    container_name: rag_engine_api
-    command: server # → the `server` console script (rag_engine:server), binds 0.0.0.0:8000
-    ports:
-      - "8000:8000"
+  redis:
+    <<: *restart
+    image: redis:8.2
+    container_name: rag_engine_redis
+    # AOF persistence: cancel flags, rate-limit buckets and the Celery queue survive restarts
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
     environment:
-      # Reach Mongo over the compose network, not localhost. Use Mongo's
-      # CONTAINER-internal port (27017) — NOT the host-published 27020; the
-      # "27020:27017" mapping only affects the host, not container-to-container
-      # traffic. These override the settings defaults.
-      MONGO_HOST: mongo
-      MONGO_PORT: "27017"
-    env_file:
-      - .env          # uncomment once you keep a .env with secrets (Phase 9)
-    depends_on:
-      mongo:
-        condition: service_healthy
-    restart: unless-stopped
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6380}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
 
-  # --- Phase 8: async jobs ---
-  # redis:
-  #   image: redis:7-alpine
-  #   container_name: rag_engine_redis
-  #   ports:
-  #     - "6379:6379"
-  #   restart: unless-stopped
-
-  # --- Phase 9: vector store ---
-  # qdrant:
-  #   image: qdrant/qdrant:latest
-  #   container_name: rag_engine_qdrant
-  #   ports:
-  #     - "6333:6333"
-  #   volumes:
-  #     - qdrant_data:/qdrant/storage
-  #   restart: unless-stopped
-
-  # --- Phase 8: async worker ---
-  # worker:
-  #   build: .
-  #   command: ["celery", "-A", "rag_engine.worker", "worker", "-l", "info"]
-  #   environment:
-  #     MONGO_HOST: mongo
-  #     MONGO_PORT: "27017"
-  #   depends_on:
-  #     mongo:
-  #       condition: service_healthy
-  #     redis:
-  #       condition: service_started
-  #   restart: unless-stopped
+  qdrant:
+    <<: *restart
+    image: qdrant/qdrant:v1.19.2-unprivileged
+    container_name: rag_engine_qdrant
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in .env}
+      QDRANT__TELEMETRY_DISABLED: "true"
+    ports:
+      - "127.0.0.1:${QDRANT_HTTP_PORT:-6333}:6333"
+      - "127.0.0.1:${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # image ships without curl; /readyz is unauthenticated
+      test:
+        - CMD-SHELL
+        - >-
+          bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 &&
+          printf "GET /readyz HTTP/1.0\r\n\r\n" >&3 &&
+          head -1 <&3 | grep -q " 200 "'
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
 
 volumes:
   mongo_data:
-  # qdrant_data:
+  redis_data:
+  qdrant_data:

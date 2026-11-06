@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>REST API reference | Acme Widgets</title>
+  <meta name="description" content="REST API reference - Acme Widgets documentation fixture page.">
+</head>
+<body>
+<header class="site-header">
+  <nav aria-label="Main">
+    <a href="/">Home</a> | <a href="/docs/">Docs</a> | <a href="/blog/">Blog</a> | <a href="/about.html">About</a>
+  </nav>
+</header>
+<div class="cookie-banner">We use cookies to improve your experience on Acme Widgets. By continuing to browse you accept our cookie policy.</div>
+<main>
+<h1>REST API reference</h1>
+<p>All endpoints live under <code>/v2</code> and require a bearer token.</p>
+<h2>List widgets</h2>
+<p><code>GET /v2/widgets</code> returns every registered widget with its status and firmware version.</p>
+<h2>Calibrate a widget</h2>
+<p><code>POST /v2/widgets/{serial}/calibrate</code> starts the calibration routine. Calibration takes about
+ninety seconds and the widget reports <strong>CALIBRATING</strong> until it finishes.</p>
+<p>See <a href="deep/level4.html">advanced calibration internals</a>.</p>
+</main>
+<footer class="site-footer">
+  <p>© 2026 Acme Widgets Inc. All rights reserved. | <a href="/privacy.html">Privacy policy</a> | <a href="/terms.html">Terms of service</a></p>
+  <p>Acme Widgets, 123 Example Street, Springfield. Contact support@acme.example for help.</p>
+</footer>
+</body>
+</html>

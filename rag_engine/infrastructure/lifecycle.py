@@ -1,47 +1,53 @@
-from fastapi import FastAPI
-from loguru import logger
+"""Process-wide infrastructure started in the API lifespan (and later the worker)."""
 
-from rag_engine.config import settings
-from rag_engine.infrastructure.db import BaseDatabase, DatabaseDispatcher
+from collections.abc import Mapping
+from typing import Protocol
+
+from rag_engine.config import logger
+from rag_engine.infrastructure.health import HealthCheck
+from rag_engine.infrastructure.mongo import MongoConnection
+from rag_engine.infrastructure.qdrant import QdrantConnection
+from rag_engine.infrastructure.redis import RedisConnection
 
 
-class StartupApplication:
-    """Bootstraps and tears down the application's backing resources.
+class Infrastructure(Protocol):
+    async def start(self) -> None: ...
 
-    ``start`` resolves + connects every resource the app needs and stashes it on
-    ``app.state``; ``stop`` releases them. Both are classmethods so the lifespan
-    reads as ``StartupApplication.start(app)`` / ``StartupApplication.stop(app)``.
+    async def stop(self) -> None: ...
 
-    Resources are added one ``_init_*`` method at a time as later phases land
-    (Redis + Celery in Phase 8, Qdrant in Phase 9).
-    """
+    def health_checks(self) -> Mapping[str, HealthCheck]: ...
 
-    @classmethod
-    async def start(cls, app: FastAPI) -> None:
-        # a registry mirrors the house pattern: lazily cache resolved backends by type
-        app.state.database_registry = {}
 
-        await cls._init_database(app)
+class AppInfrastructure:
+    """Real backing services: MongoDB, Redis, Qdrant."""
 
-    @classmethod
-    async def stop(cls, app: FastAPI) -> None:
-        database: BaseDatabase | None = getattr(app.state, "database", None)
-        if database is not None:
-            logger.info("closing database connection...")
-            database.close()
-            logger.info("database connection closed.")
+    def __init__(
+        self,
+        mongo: MongoConnection | None = None,
+        redis: RedisConnection | None = None,
+        qdrant: QdrantConnection | None = None,
+    ) -> None:
+        self.mongo = mongo or MongoConnection()
+        self.redis = redis or RedisConnection()
+        self.qdrant = qdrant or QdrantConnection()
 
-    @classmethod
-    async def _init_database(cls, app: FastAPI) -> None:
-        """Resolve the active DB backend via the dispatcher, connect, and verify."""
+    async def start(self) -> None:
+        """Connect everything; if any service fails, close what was opened and re-raise."""
         try:
-            database = DatabaseDispatcher.dispatch(settings.ACTIVE_DATABASE)
-            database.connect()
-            database.ping()  # fail fast if the backend is unreachable
+            await self.mongo.connect()
+            await self.mongo.ensure_indexes()
+            await self.redis.connect()
+            await self.qdrant.connect()
+        except BaseException:
+            await self.stop()
+            raise
 
-            app.state.database_registry[settings.ACTIVE_DATABASE] = database
-            app.state.database = database
-            logger.info(f"active database `{settings.ACTIVE_DATABASE}` initialized")
-        except Exception as db_error:
-            logger.error(f"database `{settings.ACTIVE_DATABASE}` init failed: {db_error}")
-            raise RuntimeError(f"Database unavailable at startup: {db_error}") from db_error
+    async def stop(self) -> None:
+        # close in reverse order of start; each close is a no-op if never opened
+        await self.qdrant.close()
+        await self.redis.close()
+        await self.mongo.close()
+        logger.info("infrastructure stopped")
+
+    def health_checks(self) -> Mapping[str, HealthCheck]:
+        return {"mongo": self.mongo.ping, "redis": self.redis.ping, "qdrant": self.qdrant.ping}

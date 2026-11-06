@@ -1,33 +1,50 @@
+"""rag_engine: website → chunks → embeddings → vector store, with a search API.
+
+``uv run dev`` / ``uv run server`` start the API through the functions below.
+"""
+
 import uvicorn
-from loguru import logger
 
-from rag_engine.config import settings
+from rag_engine.config import logger, settings, setup_logging
+
+APP_PATH = "rag_engine.api.app:app"
+__version__ = "0.1.0"
 
 
-def dev():
+def dev() -> None:
     """
     running server in development mode (auto-reload)
     """
+    setup_logging()
     logger.info("running server **development** mode")
+    # log_config=None: uvicorn must not install its own handlers over the loguru intercept
     uvicorn.run(
-        "rag_engine.api.app:app",
+        APP_PATH,
         host=settings.DEV_HOST,
         port=settings.DEV_PORT,
         reload=True,
+        log_config=None,
+        access_log=False,  # ProcessTimeMiddleware writes the access log with request_id
+        loop="zuvloop",
+        http="zttp",
     )
 
 
-def server():
+def server() -> None:
     """
     running server in production mode
     """
+    setup_logging()
     logger.info("running server **production** mode")
     uvicorn.run(
-        "rag_engine.api.app:app",
+        APP_PATH,
         host=settings.PROD_HOST,
         port=settings.PROD_PORT,
+        log_config=None,
+        access_log=False,
+        loop="zuvloop",
+        http="zttp",
     )
 
 
-if __name__ == "__main__":
-    dev()
+__all__ = ["APP_PATH", "__version__", "dev", "server"]

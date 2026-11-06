@@ -1,24 +1,20 @@
-from fastapi import APIRouter, Request
+"""Aggregates every feature router under `settings.API_V1_STR`."""
 
-from rag_engine.exceptions import InfrastructureError
-from rag_engine.infrastructure.db import BaseDatabase
+from typing import Any
 
-# Aggregates every feature router. Phase 8/9 will `include_router` the
-# crawl / jobs / query routers here, each with its own prefix + tags.
-api_router = APIRouter()
+from fastapi import APIRouter
 
+from rag_engine.api.routers import admin, health, knowledge_bases, sources
+from rag_engine.exceptions import ErrorResponse
 
-@api_router.get("/health", tags=["Health"])
-def health() -> dict[str, str]:
-    """Liveness — the process is up and serving."""
-    return {"message": "app is healthy!!!"}
+# every endpoint may fail validation or crash; document the shared error body once
+ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    422: {"model": ErrorResponse, "description": "Request validation failed"},
+    500: {"model": ErrorResponse, "description": "Internal server error"},
+}
 
-
-@api_router.get("/ready", tags=["Health"])
-def ready(request: Request) -> dict[str, str]:
-    """Readiness — the active database backend is reachable."""
-    database: BaseDatabase | None = getattr(request.app.state, "database", None)
-    if database is None:
-        raise InfrastructureError(message="database is not initialised")
-    database.ping()
-    return {"status": "ready"}
+api_router = APIRouter(responses=ERROR_RESPONSES)
+api_router.include_router(health.router)
+api_router.include_router(admin.router)
+api_router.include_router(knowledge_bases.router)
+api_router.include_router(sources.router)

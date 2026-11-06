@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Getting started | Acme Widgets</title>
+  <meta name="description" content="Getting started - Acme Widgets documentation fixture page.">
+</head>
+<body>
+<header class="site-header">
+  <nav aria-label="Main">
+    <a href="/">Home</a> | <a href="/docs/">Docs</a> | <a href="/blog/">Blog</a> | <a href="/about.html">About</a>
+  </nav>
+</header>
+<div class="cookie-banner">We use cookies to improve your experience on Acme Widgets. By continuing to browse you accept our cookie policy.</div>
+<main>
+<h1>Getting started</h1>
+<p>This guide walks you through installing the Widget Controller and registering your first widget.</p>
+<h2>Install the controller</h2>
+<p>Download the controller package for your platform and run the installer. The controller listens on
+port 7070 by default and stores its state in <code>/var/lib/widgetd</code>.</p>
+<pre><code class="language-bash">curl -fsSL https://acme.example/install.sh | sh
+widgetd --config /etc/widgetd/config.toml
+</code></pre>
+<h2>Register a widget</h2>
+<p>Each widget has a serial number printed on its housing. Register it with the controller using the CLI:</p>
+<pre><code class="language-bash">widgetctl register --serial WX-2048-ALPHA --name "Line 3 sorter"
+</code></pre>
+<h3>Verify the registration</h3>
+<p>Run <code>widgetctl list</code>. A healthy widget reports the status <strong>ONLINE</strong> within thirty seconds.</p>
+<p>Next, read the <a href="configuration.html">configuration reference</a>.</p>
+</main>
+<footer class="site-footer">
+  <p>© 2026 Acme Widgets Inc. All rights reserved. | <a href="/privacy.html">Privacy policy</a> | <a href="/terms.html">Terms of service</a></p>
+  <p>Acme Widgets, 123 Example Street, Springfield. Contact support@acme.example for help.</p>
+</footer>
+</body>
+</html>
