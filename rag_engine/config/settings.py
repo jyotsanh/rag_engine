@@ -146,6 +146,8 @@ class Settings(BaseSettings):
     CRAWL_PER_DOMAIN_RPS: float = Field(default=2.0, gt=0, le=100)
     # ...after an initial burst of this many (1 = strictly spaced; robots crawl-delay forces 1)
     CRAWL_PER_DOMAIN_BURST: int = Field(default=1, ge=1, le=100)
+    # wall-clock cap per extracted document (a parser thread over the cap finishes unobserved)
+    EXTRACTION_TIMEOUT_SECONDS: float = Field(default=120.0, gt=0)
     # robots.txt Crawl-delay is honoured up to this; a larger value would stall the job
     CRAWL_MAX_CRAWL_DELAY_SECONDS: float = Field(default=30.0, gt=0)
     CRAWL_CONNECT_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0)

@@ -1110,3 +1110,43 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - The image has no `.env` and never will. Configuration is environment variables, which compose (Step 96) supplies.
   - Chromium runs with Playwright's default `--no-sandbox` (the container is the isolation boundary, as a non-root user). Step 95/98 may revisit with a seccomp profile if the sandbox is wanted.
 - Next: Step 38: Extractor framework
+
+### Step 38: Extractor framework  (2026-11-06)
+- Status: ✅ done
+- Built `rag_engine/extraction/`:
+  - `base.py`:
+    - `ExtractionInput{url (final), mime_type, body, text, encoding, headers}` with `from_fetch(FetchResult)`.
+    - `ExtractedDocument{markdown, content_kind, extractor, title, lang, description, metadata, outlinks}`, frozen. Blank title/lang/description → None, lang lower-cased, metadata values must be scalars (`MetadataValue`), outlinks frozen to a tuple. Outlinks are raw absolute URLs; the engine scopes them with `LinkExtractor.filter_urls` (Step 32).
+    - `BaseExtractor` (ABC): class attrs `name`, `kind: ContentKind`, optional extra `mime_types`/`extensions`, validated in `__init_subclass__`; `async extract(source)`; `run_sync(func, *args)` moves CPU-bound parsers to a thread.
+  - `sniff.py` → `sniff(body) -> ContentKind | Sniffed | None`:
+    - PDF: `%PDF-` in the first 1024 bytes.
+    - OOXML: ZIP with `[Content_Types].xml` + a `word/`|`ppt/`|`xl/` part. Only the central directory is read, never decompressed, so zip bombs are free.
+    - `Sniffed.OLE`: CFB container, i.e. legacy `.doc/.xls/.ppt` **or encrypted OOXML**.
+    - `Sniffed.ZIP`: a non-Office zip.
+    - HTML markers after BOM/whitespace/XML prolog/comments.
+    - `looks_like_text(body)` is encoding-agnostic (no NUL, ≤5 % control bytes), so Latin-1 and Shift-JIS bodies are text.
+  - `registry.py` → `ExtractorRegistry(extractors, config)`: `register` (one extractor per kind, else `ExtractorRegistrationError`; extractors may add MIME/extension labels for their kind), `kinds`, `detect_kind`, `resolve`, `extract`.
+    - **Resolution (bytes beat labels, labels beat guesses):**
+      1. magic-proven binary kind wins over any label (PDF served as `text/html`, PPTX as `application/zip`)
+      2. HTML-looking bytes → HTML (a "PDF" link returning a login page)
+      3. OLE where Office was expected by MIME or extension → `DocumentUnreadableError(detail="encrypted_or_legacy_office")`
+      4. a `text/html` label (or an `.html`-family extension on a generic/missing type) with a text body → HTML; UTF-16 is trusted via the fetcher's detected encoding
+      5. a body contradicting its declared binary type → `UnsupportedContentError(detail="not_<kind>")`
+      6. anything else, or a kind with no registered extractor (`no_extractor:<kind>`) → `UnsupportedContentError`
+    - `extract()` caps time with `EXTRACTION_TIMEOUT_SECONDS` (new setting, 120 s; detail `timeout`; a parser thread past the cap finishes unobserved). Typed errors pass through. **Any other exception becomes `ExtractionError`** (detail `"<Type>: <msg>"`, cause chained, logged with a traceback), so a malformed file never crashes the crawl.
+  - `exceptions.py`: plain exceptions (page outcomes, not API errors), each with `reason: PageReason` and `page_status`:
+    - `ExtractionError` → failed/`extraction_failed`
+    - `UnsupportedContentError` → **skipped**/`unsupported_content_type`
+    - `DocumentUnreadableError` → failed/`document_unreadable`
+    - `EmptyContentError` → skipped/`empty_content`
+- Tests: `TestExtractorFramework_S38` (59, unit):
+  - Sniffing: the 6 real fixture documents (incl. scanned and encrypted PDFs, which keep `%PDF-`); 5 HTML variants; 9 other bodies (PDF with a junk prefix, OLE, plain zip, OOXML with an unknown part, minimal DOCX, broken zip, PNG, JSON, empty); 6 text/binary cases.
+  - Resolution: 9 kind cases (incl. PDF-as-HTML, PPTX-as-zip, HTML-as-PDF, text-as-HTML, Latin-1, octet-stream + `.html`); UTF-16 HTML; 9 error cases (encrypted DOCX by MIME and XLSX by extension, legacy `.doc`, fake PDF, image, binary-as-HTML, zip, JSON, no content type).
+  - Registry: resolve+extract; missing extractor; duplicate kind; extra labels (incl. an explicit wrong type beating the URL); typed errors pass through with reason/status; crash → `ExtractionError`; timeout.
+  - Contract: unsupported is a skip; subclass declarations enforced; document normalization + scalar metadata; `from_fetch`; `run_sync` uses a worker thread.
+- Also: `tests/container/test_worker_image.py` reformatted. Step 37's last edit had skipped `ruff format`; it was only the 3.14 unparenthesized `except` style.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1077 passed, 4 skipped (container) in 142 s.
+- Decisions/notes:
+  - The registry starts empty. **Steps 39 and 41–44 each add their extractor**, and a `default_registry()` factory listing them lands with the last one (or the engine builds it in Step 50).
+  - Engine contract (Step 50/53): `registry.extract(ExtractionInput.from_fetch(result))`. On an `ExtractionError`, record `page_status`/`reason`/`detail`. On success, `Page.content_kind = document.content_kind`, which may differ from the header-based `FetchResult.content_kind`.
+- Next: Step 39: HTML extractor

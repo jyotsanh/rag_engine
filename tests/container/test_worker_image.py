@@ -42,7 +42,7 @@ def _smoke(image: str, url: str, *extra: str, **env: str) -> tuple[int, dict]:
     lines = proc.stdout.strip().splitlines()
     try:
         report = json.loads(lines[-1])
-    except (IndexError, json.JSONDecodeError):
+    except IndexError, json.JSONDecodeError:
         pytest.fail(f"no JSON report (exit {proc.returncode}):\n{proc.stdout}\n{proc.stderr}")
     return proc.returncode, report
 
