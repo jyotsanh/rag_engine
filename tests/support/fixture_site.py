@@ -100,6 +100,55 @@ async function probe(name, url, opts) {
         "text/html; charset=utf-8",
     ),
     "sw.js": (b"self.addEventListener('fetch', () => {});", "text/javascript"),
+    # Step 36: render behaviours
+    "lazy.html": (
+        b"""<!doctype html><html><head><title>Lazy</title></head><body>
+<h1>Lazy catalogue</h1><div style="height:4000px">Scroll down for the full catalogue.</div>
+<div id="sentinel">loading more...</div>
+<script>
+new IntersectionObserver(async (entries, observer) => {
+  if (!entries.some((e) => e.isIntersecting)) return;
+  observer.disconnect();
+  const text = await (await fetch("/browser/lazy-chunk")).text();
+  document.getElementById("sentinel").textContent = text;
+}).observe(document.getElementById("sentinel"));
+</script></body></html>""",
+        "text/html; charset=utf-8",
+    ),
+    "lazy-chunk": (
+        b"Lazy section: the WX-4096 chassis ships with a calibrated torque sensor.",
+        "text/plain; charset=utf-8",
+    ),
+    "late.html": (
+        b"""<!doctype html><html><head><title>Late</title></head><body>
+<div id="root"></div>
+<script>
+window.addEventListener("load", async () => {
+  await fetch("/slow?delay=1");
+  document.getElementById("root").innerHTML =
+    "<h1>Late content</h1><p>Arrived after the load event, once the API answered.</p>";
+});
+</script></body></html>""",
+        "text/html; charset=utf-8",
+    ),
+    "polling.html": (
+        b"""<!doctype html><html><head><title>Polling</title></head><body>
+<h1>Live dashboard</h1><p>Widget fleet status refreshes continuously.</p>
+<script>setInterval(() => fetch("/browser/echo"), 100);</script></body></html>""",
+        "text/html; charset=utf-8",
+    ),
+    "js-redirect.html": (
+        b"""<!doctype html><html><head><title>Moving</title></head><body>
+<div id="app"></div><script>location.replace("/docs/");</script></body></html>""",
+        "text/html; charset=utf-8",
+    ),
+    "wipe.html": (
+        b"""<!doctype html><html><head><title>Wipe</title></head><body>
+<div id="root"></div>
+<p>Server-rendered summary of the widget warranty terms, readable without JavaScript.</p>
+<script>document.body.innerHTML = '<div id="root"></div>';</script></body></html>""",
+        "text/html; charset=utf-8",
+    ),
     "download.bin": (b"\x00" * 1024, "application/octet-stream"),
 }
 

@@ -8,6 +8,7 @@ from rag_engine.config.enums import (
     EmbeddingModelName,
     EmbeddingProvider,
     Environment,
+    JsRenderMode,
     RerankerType,
     VectorStoreType,
 )
@@ -163,8 +164,15 @@ class Settings(BaseSettings):
     CRAWL_RESPECT_NOFOLLOW: bool = True
     # link candidates considered per page; link farms beyond this are cut (and flagged)
     CRAWL_MAX_LINKS_PER_PAGE: int = Field(default=5_000, gt=0, le=100_000)
+    # re-render HTML in headless Chromium: auto (JS-shell detector) / always / never
+    CRAWL_JS_RENDERING: JsRenderMode = JsRenderMode.AUTO
     # per-page navigation/action timeout inside the browser
     CRAWL_RENDER_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
+    # after "load": wait for network idle at most this long (long-polling pages never idle)
+    CRAWL_RENDER_NETWORKIDLE_SECONDS: float = Field(default=5.0, ge=0)
+    # auto-scroll for lazy-loaded content: time cap and number of viewport steps (0 = off)
+    CRAWL_RENDER_SCROLL_SECONDS: float = Field(default=5.0, ge=0)
+    CRAWL_RENDER_SCROLL_MAX_STEPS: int = Field(default=20, ge=0, le=200)
     # headless Chromium (Playwright): pages open at once per worker process, request types
     # aborted before they leave the browser, and a relaunch after this many job contexts
     CRAWL_BROWSER_MAX_PAGES: int = Field(default=4, gt=0, le=64)

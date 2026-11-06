@@ -25,6 +25,14 @@ class RerankerType(StrEnum):
     CROSS_ENCODER = "cross_encoder"
 
 
+class JsRenderMode(StrEnum):
+    """When the crawler re-renders HTML pages in headless Chromium (Step 36)."""
+
+    AUTO = "auto"  # only pages the JS-shell detector flags
+    ALWAYS = "always"  # every HTML page (slow; for SPAs the detector misses)
+    NEVER = "never"  # plain HTTP only
+
+
 class EmbeddingModelName(StrEnum):
     """Embedding models a tenant/KB may use. Step 14 maps each to its spec (dims, limits)."""
 

@@ -56,6 +56,8 @@ class FetchResult:
     elapsed_ms: int
     headers: dict[str, str]
     rendered_with: RenderedWith = RenderedWith.HTTP
+    js_signals: tuple[str, ...] = ()  # JS-shell detector signals, when it ran (Step 36)
+    render_note: str | None = None  # why a browser render was not used, when one was tried
 
 
 def parse_retry_after(value: str | None) -> float | None:

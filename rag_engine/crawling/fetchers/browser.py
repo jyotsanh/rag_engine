@@ -68,6 +68,27 @@ from rag_engine.security import (
     SsrfGuard,
 )
 
+# Scrolls one viewport at a time until the page stops growing at the bottom (lazy loading,
+# infinite scroll capped by maxSteps), then back to the top. Returns the steps taken.
+_AUTO_SCROLL = """
+async ({maxSteps, pauseMs}) => {
+  const root = document.scrollingElement || document.documentElement;
+  let lastHeight = -1, steps = 0;
+  while (steps < maxSteps) {
+    window.scrollBy(0, window.innerHeight);
+    steps++;
+    await new Promise((resolve) => setTimeout(resolve, pauseMs));
+    const height = root.scrollHeight;
+    const atBottom = window.scrollY + window.innerHeight >= height - 2;
+    if (atBottom && height === lastHeight) break;
+    lastHeight = height;
+  }
+  window.scrollTo(0, 0);
+  return steps;
+}
+"""
+_SCROLL_PAUSE_MS = 150
+
 # returns a reason to abort the request, or None to let it through
 type RequestGuard = Callable[[Request], Awaitable[str | None]]
 type WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
@@ -134,6 +155,8 @@ class RenderedPage:
     status_code: int | None  # main document response; None if no response (e.g. about:blank)
     html: str
     elapsed_ms: int
+    network_idle: bool | None = None  # None: not waited for; False: cap hit first
+    scroll_steps: int = 0
 
 
 @dataclass(slots=True)
@@ -210,15 +233,35 @@ class BrowserJobContext:
                 )
             chain.append(target)
 
-    async def render(self, url: str, *, wait_until: WaitUntil = "load") -> RenderedPage:
-        """Navigate and return the DOM as HTML. Step 36 adds networkidle caps and scrolling."""
+    async def render(
+        self,
+        url: str,
+        *,
+        wait_until: WaitUntil = "load",
+        idle_timeout: float | None = None,
+        scroll_seconds: float = 0.0,
+        scroll_max_steps: int = 0,
+    ) -> RenderedPage:
+        """Navigate, settle, and return the DOM as HTML.
+
+        After `wait_until`: wait for network idle up to `idle_timeout` seconds (a cap, not
+        an error: long-polling pages never go idle), then auto-scroll for lazy content for
+        up to `scroll_seconds` / `scroll_max_steps`, then let the network settle again.
+        """
         start = time.perf_counter()
+        budget = self._timeout * 2 + 5 + (idle_timeout or 0) * 2 + scroll_seconds
         async with self.page() as page:
             try:
-                # backstop over Playwright's own timeouts (navigation + content)
-                async with asyncio.timeout(self._timeout * 2 + 5):
+                # backstop over Playwright's own timeouts for the whole render
+                async with asyncio.timeout(budget):
                     response = await self.goto(page, url, wait_until=wait_until)
-                    html = await page.content()
+                    idle = await _settle(page, idle_timeout)
+                    steps = 0
+                    if scroll_seconds > 0 and scroll_max_steps > 0:
+                        steps = await _scroll(page, scroll_seconds, scroll_max_steps)
+                        if steps:
+                            idle = await _settle(page, idle_timeout) if idle is not None else None
+                    html = await _content(page)
             except (PlaywrightTimeoutError, TimeoutError) as exc:
                 raise RenderError(
                     f"render exceeded {self._timeout}s", url=url, detail="timeout"
@@ -234,7 +277,42 @@ class BrowserJobContext:
                 status_code=response.status if response is not None else None,
                 html=html,
                 elapsed_ms=int((time.perf_counter() - start) * 1000),
+                network_idle=idle,
+                scroll_steps=steps,
             )
+
+
+async def _settle(page: Page, idle_timeout: float | None) -> bool | None:
+    """Wait for network idle, capped. True if reached, False if the cap hit, None if skipped."""
+    if not idle_timeout:
+        return None
+    try:
+        await page.wait_for_load_state("networkidle", timeout=idle_timeout * 1000)
+    except PlaywrightTimeoutError:
+        return False
+    return True
+
+
+async def _scroll(page: Page, seconds: float, max_steps: int) -> int:
+    try:
+        async with asyncio.timeout(seconds):
+            steps = await page.evaluate(
+                _AUTO_SCROLL, {"maxSteps": max_steps, "pauseMs": _SCROLL_PAUSE_MS}
+            )
+            return int(steps)
+    except TimeoutError:
+        return max_steps  # cap hit mid-scroll: whatever loaded so far is kept
+    except PlaywrightError:
+        return 0  # e.g. the page navigated away while scrolling
+
+
+async def _content(page: Page) -> str:
+    """`page.content()`, tolerating a JS navigation that replaced the document meanwhile."""
+    try:
+        return await page.content()
+    except PlaywrightError:
+        await page.wait_for_load_state("load")
+        return await page.content()
 
 
 class BrowserPool:

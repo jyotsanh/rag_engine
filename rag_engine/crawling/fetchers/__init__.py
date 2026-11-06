@@ -1,3 +1,4 @@
+from .auto import AutoFetcher
 from .browser import (
     BrowserJobContext,
     BrowserPool,
@@ -26,6 +27,7 @@ from .http import FetchResult, HttpFetcher, RawFetcher, RawResponse, parse_retry
 __all__ = [
     "ACCEPT_HEADER",
     "MIME_KINDS",
+    "AutoFetcher",
     "BrowserJobContext",
     "BrowserPool",
     "BrowserPoolError",

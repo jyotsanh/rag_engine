@@ -2,6 +2,7 @@ from .enums import (
     EmbeddingModelName,
     EmbeddingProvider,
     Environment,
+    JsRenderMode,
     RerankerType,
     VectorStoreType,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "EmbeddingModelName",
     "EmbeddingProvider",
     "Environment",
+    "JsRenderMode",
     "RerankerType",
     "Settings",
     "VectorStoreType",

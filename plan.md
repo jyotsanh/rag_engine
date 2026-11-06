@@ -1036,3 +1036,43 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Main-frame redirects triggered by JS *after* load (`location.href = …` during the networkidle wait) are parked and not followed. Step 36 decides whether to follow them, and meta-refresh targets are already outlinks (Step 32).
   - Intermediate `Set-Cookie` headers on server-side-followed subresource redirects are not applied (rarely matters for crawling).
 - Next: Step 36: Auto fetcher
+
+### Step 36: Auto fetcher  (2026-11-06)
+- Status: ✅ done
+- Built:
+  - `rag_engine/crawling/fetchers/auto.py`: `AutoFetcher(http, browser: BrowserJobContext | None, config, mode=, detector=)`; `fetch(url) -> FetchResult`.
+    1. `HttpFetcher.fetch`. Its `FetchError`s propagate unchanged (Step 28 retries apply).
+    2. Non-HTML, mode `never`, or no browser → the HTTP result. Without a browser, a warning is logged once at construction.
+    3. HTML: the JS-shell detector runs and its signals land in **`FetchResult.js_signals`**. `auto` renders only flagged pages; `always` renders every HTML page.
+    4. `BrowserJobContext.render(final_url, idle_timeout, scroll…)`, SSRF-enforced per Step 35.
+    5. **Keep the better**:
+       - `RenderError` → HTTP result with `render_note="render_failed: <detail>"`
+       - non-2xx rendered document → `render_status_<code>`
+       - rendered visible text < raw visible text → `render_not_better` (e.g. a script wiping the page)
+       - otherwise the rendered HTML, with `rendered_with=browser`, `mime=text/html`, `encoding=utf-8`, `body=html bytes`, `bytes_downloaded` and `elapsed_ms` summed, and a JS redirect's final URL appended to `redirect_chain`
+    - **A render failure never fails the page.**
+  - `FetchResult` gained `js_signals: tuple[str, ...] = ()` and `render_note: str | None = None`.
+  - `BrowserJobContext.render(url, wait_until="load", idle_timeout=None, scroll_seconds=0, scroll_max_steps=0)`:
+    - After load, **network idle is waited for up to `idle_timeout`**. It's a cap, not an error: long-polling pages never idle (`RenderedPage.network_idle` = True/False/None).
+    - Then **auto-scroll** one viewport per step (150 ms pause) until the page stops growing at the bottom, bounded by `scroll_max_steps` and `scroll_seconds`, scrolls back to top, and settles the network again (`scroll_steps`).
+    - `page.content()` tolerates a JS navigation that replaced the document meanwhile. The whole render has an asyncio backstop.
+- Settings:
+  - `CRAWL_JS_RENDERING` (`JsRenderMode` auto/always/never in `config/enums.py`, default auto)
+  - `CRAWL_RENDER_NETWORKIDLE_SECONDS` (5)
+  - `CRAWL_RENDER_SCROLL_SECONDS` (5)
+  - `CRAWL_RENDER_SCROLL_MAX_STEPS` (20, 0 = off)
+  - `.env.example` updated
+- Fixture site: `/browser/lazy.html` (+ `lazy-chunk`, IntersectionObserver at the bottom of a 4000 px page), `late.html` (content after load once `/slow?delay=1` answers), `polling.html` (fetch every 100 ms forever), `wipe.html` (script empties the body), `js-redirect.html` (`location.replace("/docs/")`).
+- Tests: `TestAutoFetcher_S36` (16, browser):
+  - auto: the SPA is rendered (signals, result shape); **links only in the rendered DOM (`/app/advanced`) are found** by the Step 32 extractor; a server-rendered page never touches the browser (0 browser requests, 1 server hit); a PDF is never rendered even in `always`; HTTP errors propagate with no render.
+  - never: HTTP only, the detector isn't run. always: every HTML page rendered (2 server hits). No browser: HTTP result, signals still recorded.
+  - Fallbacks: render failure (guard denies documents) → HTTP + `render_failed: …`; wipe page → `render_not_better`; non-2xx render → `render_status_404`.
+  - JS redirect recorded in `final_url` + chain.
+  - Settling: network idle waits for late content (absent with load only); idle cap ends a never-idle page in < 5 s; auto-scroll loads lazy content (chunk fetched once) and is absent without scrolling; scroll step cap stops early.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1016 passed (187 s; browser suite 47 tests, ~2 s Chromium launch per test on a loaded machine). No leftover Chromium processes.
+- Decisions/notes:
+  - **Step 50 (engine)**: one `BrowserPool.job_context(job_id=…)` per crawl job, wrapped in one `AutoFetcher`. Use `result.final_url` for scope re-checks and link extraction (a JS redirect may change it). Persist `rendered_with`, `js_signals` and `render_note` on the `Page` (the `Page` model has `rendered_with`; Step 47 should add the other two).
+  - Rendering re-fetches the document in the browser (2 requests per rendered page). Both go through the per-domain rate limiter only if the engine acquires twice: **Step 50 should `acquire()` before the render too**, or count it via the browser guard hook.
+  - A per-job render-mode override (`CrawlConfig.js_rendering`) belongs to Step 84's API; the `mode=` parameter is ready for it.
+  - Browser tests launch Chromium per test (~2 s). If the suite grows, a module-scoped pool with a module-scoped event loop would cut this.
+- Next: Step 37: Chromium in the worker image
