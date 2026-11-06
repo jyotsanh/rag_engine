@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 
+from rag_engine.crawling import CachedRobots
 from rag_engine.infrastructure import HealthCheck
 
 
@@ -21,3 +22,26 @@ class NoopInfrastructure:
 
     def health_checks(self) -> Mapping[str, HealthCheck]:
         return self.checks
+
+
+class InMemoryRobotsStore:
+    """Satisfies `RobotsStore` without Redis. Records the TTL of every write."""
+
+    def __init__(self) -> None:
+        self.current: dict[str, CachedRobots] = {}
+        self.last_good: dict[str, CachedRobots] = {}
+        self.ttls: dict[tuple[str, str], float] = {}
+
+    async def load(self, origin: str) -> CachedRobots | None:
+        return self.current.get(origin)
+
+    async def save(self, origin: str, entry: CachedRobots, ttl: float) -> None:
+        self.current[origin] = entry
+        self.ttls[("current", origin)] = ttl
+
+    async def load_last_good(self, origin: str) -> CachedRobots | None:
+        return self.last_good.get(origin)
+
+    async def save_last_good(self, origin: str, entry: CachedRobots, ttl: float) -> None:
+        self.last_good[origin] = entry
+        self.ttls[("last_good", origin)] = ttl

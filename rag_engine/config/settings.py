@@ -139,7 +139,12 @@ class Settings(BaseSettings):
     # a longer Retry-After than this makes the page fail instead of waiting (or retrying early)
     CRAWL_RETRY_AFTER_MAX_SECONDS: float = Field(default=120.0, ge=0)
     CRAWL_RENDER_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
-    ROBOTS_CACHE_TTL_SECONDS: int = Field(default=60 * 60, gt=0)
+    # RFC 9309 §2.4: a cached robots.txt should not be used for more than 24 hours
+    ROBOTS_CACHE_TTL_SECONDS: int = Field(default=60 * 60, gt=0, le=24 * 60 * 60)
+    # 5xx/network failures (complete disallow) are re-checked sooner than good copies
+    ROBOTS_UNREACHABLE_CACHE_TTL_SECONDS: int = Field(default=5 * 60, gt=0)
+    # an unreachable robots.txt falls back to the last good copy if it is at most this old
+    ROBOTS_STALE_MAX_SECONDS: int = Field(default=7 * 24 * 60 * 60, ge=0)
 
     @model_validator(mode="after")
     def _check_limits(self) -> Self:
@@ -154,6 +159,10 @@ class Settings(BaseSettings):
         if self.CRAWL_RETRY_BASE_DELAY_SECONDS > self.CRAWL_RETRY_MAX_DELAY_SECONDS:
             raise ValueError(
                 "CRAWL_RETRY_BASE_DELAY_SECONDS must be <= CRAWL_RETRY_MAX_DELAY_SECONDS"
+            )
+        if self.ROBOTS_UNREACHABLE_CACHE_TTL_SECONDS > self.ROBOTS_CACHE_TTL_SECONDS:
+            raise ValueError(
+                "ROBOTS_UNREACHABLE_CACHE_TTL_SECONDS must be <= ROBOTS_CACHE_TTL_SECONDS"
             )
         if self.CRAWL_MAX_PAGE_BYTES > self.CRAWL_MAX_TOTAL_BYTES:
             raise ValueError("CRAWL_MAX_PAGE_BYTES must be <= CRAWL_MAX_TOTAL_BYTES")

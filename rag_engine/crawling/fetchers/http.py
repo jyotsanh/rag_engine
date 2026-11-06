@@ -2,6 +2,8 @@
 
 import asyncio
 import time
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 
@@ -69,6 +71,31 @@ def parse_retry_after(value: str | None) -> float | None:
     return max((when - utc_now()).total_seconds(), 0.0)
 
 
+@dataclass(frozen=True, slots=True)
+class RawResponse:
+    """A 2xx body fetched without the page content-type allowlist (`HttpFetcher.fetch_raw`)."""
+
+    requested_url: str
+    final_url: str
+    redirect_chain: tuple[str, ...]
+    status_code: int
+    mime_type: str
+    charset: str | None
+    body: bytes = field(repr=False)
+    truncated: bool  # cut at max_bytes (only with truncate=True)
+    bytes_downloaded: int
+    elapsed_ms: int
+
+
+def _raise_for_status(response: httpx.Response, url: str) -> None:
+    if not 200 <= response.status_code < 300:
+        raise HttpStatusError(
+            url=url,
+            status_code=response.status_code,
+            retry_after=parse_retry_after(response.headers.get("retry-after")),
+        )
+
+
 class HttpFetcher:
     def __init__(self, client: SafeHttpClient, config: Settings = settings) -> None:
         self._client = client
@@ -76,10 +103,49 @@ class HttpFetcher:
         self._total_timeout = config.CRAWL_FETCH_TIMEOUT_SECONDS
 
     async def fetch(self, url: str) -> FetchResult:
+        """A crawlable page: 2xx, allowlisted content type, at most `CRAWL_MAX_PAGE_BYTES`."""
         start = time.perf_counter()
+        async with self._fetch_errors(url):
+            return await self._fetch(url, start)
+
+    async def fetch_raw(
+        self, url: str, *, accept: str, max_bytes: int, truncate: bool = False
+    ) -> RawResponse:
+        """Any 2xx body with no content-type allowlist (robots.txt, sitemaps).
+
+        Same SSRF, redirect, timeout and error semantics as `fetch()`. Bodies over
+        `max_bytes` raise `TooLargeError`, or are cut at `max_bytes` with `truncate=True`.
+        """
+        start = time.perf_counter()
+        async with (
+            self._fetch_errors(url),
+            self._client.stream_get(url, headers={"Accept": accept}) as result,
+        ):
+            response = result.response
+            _raise_for_status(response, result.url)
+            body, received, truncated = await self._read_capped(
+                response, result.url, max_bytes, truncate=truncate
+            )
+            mime, charset = parse_content_type(response.headers.get("content-type"))
+        return RawResponse(
+            requested_url=url,
+            final_url=result.url,
+            redirect_chain=tuple(result.chain),
+            status_code=response.status_code,
+            mime_type=mime,
+            charset=charset,
+            body=body,
+            truncated=truncated,
+            bytes_downloaded=received,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+        )
+
+    @asynccontextmanager
+    async def _fetch_errors(self, url: str) -> AsyncGenerator[None]:
+        """Total wall-clock cap, and lower-level failures translated to typed `FetchError`s."""
         try:
             async with asyncio.timeout(self._total_timeout):
-                return await self._fetch(url, start)
+                yield
         except FetchError:
             raise
         except TimeoutError as exc:
@@ -103,16 +169,30 @@ class HttpFetcher:
                 str(exc) or type(exc).__name__, url=url, detail=type(exc).__name__
             ) from exc
 
+    @staticmethod
+    async def _read_capped(
+        response: httpx.Response, url: str, max_bytes: int, *, truncate: bool
+    ) -> tuple[bytes, int, bool]:
+        """(body, decoded bytes received, truncated). Capped on decoded bytes: stops gzip bombs."""
+        chunks: list[bytes] = []
+        received = 0
+        async for chunk in response.aiter_bytes():
+            if received + len(chunk) > max_bytes:
+                if not truncate:
+                    raise TooLargeError(
+                        f"body exceeds {max_bytes} bytes", url=url, detail="streamed"
+                    )
+                chunks.append(chunk[: max_bytes - received])
+                return b"".join(chunks), max_bytes, True
+            received += len(chunk)
+            chunks.append(chunk)
+        return b"".join(chunks), received, False
+
     async def _fetch(self, url: str, start: float) -> FetchResult:
         async with self._client.stream_get(url, headers={"Accept": ACCEPT_HEADER}) as result:
             response = result.response
             final_url = result.url
-            if not 200 <= response.status_code < 300:
-                raise HttpStatusError(
-                    url=final_url,
-                    status_code=response.status_code,
-                    retry_after=parse_retry_after(response.headers.get("retry-after")),
-                )
+            _raise_for_status(response, final_url)
 
             mime, charset = parse_content_type(response.headers.get("content-type"))
             kind = kind_for(mime, final_url)
@@ -129,16 +209,9 @@ class HttpFetcher:
                     detail="content_length",
                 )
 
-            chunks: list[bytes] = []
-            received = 0
-            async for chunk in response.aiter_bytes():  # decoded: also caps gzip bombs
-                received += len(chunk)
-                if received > self._max_bytes:
-                    raise TooLargeError(
-                        f"body exceeds {self._max_bytes} bytes", url=final_url, detail="streamed"
-                    )
-                chunks.append(chunk)
-            body = b"".join(chunks)
+            body, received, _ = await self._read_capped(
+                response, final_url, self._max_bytes, truncate=False
+            )
 
         text, encoding = (None, None)
         if kind is ContentKind.HTML:

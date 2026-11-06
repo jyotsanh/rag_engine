@@ -793,3 +793,43 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - All timeouts are retryable as the plan says, including the total-timeout "drip" case. Step 51's job wall-clock cap bounds the worst case (4 × `CRAWL_FETCH_TIMEOUT_SECONDS` per URL).
   - The rate-limit step (30) should also treat a 429's `Retry-After` as a per-domain signal, not just per URL.
 - Next: Step 29: robots.txt
+
+### Step 29: robots.txt  (2026-11-06)
+- Status: ✅ done
+- Built:
+  - `rag_engine/crawling/robots.py` (exported from `rag_engine.crawling`):
+    - `RobotsCache(fetcher, store, config, policy, clock)`: `rules_for(url) -> RobotsRules` and `can_fetch(url)`.
+      - Two cache levels: the shared `RobotsStore` (Redis), plus an in-process LRU (1024 origins) of **parsed** rules, so per-URL checks neither hit Redis nor re-parse.
+      - **Single flight** per origin inside a process. Waiters share one task under `asyncio.shield`, so a cancelled caller doesn't cancel the fetch the others are waiting on.
+    - `RobotsRules`: `status`, `can_fetch(url)` (protego), `crawl_delay` (the larger of `Crawl-delay` and `Request-rate` seconds/requests, for our group), `sitemaps`, `detail`. `/robots.txt` itself is always allowed (RFC 9309 §2.2.2).
+    - Status semantics (RFC 9309 §2.3.1), after Step 28's `call_with_retries`:
+      - 2xx → `ok`, the parsed body. Only the first `ROBOTS_MAX_BYTES` = 500 KiB is read; the rest is truncated (`detail="truncated"`), not failed.
+      - 4xx except 429, and redirect loop / too many redirects / SSRF-blocked redirect → `unavailable` (allow all).
+      - 5xx, 429, timeout, network error → `unreachable` (**complete disallow**). If the last good copy is at most `ROBOTS_STALE_MAX_SECONDS` old, it becomes `stale` and those rules are used instead. Unreachable/stale verdicts are cached for only `ROBOTS_UNREACHABLE_CACHE_TTL_SECONDS`.
+    - Body decoded as UTF-8 with replacement, BOM stripped.
+    - `robots_token(user_agent)`: rules match on the UA **product token** (`RagEngineBot`), not the full UA string. Protego substring-matches, so `User-agent: github` would otherwise hit our UA because of its URL.
+    - `origin_of(url)`: normalized `scheme://host[:port]` (default port dropped, IDNA).
+    - `RedisRobotsStore`: `robots:<digest(origin)>` holds the current verdict as JSON with the raw body, using `PX` = verdict TTL. `robots:<digest>:last_good` keeps the last 2xx copy for `ROBOTS_STALE_MAX_SECONDS`. Unreadable entries are ignored (refetch). Shared across tenants: robots.txt is public, and its content comes from the site itself.
+    - `RawFetcher` / `RobotsStore` protocols for the fetcher and store dependencies.
+  - `HttpFetcher` refactor (`fetchers/http.py`):
+    - The error translation + total timeout became `_fetch_errors()` (an async context manager) and the capped read became `_read_capped()`, so `fetch()` is unchanged in behaviour.
+    - New `fetch_raw(url, accept, max_bytes, truncate=False) -> RawResponse`: any 2xx body, **no content-type allowlist**. Over `max_bytes` it fails (`TooLargeError`) or, with `truncate=True`, is cut. Step 31 sitemaps should use it.
+- Settings: `ROBOTS_CACHE_TTL_SECONDS` now `le=86400` (RFC 9309 §2.4). New: `ROBOTS_UNREACHABLE_CACHE_TTL_SECONDS` (300, validated ≤ the cache TTL) and `ROBOTS_STALE_MAX_SECONDS` (7 days). `.env.example` updated.
+- Deps: runtime `protego>=0.7.0`. Test fake: `tests/support/fakes.py::InMemoryRobotsStore`.
+- Tests:
+  - `TestRobotsTxt_S29` (59, unit; scripted fetcher + in-memory store, plus the fixture site):
+    - Origins incl. IDN/IPv6, UA token.
+    - Group selection (our group replaces `*`), longest-match Allow, `*`/`$` patterns, `github` group not matching, `/robots.txt` allowed under `Disallow: /`, crawl-delay/request-rate matrix, sitemaps.
+    - Status semantics: 6 4xx codes → unavailable, not retried; redirect/SSRF → unavailable; 500/503/429/timeout/network → unreachable after 3 attempts with the short TTL; 503→200 retry; stale fallback (old rules apply); too-old copy not used; truncated and BOM/invalid UTF-8.
+    - Caching: one fetch per origin, origins kept apart, TTL expiry refetch, unreachable rechecked sooner, store hit with no fetch, expired store entry refetched, 20 concurrent lookups → 1 fetch, cancelled caller, bounded local LRU falls back to the store.
+    - Real fetcher: fixture site rules / crawl-delay 0.1 / sitemap with one request; connection refused → unreachable.
+  - `TestFetchRaw_S29` (9, unit, fixture site): text/plain; JSON allowed; truncation; `TooLargeError`; gzip bomb truncated on decoded bytes; 404/loop/SSRF errors; total timeout.
+  - `TestRobotsRedisStore_S29` (5, integration): round trip + PTTL; separate last-good key; corrupt entries ignored; two workers share one fetch; deleted entry refetched.
+  - 2 new settings-validator cases.
+  - Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 798 passed (99 s).
+- Decisions/notes:
+  - **Step 30 (rate limiter)** gets `RobotsRules.crawl_delay` raw, with no clamp. A hostile `Crawl-delay: 86400` must be handled there or by Step 51's job time cap (e.g. clamp, plus log or report it).
+  - **Step 31 (sitemaps)**: take `RobotsRules.sitemaps` and fetch through `fetch_raw` with `call_with_retries`.
+  - **Step 50 (engine)**: check `rules_for(url)` per URL (cheap after the first). An `unreachable` seed origin skips every page as `robots_disallowed`; the job summary should surface `rules.status`/`detail` so users see "robots.txt unreachable", not a silent empty crawl.
+  - Cross-worker duplicate fetches are possible when two workers miss at the same instant (no Redis lock). That's harmless: at most one extra robots.txt request per worker.
+- Next: Step 30: Per-domain rate limiter

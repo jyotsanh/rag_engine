@@ -279,3 +279,82 @@ class TestHttpFetcher_S27:
         assert parse_retry_after(None) is None
         assert parse_retry_after("soon") is None
         assert parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT") == 0.0  # in the past
+
+
+class TestFetchRaw_S29:
+    """S29 — `HttpFetcher.fetch_raw`: any 2xx body (robots.txt, sitemaps), capped or truncated."""
+
+    async def test_plain_text_is_returned(
+        self, fetcher: HttpFetcher, fixture_site: FixtureSite
+    ) -> None:
+        raw = await fetcher.fetch_raw(
+            fixture_site.url("/robots.txt"), accept="text/plain", max_bytes=10_000
+        )
+
+        assert raw.status_code == 200
+        assert raw.mime_type == "text/plain"
+        assert b"Disallow: /private/" in raw.body
+        assert raw.truncated is False
+        assert raw.bytes_downloaded == len(raw.body)
+
+    async def test_no_content_type_allowlist(
+        self, fetcher: HttpFetcher, fixture_site: FixtureSite
+    ) -> None:
+        # `fetch()` skips JSON without downloading it; `fetch_raw` returns it
+        raw = await fetcher.fetch_raw(
+            fixture_site.url("/api/widgets"), accept="*/*", max_bytes=10_000
+        )
+
+        assert raw.mime_type == "application/json"
+        assert raw.body
+
+    async def test_truncate_cuts_at_max_bytes(
+        self, fetcher: HttpFetcher, fixture_site: FixtureSite
+    ) -> None:
+        raw = await fetcher.fetch_raw(
+            fixture_site.url("/large.html"), accept="*/*", max_bytes=1000, truncate=True
+        )
+
+        assert raw.truncated is True
+        assert len(raw.body) == raw.bytes_downloaded == 1000
+
+    async def test_over_max_bytes_fails_without_truncate(
+        self, fetcher: HttpFetcher, fixture_site: FixtureSite
+    ) -> None:
+        with pytest.raises(TooLargeError):
+            await fetcher.fetch_raw(fixture_site.url("/large.html"), accept="*/*", max_bytes=1000)
+
+    async def test_gzip_bomb_is_truncated_on_decoded_bytes(
+        self, fetcher: HttpFetcher, fixture_site: FixtureSite
+    ) -> None:
+        raw = await fetcher.fetch_raw(
+            fixture_site.url("/gzip-bomb"), accept="*/*", max_bytes=4096, truncate=True
+        )
+
+        assert raw.truncated is True
+        assert len(raw.body) == 4096
+
+    @pytest.mark.parametrize(
+        ("path", "error"),
+        [
+            ("/missing.html", HttpStatusError),
+            ("/loop-a", RedirectLoopFetchError),
+            ("/redirect-metadata", SsrfFetchError),
+        ],
+    )
+    async def test_errors_match_fetch(
+        self, fetcher: HttpFetcher, fixture_site: FixtureSite, path: str, error: type[Exception]
+    ) -> None:
+        with pytest.raises(error):
+            await fetcher.fetch_raw(fixture_site.url(path), accept="*/*", max_bytes=10_000)
+
+    async def test_total_timeout_applies(
+        self, fetcher: HttpFetcher, fixture_site: FixtureSite
+    ) -> None:
+        start = time.perf_counter()
+
+        with pytest.raises(FetchTimeoutError) as exc:
+            await fetcher.fetch_raw(fixture_site.url("/drip"), accept="*/*", max_bytes=10_000_000)
+
+        assert exc.value.detail == "total_timeout"
+        assert time.perf_counter() - start < 5

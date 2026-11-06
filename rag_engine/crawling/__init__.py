@@ -7,6 +7,18 @@ from .retry import (
     call_with_retries,
     classify,
 )
+from .robots import (
+    ROBOTS_MAX_BYTES,
+    CachedRobots,
+    RawFetcher,
+    RedisRobotsStore,
+    RobotsCache,
+    RobotsRules,
+    RobotsStatus,
+    RobotsStore,
+    origin_of,
+    robots_token,
+)
 from .scope import (
     ASSET_EXTENSIONS,
     CrawlScope,
@@ -25,14 +37,22 @@ from .url import (
 
 __all__ = [
     "ASSET_EXTENSIONS",
+    "ROBOTS_MAX_BYTES",
     "TRACKING_PARAMS",
     "TRACKING_PREFIXES",
+    "CachedRobots",
     "Classification",
     "CrawlScope",
     "FailureKind",
+    "RawFetcher",
+    "RedisRobotsStore",
     "RetriesExhaustedError",
     "RetryDecision",
     "RetryPolicy",
+    "RobotsCache",
+    "RobotsRules",
+    "RobotsStatus",
+    "RobotsStore",
     "ScopeDecision",
     "ScopeRejection",
     "UrlNormalizationError",
@@ -40,6 +60,8 @@ __all__ = [
     "classify",
     "normalize_and_hash",
     "normalize_url",
+    "origin_of",
     "registrable_domain",
+    "robots_token",
     "url_hash",
 ]
