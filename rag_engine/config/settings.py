@@ -12,6 +12,22 @@ from rag_engine.config.enums import (
     VectorStoreType,
 )
 
+# Playwright `request.resource_type` values that may be blocked (never "document")
+type BrowserResourceType = Literal[
+    "stylesheet",
+    "image",
+    "media",
+    "font",
+    "script",
+    "texttrack",
+    "xhr",
+    "fetch",
+    "eventsource",
+    "websocket",
+    "manifest",
+    "other",
+]
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -147,7 +163,15 @@ class Settings(BaseSettings):
     CRAWL_RESPECT_NOFOLLOW: bool = True
     # link candidates considered per page; link farms beyond this are cut (and flagged)
     CRAWL_MAX_LINKS_PER_PAGE: int = Field(default=5_000, gt=0, le=100_000)
+    # per-page navigation/action timeout inside the browser
     CRAWL_RENDER_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
+    # headless Chromium (Playwright): pages open at once per worker process, request types
+    # aborted before they leave the browser, and a relaunch after this many job contexts
+    CRAWL_BROWSER_MAX_PAGES: int = Field(default=4, gt=0, le=64)
+    # pydantic copies mutable defaults per instance
+    CRAWL_BROWSER_BLOCKED_RESOURCES: list[BrowserResourceType] = ["image", "font", "media"]
+    CRAWL_BROWSER_RECYCLE_AFTER_CONTEXTS: int = Field(default=100, gt=0)
+    CRAWL_BROWSER_HEADLESS: bool = True
     # sitemaps: per-file byte cap (compressed download and inflated; protocol max is 50 MB),
     # files fetched per discovery, and sitemap-index nesting (the protocol allows 1)
     SITEMAP_MAX_BYTES: int = Field(default=50 * 1024 * 1024, gt=0)

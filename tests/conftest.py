@@ -29,7 +29,7 @@ from tests.support.fixture_site import FixtureSite  # noqa: E402
 pytest_plugins = ["pytester"]
 
 TESTS_ROOT = Path(__file__).parent
-_DIRECTORY_MARKERS = {"unit": "unit", "integration": "integration"}
+_DIRECTORY_MARKERS = {"unit": "unit", "integration": "integration", "browser": "browser"}
 
 OverrideSettings = Callable[..., Settings]
 

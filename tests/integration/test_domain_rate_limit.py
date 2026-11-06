@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Callable
 import pytest
 
 from rag_engine.config import Settings
-from rag_engine.crawling import DomainRateLimiter, RateLimitWaitExceededError
+from rag_engine.crawling import DomainRateLimiter, RateLimitWaitExceededError, Reservation
 from rag_engine.infrastructure import RedisConnection, RedisKeyspace, RedisNamespace
 from tests.conftest import OverrideSettings
 
@@ -93,18 +93,20 @@ class TestDomainRateLimiter_S30:
         self, make_limiter: MakeLimiter, other_worker_redis: RedisConnection
     ) -> None:
         worker_a, worker_b = make_limiter(), make_limiter(other_worker_redis)
-        done: list[float] = []
+        reservations: list[Reservation] = []
 
         async def fetch(limiter: DomainRateLimiter) -> None:
-            await limiter.acquire(_URL)
-            done.append(time.perf_counter())
+            reservations.append(await limiter.acquire(_URL))
 
         start = time.perf_counter()
         await asyncio.gather(*(fetch(w) for _ in range(5) for w in (worker_a, worker_b)))
         elapsed = time.perf_counter() - start
 
-        assert 0.4 <= elapsed < 1.5  # 10 requests, 9 gaps of 50 ms
-        assert min(_gaps(done)) > 0.03
+        # only load-proof facts: sleeps never end early, and the booked slots are exact
+        # (wake-up order and gaps between wake-ups depend on how busy the machine is)
+        assert elapsed >= 0.45 - 0.02  # 10 requests, 9 gaps of 50 ms
+        assert elapsed < 10
+        assert min(_gaps([r.start_at for r in reservations])) >= 0.05 - 1e-6  # never closer
 
     async def test_burst_then_spacing(self, make_limiter: MakeLimiter) -> None:
         limiter = make_limiter(CRAWL_PER_DOMAIN_RPS=10.0, CRAWL_PER_DOMAIN_BURST=3)

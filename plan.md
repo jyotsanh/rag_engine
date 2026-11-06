@@ -970,3 +970,32 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 36 (auto fetcher)**: run `detect(result.text)` only for `ContentKind.HTML`. If `needs_rendering`, re-render and record `rendered_with=browser`. Log `signals` on the page (useful when tuning). If the rendered DOM still has `very_low_text`, keep the better of the two results rather than failing.
   - **False negatives** are possible for SPAs that server-render a large shell (nav/footer ≥ 250 chars) around a mount with a non-standard id. A per-job "always render" switch (Step 36/84) is the escape hatch, not more heuristics.
 - Next: Step 34: Playwright browser pool
+
+### Step 34: Playwright browser pool  (2026-11-06)
+- Status: ✅ done
+- Built: `rag_engine/crawling/fetchers/browser.py` (exported from `rag_engine.crawling.fetchers`)
+  - `BrowserPool(config)`: **one Chromium per worker process**, launched **lazily** on first use (`browser()` / `start()`), `stop()` idempotent.
+    - **Fork-safe**: the pool records the pid. A pool inherited through `fork()` (Celery prefork) resets and launches its own browser, never touching the parent's Playwright objects.
+    - **Bound to one event loop**: Playwright objects belong to the loop that created them, so use from another loop raises `BrowserPoolError` instead of hanging. ⇒ **Step 75 must run each worker process on one persistent `asyncio.Runner`** (not `asyncio.run` per task).
+    - **Self-healing**: a disconnected or crashed browser is relaunched on next use (`generation` counts launches). The browser is **recycled** after `CRAWL_BROWSER_RECYCLE_AFTER_CONTEXTS` contexts, but only while no context is open.
+    - `CRAWL_BROWSER_MAX_PAGES` (4) is a per-process semaphore on open pages.
+    - Launch args `--disable-dev-shm-usage` etc. are container-friendly; `CRAWL_BROWSER_HEADLESS`.
+  - `job_context(job_id=, request_guard=)` → `BrowserJobContext`: a **fresh context per job** (isolated cookies/storage/cache), our `CRAWL_USER_AGENT`, a 1280×900 viewport, `en-US`, HTTPS errors not ignored. Closed on exit, including when the job raises.
+    - One `context.route("**/*")` handler sees **every** request (documents included). It aborts `CRAWL_BROWSER_BLOCKED_RESOURCES` (default `image/font/media`; validated `Literal` list, `document` not allowed) and then asks the optional `RequestGuard` (`async (Request) -> abort reason | None`). That hook is where **Step 35 plugs in the SSRF guard**. `ContextStats` counts requests and blocks by `resource:<type>` / `guard:<reason>`.
+    - `page()`: a page with `CRAWL_RENDER_TIMEOUT_SECONDS` default/navigation timeouts, holding a page slot.
+    - `render(url, wait_until="load") -> RenderedPage{requested_url, final_url, status_code, html, elapsed_ms}`, with an asyncio backstop over Playwright's timeouts. Failures raise `RenderError` (`FetchError`, reason `render_failed`, detail `timeout` or the net error). Step 36 adds networkidle caps and auto-scroll on top.
+  - `process_browser_pool()` / `shutdown_process_browser_pool()`: the per-process singleton and the shutdown hook, for Step 75's `worker_process_shutdown` signal. Init needs no hook (lazy launch happens after the fork).
+  - ⚠️ Until Step 35, browser requests are **not SSRF-guarded**: only point the pool at trusted URLs (tests use the loopback fixture site).
+- Settings: `CRAWL_BROWSER_MAX_PAGES` (4, ≤64), `CRAWL_BROWSER_BLOCKED_RESOURCES` (`["image","font","media"]`, type `BrowserResourceType` Literal list), `CRAWL_BROWSER_RECYCLE_AFTER_CONTEXTS` (100), `CRAWL_BROWSER_HEADLESS` (true). `.env.example` updated.
+- Deps: runtime `playwright` (1.64.1 → Chromium build 1248). Local dev setup: `uv run playwright install chromium`. The cached builds 1228/1254 didn't match, so 1248 was downloaded into `~/.cache/ms-playwright`.
+- Tests: new `tests/browser/` directory, auto-marked `browser` (`_DIRECTORY_MARKERS`). It is **skipped when Chromium can't launch** (session probe in `tests/browser/conftest.py`). `tests/README.md` updated.
+  - Fixture site: unlinked `/browser/<name>` assets (`resources.html` with web font, img, video, stylesheet and script).
+  - `TestBrowserPool_S34` (17):
+    - Rendering: the fixture SPA renders (JS content + `/app/advanced` link); UA seen by the server.
+    - Blocking: image/font/media blocked (server never hit) while CSS/JS load; configurable blocked types; the guard aborts requests, sees documents, and never sees already-blocked types.
+    - Lifecycle: per-job cookie isolation (shared within a job); contexts/pages closed incl. on job exception; lazy + idempotent lifecycle; crashed browser relaunched; recycle waits for idle; page concurrency peak = limit.
+    - Failures: page timeout (1 s) → `RenderError("timeout")`; connection refused → `RenderError`. Chromium refuses "unsafe" port 1 itself, so the test uses a freed port.
+    - Binding: second event loop refused; fresh launch after a (simulated) fork; process singleton and shutdown.
+- **Test-robustness fix (Step 30)**: `test_acquire_really_waits` failed once under heavy machine load (load average ~11 from other apps), because it asserted a minimum gap between *wake-up* times. It now asserts only load-proof facts: elapsed ≥ 9 intervals (sleeps never end early) and booked slots never closer than one interval.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 983 passed (344 s on a heavily loaded machine; the browser tests alone take ~53 s, and the suite without them took 105 s at Step 33). No leftover Chromium processes after the run.
+- Next: Step 35: Browser SSRF enforcement

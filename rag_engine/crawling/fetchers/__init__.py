@@ -1,3 +1,14 @@
+from .browser import (
+    BrowserJobContext,
+    BrowserPool,
+    BrowserPoolError,
+    ContextStats,
+    RenderedPage,
+    RenderError,
+    RequestGuard,
+    process_browser_pool,
+    shutdown_process_browser_pool,
+)
 from .content import ACCEPT_HEADER, MIME_KINDS, decode_html, kind_for, parse_content_type
 from .errors import (
     FetchError,
@@ -15,6 +26,10 @@ from .http import FetchResult, HttpFetcher, RawFetcher, RawResponse, parse_retry
 __all__ = [
     "ACCEPT_HEADER",
     "MIME_KINDS",
+    "BrowserJobContext",
+    "BrowserPool",
+    "BrowserPoolError",
+    "ContextStats",
     "FetchError",
     "FetchResult",
     "FetchTimeoutError",
@@ -24,6 +39,9 @@ __all__ = [
     "RawFetcher",
     "RawResponse",
     "RedirectLoopFetchError",
+    "RenderError",
+    "RenderedPage",
+    "RequestGuard",
     "SsrfFetchError",
     "TooLargeError",
     "TooManyRedirectsFetchError",
@@ -32,4 +50,6 @@ __all__ = [
     "kind_for",
     "parse_content_type",
     "parse_retry_after",
+    "process_browser_pool",
+    "shutdown_process_browser_pool",
 ]

@@ -44,6 +44,31 @@ METADATA_URL = "http://169.254.169.254/latest/meta-data/"
 
 _TEMPLATED_SUFFIXES = {".html", ".xml", ".txt"}
 
+# ---- subresources for browser tests, served (unlinked) at /browser/<name>; Step 34 ---- #
+_PNG_1X1 = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+    "1f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082"
+)
+BROWSER_ASSETS: dict[str, tuple[bytes, str]] = {
+    "resources.html": (
+        b"""<!doctype html><html><head><title>Resources</title>
+<style>@font-face{font-family:Fx;src:url(/browser/font.woff2) format("woff2")}
+body{font-family:Fx,sans-serif}</style>
+<link rel="stylesheet" href="/browser/style.css">
+<script src="/browser/app.js"></script>
+</head><body><h1>Resources page</h1>
+<img src="/browser/logo.png" alt="logo">
+<video src="/browser/clip.mp4" preload="auto" autoplay muted></video>
+<p>Text set in the web font.</p></body></html>""",
+        "text/html; charset=utf-8",
+    ),
+    "style.css": (b"h1{color:#123456}", "text/css"),
+    "app.js": (b"document.documentElement.dataset.js='ran';", "text/javascript"),
+    "font.woff2": (b"wOF2" + b"\x00" * 64, "font/woff2"),
+    "clip.mp4": (b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64, "video/mp4"),
+    "logo.png": (_PNG_1X1, "image/png"),
+}
+
 # ---- sitemap edge cases, served (unlinked) at /sitemaps/<name>; Step 31 tests ---- #
 SITEMAP_BOMB_BYTES = 4 * 1024 * 1024  # inflated size of /sitemaps/bomb.xml.gz
 _SM_NS = 'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
@@ -376,6 +401,14 @@ def build_app(state: _State) -> Starlette:
         raw = _render(request, (SITE_ROOT / "sitemap-docs.xml").read_bytes())
         return Response(gzip.compress(raw, mtime=0), media_type="application/gzip")
 
+    async def browser_asset(request: Request) -> Response:
+        await record(request)
+        asset = BROWSER_ASSETS.get(request.path_params["name"])
+        if asset is None:
+            return HTMLResponse(_html("Not found", "<h1>Not found</h1>"), status_code=404)
+        body, media_type = asset
+        return Response(body, headers={"Content-Type": media_type})
+
     async def sitemap_edge(request: Request) -> Response:
         await record(request)
         name = request.path_params["name"]
@@ -459,6 +492,7 @@ def build_app(state: _State) -> Starlette:
         Route("/drip", drip),
         Route("/sitemap-docs.xml.gz", gz_sitemap),
         Route("/sitemaps/{name:str}", sitemap_edge),
+        Route("/browser/{name:str}", browser_asset),
         Route("/app/advanced", app_advanced),
         Route("/{path:path}", static),
     ]
