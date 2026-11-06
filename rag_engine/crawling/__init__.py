@@ -1,4 +1,10 @@
 from .fetchers import RawFetcher
+from .js_shell import (
+    JsShellDetector,
+    JsShellThresholds,
+    JsShellVerdict,
+    JsSignal,
+)
 from .links import (
     Link,
     LinkExtractor,
@@ -75,6 +81,10 @@ __all__ = [
     "CrawlScope",
     "DomainRateLimiter",
     "FailureKind",
+    "JsShellDetector",
+    "JsShellThresholds",
+    "JsShellVerdict",
+    "JsSignal",
     "Link",
     "LinkExtractor",
     "LinkSource",

@@ -939,3 +939,34 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 39 (HTML extractor)** should reuse `PageLinks.noindex` (skip indexing, still follow links unless nofollow), and Step 46 uses `canonical_url` for `canonical_elsewhere`.
   - The JS-rendered DOM (Step 36) goes through the same `extract()` with the rendered HTML.
 - Next: Step 33: JS-shell detector
+
+### Step 33: JS-shell detector  (2026-11-06)
+- Status: ✅ done
+- Built: `rag_engine/crawling/js_shell.py` (exported from `rag_engine.crawling`)
+  - `JsShellDetector(thresholds).detect(html) -> JsShellVerdict{needs_rendering, score, signals, text_chars, script_count, script_bytes, mount}`. It works on the raw HTML only (lxml, same bytes+UTF-8 parsing as Step 32), with no network.
+  - Weighted signals (`JsSignal`), render when score ≥ `threshold` (3):
+
+    | Signal | Weight | Condition |
+    |---|---|---|
+    | `very_low_text` | +3 | < 50 visible chars |
+    | `low_text` | +2 | < 250 visible chars |
+    | `empty_mount` | +3 | an SPA mount has no visible text: `#root #app #__next #__nuxt #___gatsby #svelte …`, `<app-root>`, `[ng-app] [data-reactroot] [data-v-app]`; a spinner or only `<style>`/`<svg>` inside still counts as empty |
+    | `noscript_hint` | +2 | `<noscript>` text like "enable/requires/turn on JavaScript", "JavaScript is disabled" |
+    | `template_markers` | +2 | ≥ 3 unrendered `{{ … }}` in the visible text |
+    | `ajax_fragment_meta` | +2 | `<meta name="fragment" content="!">` |
+    | `script_heavy` | +1 | inline code bytes + 5000 per external script ≥ 10 × visible text |
+    | `rich_text` | −2 | ≥ 2000 visible chars |
+
+  - **Guards towards not rendering** (Playwright is expensive): a page with **no executable script never renders**, whatever the score. Rich text offsets a stray empty widget mount.
+  - Visible text excludes `script/style/noscript/template/svg/head`. JSON data blocks (`application/ld+json`, `application/json`, `__NEXT_DATA__`, text templates) are not counted as scripts.
+  - `JsShellThresholds` (frozen dataclass) holds the tunables. They aren't in settings yet; Step 36 can expose them if tuning is needed.
+- Tests: `TestJsShellDetector_S33` (32, unit):
+  - Shells: CRA shell (noscript, `#root`, text 0); Next.js client-only (`__NEXT_DATA__` not counted as code); Angular `<app-root>`; 4 empty-mount variants (spinner, style+svg, Gatsby, `data-reactroot`); AngularJS `{{ }}` templates; AJAX fragment meta; "Loading…" placeholder.
+  - Not shells: SSR Next.js with content; article with analytics scripts; script-less short page (score ≥ 3 but never rendered); short page with a small script; rich article with a stray `#app`; JSON-LD-only page.
+  - Mechanics: non-visible text excluded; 7 noscript texts (5 hints, pixel and video fallbacks not); 5 empty/garbage inputs; configurable threshold.
+  - Fixture site: **every static fixture page is judged not-a-shell except `/app/`**, which is cross-checked against `SITE_PAGES` `JS_RENDERED`; `/app/` fetched over HTTP → render, mount `#root`.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 966 passed (105 s).
+- Decisions/notes:
+  - **Step 36 (auto fetcher)**: run `detect(result.text)` only for `ContentKind.HTML`. If `needs_rendering`, re-render and record `rendered_with=browser`. Log `signals` on the page (useful when tuning). If the rendered DOM still has `very_low_text`, keep the better of the two results rather than failing.
+  - **False negatives** are possible for SPAs that server-render a large shell (nav/footer ≥ 250 chars) around a mount with a non-standard id. A per-job "always render" switch (Step 36/84) is the escape hatch, not more heuristics.
+- Next: Step 34: Playwright browser pool
