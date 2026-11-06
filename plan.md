@@ -1076,3 +1076,37 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - A per-job render-mode override (`CrawlConfig.js_rendering`) belongs to Step 84's API; the `mode=` parameter is ready for it.
   - Browser tests launch Chromium per test (~2 s). If the suite grows, a module-scoped pool with a module-scoped event loop would cut this.
 - Next: Step 37: Chromium in the worker image
+
+### Step 37: Chromium in the worker image  (2026-11-06)
+- Status: ✅ done
+- Built:
+  - `Dockerfile` (BuildKit, pinned `python:3.14-slim-bookworm` + `ghcr.io/astral-sh/uv:0.11.14`):
+    - `base`: Python + uv; venv at `/app/.venv` on `PATH`.
+    - `deps`: `uv sync --frozen --no-dev --no-install-project` with a uv cache mount and bind-mounted lock/pyproject, so the layer only changes with `uv.lock`.
+    - **`worker`**:
+      - copies the deps venv, then `playwright install --with-deps --only-shell chromium`. That layer depends only on the playwright version. Only the headless shell is installed, which is all `headless=True` needs; headed mode is unsupported in the image.
+      - then installs the project non-editable (`uv sync --no-dev --no-editable`), so code changes don't re-download Chromium.
+      - runs as non-root user `app` (uid 10001), with `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`.
+      - `CMD` is a placeholder (smoke `--help`); **Step 75 sets the Celery worker command**, and **Step 95 adds the `api` stage** and hardening on the same `deps` stage.
+    - Build ≈ 1m50 cold; image 1.57 GB, mostly Chromium's system libraries plus the Python deps. Step 95 can slim it.
+  - `.dockerignore`: `.env*` (except `.env.example`), `.git`, `.venv`, caches, `tests`, `plan.md`… **Secrets never enter the build context.**
+  - `rag_engine/crawling/fetchers/smoke.py`: `python -m rag_engine.crawling.fetchers.smoke URL [--mode auto|always|never] [--expect TEXT] [--allow-http]`. It runs the real fetch path (`SafeHttpClient` → `AutoFetcher` → SSRF-guarded `BrowserPool`), prints one JSON line (ok, final_url, status, rendered_with, js_signals, render_note, chromium version, html preview/size, expect_found), and exits 0 only if rendered by the browser (unless `--allow-http`) and the `--expect` text is present. It doubles as an ops self-check for a worker host.
+- **Bug found by the container test: runtime deps declared as dev-only.**
+  - `httpx` was in the dev group. `httpcore` (imported directly by `safe_http`) and `qdrant-client` (`infrastructure/qdrant.py`) came only transitively through dev tools (`testcontainers[qdrant]`).
+  - A `--no-dev` install (the image) failed with `ModuleNotFoundError: httpx`.
+  - Moved `httpx>=0.28.1`, `httpcore>=1.0.9` and `qdrant-client>=1.19.1` to runtime dependencies (locked versions unchanged).
+  - Regression guard **`TestRuntimeDependencies_S37`** (unit, 2): every third-party import under `rag_engine/` must be provided by the `uv export --frozen --no-dev` closure, and dev tools (pytest/ruff/ty/testcontainers/trustme) must not be in it. Verified it fails on the pre-fix lock.
+- Test infra:
+  - New `tests/container/`, auto-marked **`container`** (registered in pyproject) and **skipped unless `--run-container`** (new conftest option), and skipped if no Docker daemon.
+  - A session fixture builds `rag-engine-worker:test` once.
+  - `tests/README.md` updated.
+- Tests: `TestWorkerImage_S37` (4, container, `--network host` to reach the host's fixture site, dummy secrets via `-e`):
+  - **The image renders the fixture SPA** (`--expect "Widget configurator"`, `rendered_with=browser`, `empty_mount` signal, Chromium version reported, 2 server hits = HTTP + browser via our client).
+  - A server-rendered page needs no browser.
+  - **SSRF enforced in the image**: default settings block loopback (`ssrf_blocked`, 0 server hits).
+  - Runs as uid 10001, with no `/app/.env` and no `/app/tests`, and the headless shell present in `PLAYWRIGHT_BROWSERS_PATH`.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1018 passed, 4 skipped (container) in 150 s; `--run-container`: 4 passed (147 s incl. build).
+- Decisions/notes:
+  - The image has no `.env` and never will. Configuration is environment variables, which compose (Step 96) supplies.
+  - Chromium runs with Playwright's default `--no-sandbox` (the container is the isolation boundary, as a non-root user). Step 95/98 may revisit with a seccomp profile if the sandbox is wanted.
+- Next: Step 38: Extractor framework

@@ -1,0 +1,18 @@
+# Build context allowlist mindset: never ship secrets, local state or the test suite.
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+.hypothesis
+.mypy_cache
+tests
+plan.md
+docker-compose.yml
+Dockerfile
+.dockerignore

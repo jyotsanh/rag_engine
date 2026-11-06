@@ -2,7 +2,8 @@
 
 - Injects deterministic secrets before `rag_engine.config.settings` is imported.
 - Auto-marks tests by directory (`tests/unit` → `unit`, `tests/integration` → `integration`).
-- Skips `live` tests unless `--run-live` is given.
+- Auto-marks `tests/browser` → `browser` and `tests/container` → `container`.
+- Skips `live` tests unless `--run-live`, `container` tests unless `--run-container`.
 - Provides `override_settings` for validated, auto-restored settings changes.
 """
 
@@ -29,7 +30,12 @@ from tests.support.fixture_site import FixtureSite  # noqa: E402
 pytest_plugins = ["pytester"]
 
 TESTS_ROOT = Path(__file__).parent
-_DIRECTORY_MARKERS = {"unit": "unit", "integration": "integration", "browser": "browser"}
+_DIRECTORY_MARKERS = {
+    "unit": "unit",
+    "integration": "integration",
+    "browser": "browser",
+    "container": "container",
+}
 
 OverrideSettings = Callable[..., Settings]
 
@@ -41,10 +47,17 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="run tests marked `live` (real OpenAI / public websites; costs money)",
     )
+    parser.addoption(
+        "--run-container",
+        action="store_true",
+        default=False,
+        help="run tests marked `container` (builds the Docker images; minutes)",
+    )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     skip_live = pytest.mark.skip(reason="live test: pass --run-live to run")
+    skip_container = pytest.mark.skip(reason="container test: pass --run-container to run")
     for item in items:
         path = Path(item.path)
         if path.is_relative_to(TESTS_ROOT):
@@ -53,6 +66,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
                 item.add_marker(marker)
         if "live" in item.keywords and not config.getoption("--run-live"):
             item.add_marker(skip_live)
+        if "container" in item.keywords and not config.getoption("--run-container"):
+            item.add_marker(skip_container)
 
 
 @pytest.fixture

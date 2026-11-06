@@ -9,6 +9,8 @@ dependencies = [
     "charset-normalizer>=3.4",
     "defusedxml>=0.7.1",
     "fastapi>=0.120",
+    "httpcore>=1.0.9",
+    "httpx>=0.28.1",
     "idna>=3.10",
     "loguru>=0.7.3",
     "lxml>=6.1.3",
@@ -17,6 +19,7 @@ dependencies = [
     "pydantic>=2.12",
     "pydantic-settings>=2.13",
     "pymongo>=4.19",
+    "qdrant-client>=1.19.1",
     "redis>=6.4",
     "tldextract>=5.3",
     "uvicorn[standard]>=0.40",
@@ -39,7 +42,6 @@ packages = ["rag_engine"]
 [dependency-groups] # development dependencies are local-only, not in project requirements
 dev = [
     "asgi-lifespan>=2.1",
-    "httpx>=0.28",
     "hypothesis>=6.140",
     "openpyxl>=3.1",
     "pymupdf>=1.26",
@@ -98,6 +100,7 @@ markers = [
     "unit: fast, isolated; no containers or external network, loopback fixture site allowed (auto-applied under tests/unit)",
     "integration: real MongoDB/Redis/Qdrant via testcontainers (auto-applied under tests/integration)",
     "browser: needs Playwright Chromium",
+    "container: builds and runs the Docker images (opt-in: --run-container)",
     "live: hits real external services (OpenAI, public websites); needs --run-live",
     "eval: retrieval quality evaluation",
 ]
