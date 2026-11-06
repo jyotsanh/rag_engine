@@ -760,3 +760,36 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Bodies are held in memory up to `CRAWL_MAX_PAGE_BYTES` (20 MiB). With `CRAWL_CONCURRENCY`=8 that's ≤160 MiB per worker in the worst case, so keep these two settings in mind together.
   - `text/plain`, JSON, XML, images etc. are skips (`unsupported_content_type`), not failures. Sitemaps (XML) are fetched by Step 31 through its own path.
 - Next: Step 28: Retry & failure policy
+
+### Step 28: Retry & failure policy  (2026-11-06)
+- Status: ✅ done
+- Built: `rag_engine/crawling/retry.py` (exported from `rag_engine.crawling`)
+  - `classify(FetchError) -> Classification{kind, reason, detail, retry_after}`, with `FailureKind` = `retryable` / `permanent` / `skip`:
+    - **retryable**: timeouts (connect/read/total), network errors (refused/reset, DNS timeout or `EAI_AGAIN`), 5xx except 501/505, 408/425/429. `Retry-After` is kept only for retryable statuses.
+    - **permanent**: other 4xx, 501/505, SSRF-blocked, too large, redirect loop, too many redirects. Also two network errors that a retry can't fix, found by walking the exception's `__cause__` chain: a bad TLS certificate (`ssl.SSLCertVerificationError` → detail `tls_certificate`) and a host that doesn't exist (`gaierror` `EAI_NONAME`/`EAI_NODATA` → detail `dns_nxdomain`). Both were checked against real chains (trustme server, stub resolver). The `reason` stays `network_error`.
+    - **skip**: unsupported content type (page status `skipped`, not `failed`).
+    - An unknown `FetchError` subclass is **permanent** (fail closed: don't hammer a site).
+  - `RetryPolicy(max_attempts, base_delay, max_delay, max_retry_after, rng)` with `from_settings()`:
+    - `backoff(n)`: equal jitter. The delay is uniform in [d/2, d] with d = min(max, base·2^(n-1)), so a struggling site always gets a real pause.
+    - `decide(error, attempts) -> RetryDecision{retry, attempts, reason, detail, delay_seconds, final_status}`. `Retry-After` is a **floor** on the delay. If `Retry-After` exceeds `CRAWL_RETRY_AFTER_MAX_SECONDS`, the page fails at once (detail says so) rather than waiting that long or retrying early. When the attempt limit is hit, the detail gets "gave up after N attempts".
+  - `call_with_retries(operation, policy, sleep=asyncio.sleep)`: retries only `FetchError`. Anything else (bugs, cancellation) propagates at once. Giving up raises `RetriesExhaustedError{decision, error}`, which carries everything a `Page` row needs (status, reason, detail, attempts).
+- Settings: `CRAWL_MAX_RETRIES` (existing, 3) is the number of retries, so the per-URL attempt limit is 4. New: `CRAWL_RETRY_BASE_DELAY_SECONDS` (1), `CRAWL_RETRY_MAX_DELAY_SECONDS` (30, validated ≥ base), `CRAWL_RETRY_AFTER_MAX_SECONDS` (120). `.env.example` updated.
+- Tests: `TestRetryPolicy_S28` (59, unit):
+  - 23-case classification matrix; `Retry-After` kept only when retryable; TLS-cert and NXDOMAIN chains permanent; `EAI_AGAIN`/DNS timeout/reset retryable; a cause cycle doesn't hang.
+  - Backoff bounds per attempt (200 draws each), cap, jitter varies, seeded determinism.
+  - Decisions: retry under the limit, give up at the limit, single-attempt policy, permanent and skip outcomes, `Retry-After` floor, backoff beating a shorter `Retry-After`, oversized `Retry-After` gives up, invalid policies rejected, `from_settings`.
+  - Against the fixture site through the real fetcher (fake sleep):
+    - `/flaky`: 3 requests, 2 sleeps ≥ 1 s
+    - `/error`: exactly 4 requests, increasing delays
+    - `/missing.html`, `/redirect-metadata`, `/api/widgets`: 1 request, no sleep
+    - `/rate-limited`: 4 requests, all sleeps ≥ 2 s; with a 1 s cap, gives up after 1 request
+    - connection refused: retried
+    - stub-resolver NXDOMAIN: 1 attempt; `EAI_AGAIN`: 4 attempts
+  - Non-fetch errors are not retried; the real `asyncio.sleep` default path works. New settings-validator case in `TestSettings_S3`. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 723 passed (161 s).
+- Decisions/notes:
+  - `Page.attempts` should be `RetryDecision.attempts`.
+  - **Step 50 (engine)** should call `policy.decide()` itself. On `retry`, it re-queues the URL in the frontier with a not-before time (Step 48 needs a `retry_at` field) instead of sleeping inside a concurrency slot. Otherwise it records `final_status`/`reason`/`detail`.
+  - Steps 29/31 (robots.txt, sitemaps) can use `call_with_retries` inline.
+  - All timeouts are retryable as the plan says, including the total-timeout "drip" case. Step 51's job wall-clock cap bounds the worst case (4 × `CRAWL_FETCH_TIMEOUT_SECONDS` per URL).
+  - The rate-limit step (30) should also treat a 429's `Retry-After` as a per-domain signal, not just per URL.
+- Next: Step 29: robots.txt
