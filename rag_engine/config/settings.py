@@ -128,6 +128,8 @@ class Settings(BaseSettings):
     CRAWL_PER_DOMAIN_RPS: float = Field(default=2.0, gt=0)
     CRAWL_CONNECT_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0)
     CRAWL_READ_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
+    # wall-clock cap per fetch incl. redirects; stops servers that drip bytes under the read timeout
+    CRAWL_FETCH_TIMEOUT_SECONDS: float = Field(default=60.0, gt=0)
     CRAWL_MAX_REDIRECTS: int = Field(default=5, ge=0)
     CRAWL_MAX_RETRIES: int = Field(default=3, ge=0)
     CRAWL_RENDER_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
@@ -141,6 +143,8 @@ class Settings(BaseSettings):
             raise ValueError("CRAWL_DEFAULT_MAX_DEPTH must be <= CRAWL_HARD_MAX_DEPTH")
         if self.TENANT_DEFAULT_MAX_PAGES_PER_JOB > self.CRAWL_HARD_MAX_PAGES:
             raise ValueError("TENANT_DEFAULT_MAX_PAGES_PER_JOB must be <= CRAWL_HARD_MAX_PAGES")
+        if self.CRAWL_FETCH_TIMEOUT_SECONDS < self.CRAWL_READ_TIMEOUT_SECONDS:
+            raise ValueError("CRAWL_FETCH_TIMEOUT_SECONDS must be >= CRAWL_READ_TIMEOUT_SECONDS")
         if self.CRAWL_MAX_PAGE_BYTES > self.CRAWL_MAX_TOTAL_BYTES:
             raise ValueError("CRAWL_MAX_PAGE_BYTES must be <= CRAWL_MAX_TOTAL_BYTES")
         if self.CELERY_TASK_SOFT_TIME_LIMIT_SECONDS >= self.CELERY_TASK_TIME_LIMIT_SECONDS:

@@ -1175,6 +1175,7 @@ name = "rag-engine"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "charset-normalizer" },
     { name = "fastapi" },
     { name = "idna" },
     { name = "loguru" },
@@ -1208,6 +1209,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "charset-normalizer", specifier = ">=3.4" },
     { name = "fastapi", specifier = ">=0.120" },
     { name = "idna", specifier = ">=3.10" },
     { name = "loguru", specifier = ">=0.7.3" },

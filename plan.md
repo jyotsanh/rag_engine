@@ -730,3 +730,33 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Only GET is exposed. Step 83's webhook delivery adds a POST path that does **not** follow redirects.
   - Step 27 builds on `stream_get` for streaming size caps, content-type checks and charset detection, and must map `RedirectLoopError` → `redirect_loop`, `TooManyRedirectsError` → `too_many_redirects`, `SsrfBlockedError` → `ssrf_blocked`, `HostResolutionError`/`httpx.NetworkError` → `network_error`, `httpx.TimeoutException` → `timeout`.
 - Next: Step 27: HTTP fetcher
+
+### Step 27: HTTP fetcher  (2026-10-23)
+- Status: ✅ done
+- Built (`rag_engine/crawling/fetchers/`):
+  - `http.py`: `HttpFetcher(SafeHttpClient, config).fetch(url)` returns a `FetchResult` **only for 2xx**; everything else raises a typed `FetchError`.
+    - `FetchResult` (frozen): requested/final URL, redirect chain, status, MIME, `content_kind`, `body` bytes, `text` (decoded HTML only), `encoding`, `bytes_downloaded`, `elapsed_ms`, kept headers (`content-language`, `link`, `x-robots-tag`, `last-modified`, `etag`), `rendered_with=http`.
+    - Content type is decided **from headers before reading the body** (unsupported → no download).
+    - A declared `Content-Length` over `CRAWL_MAX_PAGE_BYTES` fails immediately. Streaming is capped on **decoded** bytes, so gzip bombs are stopped too.
+    - A wall-clock cap `CRAWL_FETCH_TIMEOUT_SECONDS` (new, default 60, validated ≥ the read timeout) covers the whole fetch incl. redirects, which stops servers dripping bytes under the read timeout.
+    - `Accept` advertises the supported types. `parse_retry_after` handles delta-seconds and HTTP dates.
+  - `content.py`:
+    - `MIME_KINDS` allowlist: HTML/XHTML, PDF, DOCX, PPTX, XLSX.
+    - `kind_for(mime, url)`: for `application/octet-stream` or a missing type, the URL extension decides (Step 38 confirms by magic bytes); an explicit wrong type wins over the extension.
+    - `parse_content_type`.
+    - `decode_html`: header charset → BOM (beats a missing/Unicode header) → `<meta charset>`/`http-equiv` in the first 4 KB → `charset-normalizer` detection → UTF-8 with replacement.
+  - `errors.py`: each error carries its `PageReason`, so Step 28 classifies retries in one place:
+    - `NetworkFetchError` (connection/DNS/TLS/protocol → `network_error`)
+    - `FetchTimeoutError` (`timeout`)
+    - `SsrfFetchError` (`ssrf_blocked`, detail = the SSRF rejection)
+    - `RedirectLoopFetchError`, `TooManyRedirectsFetchError`
+    - `TooLargeError` (detail `content_length` / `streamed`)
+    - `UnsupportedContentTypeError` (`unsupported_content_type`, a **skip**)
+    - `HttpStatusError` (status + `retry_after`; reason 429 → `rate_limited`, 5xx → `http_server_error`, else `http_client_error`)
+- Fixture site: unlinked `/gzip-page`, `/gzip-bomb` (~25 KB → 25 MiB), `/files/octet/…pdf` and `/files/untyped/…pdf`, `/bom-page`, `/drip` (bytes every 0.2 s forever).
+- Deps: runtime `charset-normalizer`.
+- Tests: `TestHttpFetcher_S27` (40, unit, fixture site): HTML result shape; redirect chain; 6 document kinds incl. octet-stream and untyped PDF; JSON rejected without download; declared 25 MiB fails in <1 s; streamed cap; gzip decoded; gzip bomb capped; latin-1 via meta; UTF-8 BOM stripped; 404/500/429 (+`Retry-After` 2 s); read timeout; drip stopped by the total timeout (2.5–5 s for a 3 s cap); redirect loop; metadata redirect → `ssrf_blocked`; too many redirects; connection refused and DNS failure → `network_error`; `parse_content_type`, `kind_for` (6 cases), `decode_html` (incl. cp1251 detection), `Retry-After` parsing. Settings test for the new timeout ordering. Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 663 passed.
+- Decisions/notes:
+  - Bodies are held in memory up to `CRAWL_MAX_PAGE_BYTES` (20 MiB). With `CRAWL_CONCURRENCY`=8 that's ≤160 MiB per worker in the worst case, so keep these two settings in mind together.
+  - `text/plain`, JSON, XML, images etc. are skips (`unsupported_content_type`), not failures. Sitemaps (XML) are fetched by Step 31 through its own path.
+- Next: Step 28: Retry & failure policy

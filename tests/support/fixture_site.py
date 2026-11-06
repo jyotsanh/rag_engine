@@ -273,6 +273,48 @@ def build_app(state: _State) -> Starlette:
             headers={"Content-Length": str(LARGE_BODY_BYTES)},
         )
 
+    # ---- unlinked routes for fetcher tests (not part of SITE_PAGES) ---- #
+
+    async def gzip_page(request: Request) -> Response:
+        await record(request)
+        html = _html("Compressed", "<h1>Compressed page</h1><p>Served with gzip.</p>").encode()
+        return Response(
+            gzip.compress(html, mtime=0),
+            headers={"Content-Type": "text/html; charset=utf-8", "Content-Encoding": "gzip"},
+        )
+
+    async def gzip_bomb(request: Request) -> Response:
+        await record(request)
+        # ~25 KiB on the wire, 25 MiB once decoded
+        bomb = gzip.compress(b"<p>" + b"A" * LARGE_BODY_BYTES, compresslevel=9, mtime=0)
+        return Response(bomb, headers={"Content-Type": "text/html", "Content-Encoding": "gzip"})
+
+    async def untyped_pdf(request: Request) -> Response:
+        await record(request)
+        response = Response((SITE_ROOT / "files" / "widget-spec.pdf").read_bytes())
+        if request.path_params["kind"] == "octet":
+            response.headers["Content-Type"] = "application/octet-stream"
+        elif "content-type" in response.headers:
+            del response.headers["content-type"]
+        return response
+
+    async def bom_page(request: Request) -> Response:
+        await record(request)
+        html = _html("BOM", "<h1>Café</h1><p>naïve façade</p>").encode("utf-8")
+        return Response(b"\xef\xbb\xbf" + html, headers={"Content-Type": "text/html"})
+
+    async def drip(request: Request) -> Response:
+        """Sends a few bytes every 0.2 s forever: never trips a read timeout."""
+        await record(request)
+
+        async def chunks() -> AsyncIterator[bytes]:
+            yield b"<!doctype html><html><body>"
+            while True:
+                await asyncio.sleep(0.2)
+                yield b"<p>.</p>"
+
+        return StreamingResponse(chunks(), media_type="text/html")
+
     async def api_widgets(request: Request) -> Response:
         await record(request)
         return Response(b'{"widgets": ["WX-2048", "WX-4096"]}', media_type="application/json")
@@ -330,6 +372,11 @@ def build_app(state: _State) -> Starlette:
         Route("/large.html", large_html),
         Route("/files/huge-catalog.pdf", huge_pdf),
         Route("/api/widgets", api_widgets),
+        Route("/gzip-page", gzip_page),
+        Route("/gzip-bomb", gzip_bomb),
+        Route("/files/{kind:str}/widget-spec.pdf", untyped_pdf),
+        Route("/bom-page", bom_page),
+        Route("/drip", drip),
         Route("/sitemap-docs.xml.gz", gz_sitemap),
         Route("/app/advanced", app_advanced),
         Route("/{path:path}", static),
