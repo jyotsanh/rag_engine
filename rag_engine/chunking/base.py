@@ -16,7 +16,8 @@ heading path). Everything every strategy must get right lives in the final `chun
   and the embedding cache key on it, Step 64);
 - heading paths are capped at `MAX_HEADING_DEPTH` levels (the outermost are kept).
 
-`ChunkDraft.to_document(source)` turns a draft into the persisted `Chunk` (Step 59).
+`ChunkDraft.to_document(source)` turns a draft into the persisted `Chunk` (Step 59), with
+the deterministic id `chunk_id(page_id, ordinal)`; `chunk_documents(source)` does both.
 """
 
 import hashlib
@@ -28,7 +29,7 @@ from typing import ClassVar, Protocol
 from rag_engine.chunking.context import build_context, compose_embed_text
 from rag_engine.chunking.exceptions import ChunkTooLargeError, TokenizerError
 from rag_engine.config import Settings, settings
-from rag_engine.domain import Chunk, ContentKind, Page, PageStatus
+from rag_engine.domain import Chunk, ContentKind, Page, PageStatus, chunk_id
 
 MAX_HEADING_DEPTH = 12  # `Chunk.heading_path` limit
 DEFAULT_CONTEXT_TOKENS = 100  # mirrors the CHUNK_CONTEXT_MAX_TOKENS default
@@ -135,6 +136,7 @@ class ChunkDraft:
 
     def to_document(self, source: ChunkInput) -> Chunk:
         return Chunk(
+            id=chunk_id(source.page_id, self.ordinal),
             tenant_id=source.tenant_id,
             kb_id=source.kb_id,
             source_id=source.source_id,
@@ -189,6 +191,10 @@ class BaseChunker(ABC):
     def embed_text(self, source: ChunkInput, piece: ChunkPiece, text: str) -> str:
         """The string the embedder receives for a piece: context + blank line + text."""
         return compose_embed_text(self.context(source, piece.heading_path), text)
+
+    def chunk_documents(self, source: ChunkInput) -> list[Chunk]:
+        """`chunk()` as the `Chunk` documents to persist (Step 59)."""
+        return [draft.to_document(source) for draft in self.chunk(source)]
 
     def chunk(self, source: ChunkInput) -> list[ChunkDraft]:
         drafts: list[ChunkDraft] = []

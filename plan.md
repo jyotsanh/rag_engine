@@ -1826,3 +1826,27 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 59**: persist with `draft.to_document(source)`; both texts are already on the draft.
   - **Step 60** (golden tests): snapshot `embed_text` as well as `text`, so changes to the context format show up.
 - Next: Step 59: Chunk persistence
+
+### Step 59: Chunk persistence  (2026-11-07)
+- Status: ✅ done
+- Built: `rag_engine/repositories/chunks.py` → **`ChunkRepository`** (exported). Chunks are stored per `(source_id, version)` for audit, for re-embedding without re-crawling, and for cleanup by version.
+  - **Deterministic chunk ids**: `chunk_id(page_id, ordinal)` = `chk_` + sha256(`page_id:ordinal`)[:32] (domain, exported). A page row belongs to one job, so the page id already implies the version. `ChunkDraft.to_document` sets it, and the new `BaseChunker.chunk_documents(source)` does chunk() + to_document() in one call.
+  - `save_page_chunks(page_id, chunks) -> n`: **idempotent per page**. It `ReplaceOne(upsert)`s by id (an unordered bulk write), then deletes ordinals ≥ n, so re-chunking after a crash or with a new chunker leaves no duplicates or stale tails. An empty list removes the page's chunks. Validation runs before any write: all chunks of that page, one (source, version), ordinals 0..n-1 in order, and ids == `chunk_id`.
+  - Reads: `for_page(page_id)` (in order), `iter_version(source_id, version, batch_size)` (streamed in page/ordinal order; carries `embed_text` and `token_count`, ready to re-embed), `count_version`, `versions(source_id)` (distinct, sorted; finds leftovers).
+  - Cleanup: `delete_version(source_id, version)` (Step 78: failed/cancelled job or old version), `delete_source(source_id)` (Step 81). Mongo errors raise `DatabaseUnavailableError`.
+  - Index: `source_version` was replaced by **`source_version_order`** `(source_id, version, page_id, ordinal)`, which serves the version filter and the streaming sort. `page_ordinal_unique` is unchanged.
+- Tests: `TestChunkPersistence_S59` (9, integration, real chunker + Mongo):
+  - A chunked page is stored and read back exactly (deterministic ids, contextual embed_text).
+  - A re-save is idempotent.
+  - Re-chunking replaces the page and drops a stale tail; an empty chunking removes only that page.
+  - A version streams in page/ordinal order with small batches when saved out of order, isolated from another version.
+  - Cleanup by version and by source, with `versions()`, leaves another source untouched.
+  - 4 invalid writes are refused with nothing written; the indexes; chunk-id determinism.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1547 passed, 4 skipped (container) in 223 s.
+- Decisions/notes:
+  - A replace rewrites `created_at`/`updated_at` with the new chunking (the chunk was regenerated), which is intentional.
+  - The old `source_version` index name may linger in an existing dev database. It's harmless; drop it by hand if wanted.
+  - **Step 69**: derive Qdrant point ids as UUID5(version + chunk id). With deterministic chunk ids, re-ingesting a page upserts the same points. When a page re-chunks to fewer chunks, delete the points for the dropped ordinals too (mirror `save_page_chunks`).
+  - **Step 76**: per succeeded page, `chunker.chunk_documents(ChunkInput.from_page(page, markdown=stripped))` → `save_page_chunks` → embed → upsert, then `jobs.increment(chunked=n)`.
+  - **Step 81** (KB delete): iterate the KB's sources and call `delete_source`; a `kb_id` index isn't needed for that.
+- Next: Step 60: Chunking golden tests

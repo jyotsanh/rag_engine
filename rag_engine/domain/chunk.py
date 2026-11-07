@@ -1,3 +1,5 @@
+import hashlib
+
 from pydantic import Field
 from pymongo import IndexModel
 
@@ -14,17 +16,29 @@ from rag_engine.domain.types import (
 )
 
 
+def chunk_id(page_id: str, ordinal: int) -> str:
+    """Deterministic id of a page's n-th chunk: re-chunking a page rewrites the same rows,
+    and vector point ids derived from it (Step 69) stay stable."""
+    digest = hashlib.sha256(f"{page_id}:{ordinal}".encode()).hexdigest()[:32]
+    return f"{Chunk.id_prefix}_{digest}"
+
+
 class Chunk(MongoDocument):
     """A retrievable piece of a page, stored per (source, version) for audit and re-embedding.
 
     `text` is shown to users; `embed_text` (title + heading path + text) is what gets
-    embedded (Step 58).
+    embedded (Step 58). Ids are deterministic per `(page_id, ordinal)` (`chunk_id`). A page
+    row belongs to one job, so the page id already implies the version.
     """
 
     collection_name = "chunks"
     id_prefix = "chk"
     indexes = (
-        IndexModel([("source_id", 1), ("version", 1)], name="source_version"),
+        # a version's chunks in page/ordinal order (re-embedding, audit, cleanup by version)
+        IndexModel(
+            [("source_id", 1), ("version", 1), ("page_id", 1), ("ordinal", 1)],
+            name="source_version_order",
+        ),
         IndexModel([("page_id", 1), ("ordinal", 1)], unique=True, name="page_ordinal_unique"),
     )
 

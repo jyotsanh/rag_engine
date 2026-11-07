@@ -1,5 +1,6 @@
 from .api_keys import LAST_USED_RESOLUTION, ApiKeyRepository
 from .base import BaseRepository, Filter
+from .chunks import ChunkRepository
 from .content_claims import ContentClaimRepository
 from .exceptions import (
     ApiKeyNotFoundError,
@@ -30,6 +31,7 @@ __all__ = [
     "ApiKeyNotFoundError",
     "ApiKeyRepository",
     "BaseRepository",
+    "ChunkRepository",
     "ContentClaimRepository",
     "DocumentNotFoundError",
     "DuplicateDocumentError",

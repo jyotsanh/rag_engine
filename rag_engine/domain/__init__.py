@@ -1,6 +1,6 @@
 from .api_key import ApiKey
 from .base import MongoDocument, new_id, registered_documents, utc_now
-from .chunk import Chunk
+from .chunk import Chunk, chunk_id
 from .content_claim import CLAIM_TTL_SECONDS, ContentHashClaim
 from .enums import (
     ACTIVE_JOB_STATUSES,
@@ -61,6 +61,7 @@ __all__ = [
     "Tenant",
     "TenantQuotas",
     "TenantStatus",
+    "chunk_id",
     "new_id",
     "registered_documents",
     "utc_now",
