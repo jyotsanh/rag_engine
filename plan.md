@@ -1245,3 +1245,29 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 56** must treat `<!-- page N -->` lines as page boundaries (attach `page` to chunks), not as content.
   - The lock means one PDF at a time per worker process. If PDF-heavy crawls are slow, the fix is more worker processes (or a dedicated process pool), not threads.
 - Next: Step 42: DOCX extractor
+
+### Step 42: DOCX extractor  (2026-11-07)
+- Status: ✅ done
+- Built:
+  - `rag_engine/extraction/docx.py` → `DocxExtractor(config)` (`name="docx"`, `kind=DOCX`, exported). It walks the body **in document order** (`iter_inner_content`: paragraphs and tables interleaved).
+    - **Headings**: `Title` → `#`. `Heading N` → N `#`s, capped at 6, **including custom styles whose base-style chain reaches a heading**. For localized templates ("Überschrift 1"), the paragraph/style **outline level** decides (0 → `#`; 9 = body text).
+    - **Lists**: Word numbering, direct `numPr` or inherited from the style. Bullet vs ordered comes from `numbering.xml` (`numId` → `abstractNum` → `numFmt` per `ilvl`); nesting from `ilvl`, rendered with **3 spaces per level** so it nests under both `-` and `1.` parents in CommonMark. `numId=0` (numbering removed) → plain paragraph. Style names `List Number/Bullet [N]` are the fallback. Ordered items all render as `1.` (Markdown renumbers).
+    - **Inline**: bold → `**…**`, italic → `*…*`, both → `***…***`; adjacent runs with equal formatting merged; whitespace kept outside the markers. Hyperlink text kept; **http(s) hyperlink URLs → `outlinks`** (de-duplicated; mailto dropped).
+    - **Code**: consecutive paragraphs in code-like styles (`Code`, `Source Code`, `HTML Preformatted`, `…verbatim/monospace`) → one fenced block with indentation preserved. Quote styles → `> `.
+    - **Tables** → Markdown tables (first row = header). **Merged cells appear once** (horizontal and vertical repeats blank), `|` escaped, multi-paragraph cells joined with spaces, nested tables flattened into their cell, empty rows dropped.
+    - Ignored: page headers/footers, footnotes, comments (boilerplate).
+    - **Metadata**: `title` (core properties, else the first heading), `lang` (core `language`, else `docDefaults` run language), `description` (subject), `metadata {author, created, modified}` (ISO dates).
+    - Failures: corrupt/unopenable → `ExtractionError(detail="corrupt")`; no text → `EmptyContentError`. Encrypted DOCX (OLE container) is already `document_unreadable` from the registry (Step 38).
+  - `rag_engine/extraction/ooxml.py` → `check_archive(body, max_uncompressed)`: the **zip-bomb guard shared by DOCX/PPTX/XLSX**. It sums declared uncompressed sizes from the central directory only (nothing inflated) and raises `DocumentTooLargeError(detail="uncompressed")` over `OOXML_MAX_UNCOMPRESSED_BYTES` (new setting, 200 MiB). A non-zip is `ExtractionError("corrupt")`.
+- Deps: `python-docx` moved from the dev group to runtime.
+- Tests: `TestDocxExtractor_S42` (17, unit; documents generated with python-docx):
+  - Fixture `install-guide.docx`: exact Markdown (h1, paragraph, h2, bullets, h2, table), title, metadata.
+  - Headings: Title/Heading 1-3, Heading 7 capped at 6, a custom style based on Heading 2; localized "Überschrift" styles via outline level.
+  - Lists and inline: ordered list with a nested bullet, then a paragraph; bold/italic with merged runs; hyperlinks (text kept, https outlink once, mailto dropped).
+  - Code/quote: code-style paragraphs → one fence with indentation, Quote → `>`.
+  - Tables: in document order, with escaped pipe, multi-paragraph cell, vertical + horizontal merges; nested table flattened.
+  - Metadata: core properties (empty title → first heading, subject, `de-DE` → `de`); language from template defaults.
+  - Failures and guards: empty → `EmptyContentError`; 2 corrupt bodies (not a zip, missing parts); **zip bomb** (< 50 KB on the wire, 5 MB declared, 1 MB cap) refused before parsing.
+  - Integration: registry dispatch from `application/octet-stream`; fixture fetched over HTTP.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1167 passed, 4 skipped (container) in 158 s.
+- Next: Step 43: PPTX extractor

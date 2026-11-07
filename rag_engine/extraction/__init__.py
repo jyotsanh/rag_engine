@@ -6,6 +6,7 @@ from .boilerplate import (
     normalize_unit,
     split_blocks,
 )
+from .docx import DocxExtractor
 from .exceptions import (
     DocumentTooLargeError,
     DocumentUnreadableError,
@@ -24,6 +25,7 @@ __all__ = [
     "BoilerplateIndex",
     "DocumentTooLargeError",
     "DocumentUnreadableError",
+    "DocxExtractor",
     "EmptyContentError",
     "ExtractedDocument",
     "ExtractionError",
