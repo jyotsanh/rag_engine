@@ -1734,3 +1734,32 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 58**: override `embed_text` in the base class (or the structure chunker); `text` stays clean for display.
   - **Step 59**: persist with `draft.to_document(source)`. `(page_id, ordinal)` is already unique.
 - Next: Step 56: Markdown structure parser
+
+### Step 56: Markdown structure parser  (2026-11-07)
+- Status: ✅ done
+- Built: `rag_engine/chunking/markdown_parser.py`, exported from `rag_engine.chunking`. `MarkdownParser().parse(md)` / `parse_markdown(md)` return a `ParsedDocument(sections, location_kind)`.
+  - Parsing uses **markdown-it-py** (CommonMark plus GFM `table` and `strikethrough`). Only **top-level tokens and their source line ranges** (`token.map`) are used, so a block's `text` is its exact Markdown source (blank lines around it trimmed), and a `#` in code or a table cell is never a heading.
+  - **`Section(heading_path, level, heading, heading_markdown, location, blocks)`**:
+    - The path is the titles of the headings above, outermost first, as plain text: `heading_text()` drops markup, link targets and image URLs, and keeps alt text.
+    - A deeper heading nests; an equal or shallower one closes the open sections. Skipped levels are fine, and setext headings work.
+    - Content before the first heading is the preamble (level 0, empty path), dropped when empty. Headings without content are kept as empty sections, so the chunker decides what to do with them.
+  - **`Block(kind, text, location, line, header, footer, parts, info)`**:
+    - Kinds `paragraph`, `quote`, `html` (raw HTML that isn't a comment) are prose. **Atomic** kinds are `table`, `code` (fenced or indented) and `list`.
+    - `parts` tells Step 57 where an oversized atomic block may be cut:
+      - table: `header` (header + separator rows) and `parts` (one per row);
+      - fenced code: `header` (the opening fence), `footer` (the closing fence, or None when the fence never closed, which runs to the end), `parts` (body lines, blank lines kept) and `info` (language);
+      - indented code: just `parts` (its lines);
+      - list: `parts` (top-level items with their nested content).
+  - **Location markers**: `<!-- page|slide|sheet N -->` (case-insensitive) are never content. They set `location` on the blocks and headings that follow, and `ParsedDocument.location_kind` records which kind the document uses. Other HTML comments and thematic breaks (`---`, `***`) are dropped. CRLF/CR are normalized.
+- Deps: `markdown-it-py` 4.2.0 (runtime; it adds `mdurl`, nothing else changed in the lock).
+- Tests: `TestMarkdownParser_S56` (20, unit):
+  - Sections: hierarchy with sibling closing, skipped levels, setext, plain heading text, empty headings kept / empty preamble dropped / empty doc, `#` in code and tables.
+  - Blocks: all 8 kind cases with atomicity; table header and rows (escaped `\|` kept); `~~~~python` fence with header, footer, info and lines; unclosed fence; indented code; list items with nested children.
+  - Non-content: page markers → locations (blocks and headings, none leak into text); the slide/sheet/upper-case variants; comments and `---`/`***` dropped; line numbers with CRLF.
+  - **Real extractor output** (fixture documents through `default_registry`): the PDF has pages {1,2} with the spec line on page 1; PPTX slide sections are in location order; XLSX tables carry sheet locations {1,2}, each with a header and rows.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1488 passed, 4 skipped (container) in 204 s.
+- Decisions/notes:
+  - **`Chunk.page_number` is the document location** in general: PDF page, PPTX slide or XLSX sheet number (`ParsedDocument.location_kind` says which). Step 57 sets `ChunkPiece.page_number` from the location of a piece's first block, or the section's location for a heading-only piece.
+  - **Step 57**: when splitting, re-emit `header` (+ `footer`) around each slice of `parts`. For an unclosed fence, close it with the opening fence's backticks/tildes.
+  - **Step 58**: `heading_path` is plain text ready for the embed-text prefix. `heading_markdown` is available if `text` should show the heading line.
+- Next: Step 57: Token-aware splitter
