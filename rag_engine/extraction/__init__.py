@@ -6,6 +6,7 @@ from .exceptions import (
     ExtractorRegistrationError,
     UnsupportedContentError,
 )
+from .html import HtmlExtractor
 from .registry import ExtractorRegistry
 from .sniff import Sniffed, looks_like_text, sniff
 
@@ -18,6 +19,7 @@ __all__ = [
     "ExtractionInput",
     "ExtractorRegistrationError",
     "ExtractorRegistry",
+    "HtmlExtractor",
     "MetadataValue",
     "Sniffed",
     "UnsupportedContentError",

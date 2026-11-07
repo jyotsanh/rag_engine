@@ -1150,3 +1150,39 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - The registry starts empty. **Steps 39 and 41–44 each add their extractor**, and a `default_registry()` factory listing them lands with the last one (or the engine builds it in Step 50).
   - Engine contract (Step 50/53): `registry.extract(ExtractionInput.from_fetch(result))`. On an `ExtractionError`, record `page_status`/`reason`/`detail`. On success, `Page.content_kind = document.content_kind`, which may differ from the header-based `FetchResult.content_kind`.
 - Next: Step 39: HTML extractor
+
+### Step 39: HTML extractor  (2026-11-07)
+- Status: ✅ done
+- Built: `rag_engine/extraction/html.py` → `HtmlExtractor` (`name="html"`, `kind=HTML`, exported from `rag_engine.extraction`). Parsing runs in a worker thread (`run_sync`).
+  1. `<noscript>`/`<template>` are dropped first. A rendered page never shows them, and in an unrendered JS shell the noscript text ("enable JavaScript…") would otherwise be the "content". Such a shell now ends as `EmptyContentError` (skipped, `empty_content`).
+  2. **trafilatura 2.3.1** main content → Markdown (`include_tables`, `include_formatting`, `favor_recall`, no links/images/comments). A module-level config sets:
+     - `EXTRACTION_TIMEOUT=0`: its signal-based timeout only works in the main thread; the registry's cap covers this.
+     - `MIN_EXTRACTED_SIZE=40`: short docs pages are content.
+     - `EXTENSIVE_DATE_SEARCH=off`: it had "found" 2026-01-01 from a footer `© 2026`.
+  3. **markdownify fallback** when trafilatura returns nothing or raises: the `<body>` minus chrome (`nav/header/footer/aside/form/script/style/iframe/svg…`, comments) with ATX headings, `-` bullets and code languages from classes. `metadata["extraction"]` says which path ran.
+  4. Post-processing:
+     - **Restore the dropped `<h1>`**: trafilatura sometimes drops a page's only h1. Headings drive chunking, so it's put back on top when missing.
+     - **Code fences get their language back** from the source `<pre><code class="language-…|lang-…|highlight-…">`, matched by content. trafilatura loses it.
+     - Intra-word `\_` escapes are undone (`listen_port`, not `listen\_port`).
+     - Blank lines are normalized around fences and headings.
+  - Metadata:
+    - `title`: trafilatura's (cleaned `<title>` without the site suffix; it prefers the `<h1>` when there is one), else `<title>`, else the first `<h1>`.
+    - `description`: meta description → `og:description` → trafilatura.
+    - `lang`: `<html lang>`/`xml:lang` (the HTML parser keeps the literal attribute name) → `Content-Language` header → `http-equiv` meta; primary subtag only, validated.
+    - `metadata`: `{extraction, author, site_name, published}`, from markup only. trafilatura's site-name guess from the URL host is discarded.
+  - Body decoding when `source.text` is missing (e.g. HTML sniffed from a mislabelled response) reuses `decode_html`.
+  - **Outlinks stay empty for HTML**: links need scope and nofollow rules, which `LinkExtractor` (Step 32) applies to the same HTML.
+- Deps: runtime `trafilatura` (2.3.1) and `markdownify`. Pytest filter for a `codecs.open` DeprecationWarning raised inside third-party `tld` (trafilatura → courlan).
+- Tests: `TestHtmlExtractor_S39` (29, unit):
+  - Main content: structure (h1/h2, ordered list, ```python fence restored, table with an unescaped underscore header); nav/footer dropped.
+  - Fixture site through the real fetcher: `configuration.html` (title/description/lang, table row, ```toml, no outlinks); `getting-started.html` (inline code, bold, h3, two ```bash fences); `latin1.html` (Café, `fr`, accents).
+  - Edge content: short page kept; rendered SPA DOM keeps its h1; unrendered JS shell → `EmptyContentError`; 3 no-text inputs → `EmptyContentError`.
+  - Fallback: trafilatura returns nothing → markdownify (headings, code language, table, nav/footer/script/form gone); trafilatura crash → markdownify.
+  - Metadata: 3 title cases (cleaned `<title>`, h1 preferred, h1 without a title); og:description fallback; 8 language cases (region stripped, `pt_BR`, `xml:lang`, header, http-equiv, markup beats header, invalid/missing → None); author/date/site name from markup only, with no date guessed from body text and no URL-host site name.
+  - Inputs: Latin-1 body decoded when text is missing; XHTML with an XML encoding declaration; dispatch through `ExtractorRegistry`.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1106 passed, 4 skipped (container) in 211 s.
+- Decisions/notes:
+  - Repeated chrome that trafilatura keeps (the fixture's cookie banner on some pages) is **Step 40's** job (cross-page block frequency), not per-page heuristics.
+  - Link-list sections lose their anchor text (`include_links=False`), which can leave empty headings (fixture home page). **Step 45**'s empty-section pruning removes those.
+  - `PageLinks.noindex` (Step 32) is not consulted here. **Step 50** decides whether to index a `noindex` page; extraction stays a pure function of the HTML.
+- Next: Step 40: Cross-page boilerplate removal
