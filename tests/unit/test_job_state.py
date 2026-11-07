@@ -92,4 +92,5 @@ class TestJobStateMachine_S49:
             "duplicates",
             "chunked",
             "embedded",
+            "bytes_downloaded",
         }

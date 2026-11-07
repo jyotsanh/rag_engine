@@ -61,6 +61,7 @@ class JobCounters(BaseModel):
     duplicates: NonNegativeInt = 0
     chunked: NonNegativeInt = 0
     embedded: NonNegativeInt = 0
+    bytes_downloaded: NonNegativeInt = 0  # every successful fetch; the job's byte cap (Step 51)
 
 
 class EmbeddingUsage(BaseModel):

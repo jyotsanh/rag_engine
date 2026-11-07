@@ -189,8 +189,11 @@ class Settings(BaseSettings):
     CRAWL_RESPECT_NOFOLLOW: bool = True
     # skip pages whose rel=canonical points to another in-scope URL (that URL is crawled)
     CRAWL_RESPECT_CANONICAL: bool = True
+    # the engine's deadline for one page's rate-limit wait + fetch + render (the fetchers'
+    # own timeouts normally fire first); over it the fetch fails as a retryable timeout
+    CRAWL_PAGE_TIMEOUT_SECONDS: float = Field(default=150.0, gt=0)
     # a claimed frontier page whose crawler hasn't reported back within this is reclaimed
-    # (a crashed worker); must outlast one fetch + render, with room for extraction
+    # (a crashed worker); must outlast the page deadline plus extraction
     CRAWL_FRONTIER_LEASE_SECONDS: int = Field(default=10 * 60, gt=0)
     # a crawler waits at most this for a host's rate-limit slot, then re-queues the page
     # for that time instead of holding a concurrency slot (slow hosts can't starve others)
@@ -243,11 +246,17 @@ class Settings(BaseSettings):
             raise ValueError(
                 "ROBOTS_UNREACHABLE_CACHE_TTL_SECONDS must be <= ROBOTS_CACHE_TTL_SECONDS"
             )
-        page_seconds = self.CRAWL_FETCH_TIMEOUT_SECONDS + self.CRAWL_RENDER_TIMEOUT_SECONDS
+        fetch_seconds = self.CRAWL_FETCH_TIMEOUT_SECONDS + self.CRAWL_RENDER_TIMEOUT_SECONDS
+        if fetch_seconds > self.CRAWL_PAGE_TIMEOUT_SECONDS:
+            raise ValueError(
+                "CRAWL_PAGE_TIMEOUT_SECONDS must be >= "
+                "CRAWL_FETCH_TIMEOUT_SECONDS + CRAWL_RENDER_TIMEOUT_SECONDS"
+            )
+        page_seconds = self.CRAWL_PAGE_TIMEOUT_SECONDS + self.EXTRACTION_TIMEOUT_SECONDS
         if page_seconds >= self.CRAWL_FRONTIER_LEASE_SECONDS:
             raise ValueError(
                 "CRAWL_FRONTIER_LEASE_SECONDS must be > "
-                "CRAWL_FETCH_TIMEOUT_SECONDS + CRAWL_RENDER_TIMEOUT_SECONDS"
+                "CRAWL_PAGE_TIMEOUT_SECONDS + EXTRACTION_TIMEOUT_SECONDS"
             )
         if self.CRAWL_MAX_PAGE_BYTES > self.CRAWL_MAX_TOTAL_BYTES:
             raise ValueError("CRAWL_MAX_PAGE_BYTES must be <= CRAWL_MAX_TOTAL_BYTES")

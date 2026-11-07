@@ -20,6 +20,10 @@
   (`CRAWL_MAX_RETRIES + 1`) without reporting back fails as `worker_lost`, so a page that
   crashes the worker every time cannot loop forever.
 
+- **Page budget** (Step 51): `charge()` marks a held page as counted against the job's
+  `max_pages`, once, before its first fetch; `count_charged()` reads the budget back on a
+  resume. `skip_queued()` records what is left in the queue when a cap stops the crawl.
+
 The engine records outcomes through `PageRepository.record_outcome`, which also clears the
 lease. Each job's frontier is bound to one `run_id` (a new one per attempt of the job).
 """
@@ -342,18 +346,66 @@ class Frontier:
         if refund:
             update["$inc"] = {"attempts": -1}
         try:
-            result = await self._collection.update_one(
-                {
-                    "_id": page_id,
-                    "job_id": self._job.job_id,
-                    "status": PageStatus.IN_PROGRESS.value,
-                    "claimed_by": self.run_id,
-                },
-                update,
-            )
+            result = await self._collection.update_one(self._held(page_id), update)
         except PyMongoError as exc:
             raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
         return result.modified_count == 1
+
+    # ---- caps (Step 51) ---- #
+
+    async def charge(self, page_id: str) -> bool:
+        """Count a page this run holds against `max_pages`. False if it no longer holds it."""
+        try:
+            result = await self._collection.update_one(
+                self._held(page_id), {"$set": {"charged": True, "updated_at": self._clock()}}
+            )
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+        return result.matched_count == 1
+
+    async def count_charged(self) -> int:
+        """Pages of this job counted against `max_pages` so far (by any run)."""
+        try:
+            return await self._collection.count_documents(
+                {"job_id": self._job.job_id, "charged": True}
+            )
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+
+    async def skip_queued(
+        self, reason: PageReason, detail: str, *, uncharged_only: bool = False
+    ) -> int:
+        """Record every queued page (retries pending included) as skipped; returns how many.
+
+        `uncharged_only` keeps pages already counted against `max_pages` in the queue.
+        """
+        filter_: dict[str, Any] = {"job_id": self._job.job_id, "status": PageStatus.QUEUED.value}
+        if uncharged_only:
+            filter_["charged"] = {"$ne": True}
+        try:
+            result = await self._collection.update_many(
+                filter_,
+                {
+                    "$set": {
+                        "status": PageStatus.SKIPPED.value,
+                        "reason": reason.value,
+                        "reason_detail": detail[:500],
+                        "retry_at": None,
+                        "updated_at": self._clock(),
+                    }
+                },
+            )
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+        return result.modified_count
+
+    def _held(self, page_id: str) -> dict[str, Any]:
+        return {
+            "_id": page_id,
+            "job_id": self._job.job_id,
+            "status": PageStatus.IN_PROGRESS.value,
+            "claimed_by": self.run_id,
+        }
 
     # ---- crash recovery ---- #
 

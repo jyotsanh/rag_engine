@@ -84,6 +84,7 @@ class Page(MongoDocument):
     fetch_ms: NonNegativeInt | None = None  # HTTP fetch + browser render
     extract_ms: NonNegativeInt | None = None
     attempts: NonNegativeInt = 0  # claims so far (Step 48), i.e. fetch attempts started
+    charged: bool = False  # counted against the job's max_pages, once, before its first fetch
     retry_at: datetime | None = None  # queued for a retry; not claimable before this time
     claimed_by: str | None = Field(default=None, max_length=100)  # crawl run holding the lease
     lease_expires_at: datetime | None = None  # an in-progress page past this is reclaimable

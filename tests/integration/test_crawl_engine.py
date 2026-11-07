@@ -10,6 +10,7 @@ import time
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import timedelta
 
 import pytest
 
@@ -35,11 +36,13 @@ from rag_engine.domain import (
     ContentKind,
     CrawlConfig,
     CrawlJob,
+    CrawlStopReason,
     DiscoveredVia,
     JobCounters,
     Page,
     PageReason,
     PageStatus,
+    utc_now,
 )
 from rag_engine.extraction import CleanedText, TextCleaner
 from rag_engine.infrastructure import MongoConnection, RedisConnection
@@ -640,7 +643,11 @@ class TestCrawlEngine_S50:
             PageStatus.DUPLICATE: 6,
             PageStatus.FAILED: 2,
         }
-        assert counters == JobCounters(discovered=13, fetched=11, failed=2, duplicates=6)
+        downloaded = sum(p.bytes_downloaded for p in (await env.outcomes(job)).values())
+        assert downloaded > 0
+        assert counters == JobCounters(
+            discovered=13, fetched=11, failed=2, duplicates=6, bytes_downloaded=downloaded
+        )
 
     async def test_a_superseded_run_stops(self, env: _Env) -> None:
         job = await env.job(f"{_SITE}/")
@@ -674,3 +681,250 @@ class TestCrawlEngine_S50:
 
         with pytest.raises(ValueError, match="running"):
             env.engine(job, _ScriptedFetcher({}))
+
+
+# ---- caps (Step 51) ---- #
+
+
+def _site_of(count: int, *, extra: str = "") -> dict[str, FetchResult | Exception]:
+    """A seed linking /p0 … /p{count-1}, each page with distinct content."""
+    links = "".join(f"<a href='/p{n}'>p</a>" for n in range(count))
+    return {
+        f"{_SITE}/": _page(f"{_SITE}/", _html(f"<p>{_TEXT}</p>{extra}{links}")),
+        **{
+            f"{_SITE}/p{n}": _page(f"{_SITE}/p{n}", _html(f"<p>Page number {n}. {_TEXT}</p>"))
+            for n in range(count)
+        },
+    }
+
+
+@dataclass
+class _RecordingRobots(_AllowAllRobots):
+    looked_up: list[str] = field(default_factory=list)
+
+    async def rules_for(self, url: str) -> RobotsRules:
+        self.looked_up.append(url)
+        return await super().rules_for(url)
+
+
+class TestCrawlCaps_S51:
+    """S51 — Caps & timeouts: page budget, byte budget, wall time, per-page deadline."""
+
+    async def test_page_budget_stops_taking_new_pages(self, env: _Env) -> None:
+        fetcher = _ScriptedFetcher(_site_of(10))
+        robots = _RecordingRobots()
+        job = await env.job(f"{_SITE}/", max_pages=4)
+
+        summary = await env.engine(job, fetcher, robots=robots).run()
+
+        outcomes = await env.outcomes(job)
+        fetched = {url for url, page in outcomes.items() if page.charged}
+        budget_skips = {
+            url for url, page in outcomes.items() if page.reason is PageReason.MAX_PAGES
+        }
+        assert len(fetcher.calls) == len(set(fetcher.calls)) == 4
+        assert fetched == set(fetcher.calls)
+        assert len(budget_skips) == 7
+        assert all(outcomes[url].status is PageStatus.SKIPPED for url in budget_skips)
+        assert not budget_skips & set(robots.looked_up)  # skipped without a robots lookup
+        assert summary.stop is not None and summary.stop.reason is CrawlStopReason.MAX_PAGES
+        assert "4 pages" in summary.stop.detail
+        assert PageStatus.QUEUED not in summary.pages
+        assert summary.reasons[PageReason.MAX_PAGES] == 7
+        counters = (await env.jobs.get_or_raise(job.id)).counters
+        assert (counters.fetched, counters.skipped, counters.discovered) == (4, 7, 11)
+
+    async def test_a_charged_page_still_finishes_its_retries(self, env: _Env) -> None:
+        flaky = f"{_SITE}/flaky"
+        responses = {
+            f"{_SITE}/": _page(f"{_SITE}/", _html(f"<p>{_TEXT}</p><a href='/flaky'>f</a>")),
+        }
+
+        class _Flaky(_ScriptedFetcher):
+            async def fetch(self, url: str) -> FetchResult:
+                if url == flaky:
+                    self.calls.append(url)
+                    if self.calls.count(flaky) == 1:
+                        raise HttpStatusError(url=url, status_code=503)
+                    return _page(url, _html(f"<p>Recovered. {_TEXT}</p><a href='/later'>l</a>"))
+                return await super().fetch(url)
+
+        fetcher = _Flaky(responses)
+        policy = RetryPolicy(max_attempts=3, base_delay=0.01, max_delay=0.02, max_retry_after=5)
+        job = await env.job(f"{_SITE}/", max_pages=2)
+
+        summary = await env.engine(job, fetcher, policy=policy).run()
+
+        outcomes = await env.outcomes(job)
+        assert _status(outcomes[flaky]) == (PageStatus.SUCCEEDED, None)
+        assert (outcomes[flaky].attempts, fetcher.calls.count(flaky)) == (2, 2)
+        assert _status(outcomes[f"{_SITE}/later"]) == (PageStatus.SKIPPED, PageReason.MAX_PAGES)
+        assert f"{_SITE}/later" not in fetcher.calls
+        assert summary.stop is not None and summary.stop.reason is CrawlStopReason.MAX_PAGES
+
+    async def test_a_resumed_job_reads_back_its_page_budget(self, env: _Env) -> None:
+        job = await env.job(f"{_SITE}/", max_pages=5)
+
+        async def crash_on_second_page(url: str) -> None:
+            if url.endswith("/p0"):
+                await env.jobs.requeue(job.id, stale_run_id="run-1")
+
+        run1 = _ScriptedFetcher(_site_of(10), on_fetch=crash_on_second_page)
+        with pytest.raises(ExceptionGroup):
+            await env.engine(job, run1).run()
+        resumed = await env.jobs.start(job.id, "run-2")
+        run2 = _ScriptedFetcher(_site_of(10))
+
+        summary = await env.engine(resumed, run2, run_id="run-2").run()
+
+        outcomes = await env.outcomes(job)
+        assert len(set(run1.calls) | set(run2.calls)) == 5  # one budget across both runs
+        assert sum(page.charged for page in outcomes.values()) == 5
+        assert summary.stop is not None and summary.stop.reason is CrawlStopReason.MAX_PAGES
+        assert {p.status for p in outcomes.values()} <= {
+            PageStatus.SUCCEEDED,
+            PageStatus.SKIPPED,
+        }
+
+    async def test_byte_budget_is_a_hard_stop(
+        self, env: _Env, override_settings: OverrideSettings
+    ) -> None:
+        responses = _site_of(8, extra="<a href='/flaky'>f</a>")
+        responses[f"{_SITE}/flaky"] = HttpStatusError(url=f"{_SITE}/flaky", status_code=503)
+        size = max(r.bytes_downloaded for r in responses.values() if isinstance(r, FetchResult))
+        override_settings(
+            CRAWL_CONCURRENCY=1, CRAWL_MAX_PAGE_BYTES=size, CRAWL_MAX_TOTAL_BYTES=size * 3
+        )
+        fetcher = _ScriptedFetcher(responses)
+        # the 503 page waits a minute for its retry: the stop must not wait for it
+        policy = RetryPolicy(max_attempts=3, base_delay=60, max_delay=60, max_retry_after=5)
+        job = await env.job(f"{_SITE}/")
+        started = time.monotonic()
+
+        summary = await env.engine(job, fetcher, policy=policy).run()
+
+        outcomes = await env.outcomes(job)
+        downloaded = (await env.jobs.get_or_raise(job.id)).counters.bytes_downloaded
+        assert time.monotonic() - started < 10
+        assert summary.stop is not None and summary.stop.reason is CrawlStopReason.MAX_TOTAL_BYTES
+        sizes = [
+            r.bytes_downloaded for u in fetcher.calls if isinstance(r := responses[u], FetchResult)
+        ]
+        assert downloaded == sum(sizes)
+        assert sum(sizes[:-1]) < size * 3 <= downloaded  # stopped on the fetch that crossed it
+        assert PageStatus.QUEUED not in summary.pages
+        assert _status(outcomes[f"{_SITE}/flaky"]) == (
+            PageStatus.SKIPPED,
+            PageReason.MAX_TOTAL_BYTES,
+        )  # a pending retry is skipped too
+        unfetched = [p for u, p in outcomes.items() if u not in fetcher.calls]
+        assert unfetched and all(
+            _status(p) == (PageStatus.SKIPPED, PageReason.MAX_TOTAL_BYTES) for p in unfetched
+        )
+        counters = (await env.jobs.get_or_raise(job.id)).counters
+        assert counters.skipped == summary.reasons[PageReason.MAX_TOTAL_BYTES]
+
+    async def test_wall_time_is_a_hard_stop(
+        self, env: _Env, override_settings: OverrideSettings
+    ) -> None:
+        override_settings(CRAWL_MAX_JOB_SECONDS=1)
+        responses = _site_of(20, extra="<a href='/flaky'>f</a>")
+        responses[f"{_SITE}/flaky"] = HttpStatusError(url=f"{_SITE}/flaky", status_code=503)
+
+        async def slow(url: str) -> None:
+            await asyncio.sleep(0.25)
+
+        fetcher = _ScriptedFetcher(responses, on_fetch=slow)
+        policy = RetryPolicy(max_attempts=3, base_delay=30, max_delay=30, max_retry_after=5)
+        job = await env.job(f"{_SITE}/")
+        started = time.monotonic()
+
+        summary = await env.engine(job, fetcher, policy=policy).run()
+
+        elapsed = time.monotonic() - started
+        outcomes = await env.outcomes(job)
+        assert elapsed < 3  # in-flight pages drained; nobody waited for the 30 s retry
+        assert summary.stop is not None and summary.stop.reason is CrawlStopReason.MAX_DURATION
+        assert "1 s" in summary.stop.detail
+        assert 1 < len(fetcher.calls) < 21
+        assert not {PageStatus.QUEUED, PageStatus.IN_PROGRESS} & set(summary.pages)
+        assert summary.reasons[PageReason.MAX_DURATION] >= 1
+        assert _status(outcomes[f"{_SITE}/flaky"]) == (PageStatus.SKIPPED, PageReason.MAX_DURATION)
+        assert summary.sitemap_error is None  # no sitemap source configured
+
+    async def test_a_resumed_job_past_a_cap_stops_at_once(self, env: _Env) -> None:
+        over_time = await env.job(f"{_SITE}/")
+        await env.jobs.collection.update_one(
+            {"_id": over_time.id}, {"$set": {"started_at": utc_now() - timedelta(hours=3)}}
+        )
+        over_time = await env.jobs.get_or_raise(over_time.id)
+        fetcher = _ScriptedFetcher(_site_of(3))
+
+        summary = await env.engine(over_time, fetcher).run()
+
+        seed = (await env.outcomes(over_time))[f"{_SITE}/"]
+        assert fetcher.calls == []
+        assert summary.stop is not None and summary.stop.reason is CrawlStopReason.MAX_DURATION
+        assert (_status(seed), seed.attempts) == ((PageStatus.SKIPPED, PageReason.MAX_DURATION), 0)
+
+    async def test_a_resumed_job_over_its_byte_budget_stops_at_once(
+        self, env: _Env, override_settings: OverrideSettings
+    ) -> None:
+        override_settings(CRAWL_MAX_PAGE_BYTES=100, CRAWL_MAX_TOTAL_BYTES=100)
+        job = await env.job(f"{_SITE}/")
+        await env.jobs.increment(job.id, "run-1", bytes_downloaded=100)
+        job = await env.jobs.get_or_raise(job.id)
+        fetcher = _ScriptedFetcher(_site_of(3))
+
+        summary = await env.engine(job, fetcher).run()
+
+        assert fetcher.calls == []
+        assert summary.stop is not None and summary.stop.reason is CrawlStopReason.MAX_TOTAL_BYTES
+        assert summary.reasons == Counter({PageReason.MAX_TOTAL_BYTES: 1})
+
+    async def test_page_deadline_fails_hanging_work_as_a_retryable_timeout(
+        self, env: _Env, override_settings: OverrideSettings
+    ) -> None:
+        override_settings(
+            CRAWL_READ_TIMEOUT_SECONDS=0.05,
+            CRAWL_FETCH_TIMEOUT_SECONDS=0.1,
+            CRAWL_RENDER_TIMEOUT_SECONDS=0.1,
+            CRAWL_PAGE_TIMEOUT_SECONDS=0.3,
+        )
+        hang, stuck_host = f"{_SITE}/hang", f"{_SITE}/stuck"
+
+        async def hang_forever(url: str) -> None:
+            if url == hang:
+                await asyncio.Event().wait()
+
+        class _StuckLimiter(_Limiter):
+            async def acquire(
+                self, url: str, *, crawl_delay: float | None = None, max_wait: float | None = None
+            ) -> Reservation:
+                if url == stuck_host:
+                    await asyncio.Event().wait()
+                return await super().acquire(url, crawl_delay=crawl_delay, max_wait=max_wait)
+
+        responses = {
+            f"{_SITE}/": _page(
+                f"{_SITE}/",
+                _html(f"<p>{_TEXT}</p><a href='/hang'>h</a><a href='/stuck'>s</a>"
+                      "<a href='/fine'>f</a>"),
+            ),
+            f"{_SITE}/fine": _page(f"{_SITE}/fine", _html(f"<p>Fine. {_TEXT}</p>")),
+        }  # fmt: skip
+        fetcher = _ScriptedFetcher(responses, on_fetch=hang_forever)
+        policy = RetryPolicy(max_attempts=2, base_delay=0.01, max_delay=0.02, max_retry_after=5)
+        job = await env.job(f"{_SITE}/")
+
+        summary = await env.engine(job, fetcher, limiter=_StuckLimiter(), policy=policy).run()
+
+        outcomes = await env.outcomes(job)
+        for url, stage in ((hang, "the fetch"), (stuck_host, "the rate-limit wait")):
+            page = outcomes[url]
+            assert _status(page) == (PageStatus.FAILED, PageReason.TIMEOUT), url
+            assert page.attempts == 2  # retried once, like any timeout
+            assert page.reason_detail is not None and stage in page.reason_detail
+        assert fetcher.calls.count(hang) == 2 and stuck_host not in fetcher.calls
+        assert _status(outcomes[f"{_SITE}/fine"]) == (PageStatus.SUCCEEDED, None)
+        assert summary.stop is None

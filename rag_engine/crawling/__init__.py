@@ -7,6 +7,7 @@ from .dedupe import (
 )
 from .engine import (
     CrawlEngine,
+    CrawlStop,
     CrawlSummary,
     PageFetcher,
     RateLimiter,
@@ -107,6 +108,7 @@ __all__ = [
     "ContentDeduper",
     "CrawlEngine",
     "CrawlScope",
+    "CrawlStop",
     "CrawlSummary",
     "DedupeDecision",
     "DedupeOutcome",

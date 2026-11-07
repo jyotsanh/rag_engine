@@ -152,3 +152,26 @@ class TestSettings_S3:
         assert _make(QDRANT_HTTPS=True, QDRANT_HOST="q.example").qdrant_url == (
             "https://q.example:6333"
         )
+
+
+class TestCrawlCapsSettings_S51:
+    """S51 — Caps & timeouts settings: the per-page deadline fits between fetch and lease."""
+
+    def test_defaults_are_consistent(self) -> None:
+        settings = _make()
+
+        assert settings.CRAWL_PAGE_TIMEOUT_SECONDS >= (
+            settings.CRAWL_FETCH_TIMEOUT_SECONDS + settings.CRAWL_RENDER_TIMEOUT_SECONDS
+        )
+        assert (
+            settings.CRAWL_PAGE_TIMEOUT_SECONDS + settings.EXTRACTION_TIMEOUT_SECONDS
+            < settings.CRAWL_FRONTIER_LEASE_SECONDS
+        )
+
+    def test_page_deadline_must_cover_fetch_and_render(self) -> None:
+        with pytest.raises(ValidationError, match="CRAWL_PAGE_TIMEOUT_SECONDS must be >="):
+            _make(CRAWL_PAGE_TIMEOUT_SECONDS=60)  # < fetch (60) + render (30)
+
+    def test_lease_must_outlast_page_deadline_and_extraction(self) -> None:
+        with pytest.raises(ValidationError, match="CRAWL_FRONTIER_LEASE_SECONDS must be >"):
+            _make(CRAWL_PAGE_TIMEOUT_SECONDS=150, CRAWL_FRONTIER_LEASE_SECONDS=270)

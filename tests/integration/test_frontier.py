@@ -493,3 +493,65 @@ class TestFrontierEngineSupport_S50:
             2,
         )
         assert (await frontier.stats()).ready == 1  # skipped rows are never claimable
+
+
+class TestFrontierCaps_S51:
+    """S51 — Frontier support for caps: charge the page budget, count it, skip the queue."""
+
+    async def test_charge_marks_only_a_page_this_run_holds(self, make_frontier) -> None:
+        frontier = make_frontier()
+        other_run = make_frontier("run-2")
+        await frontier.add_many([_link("/a"), _link("/b")])
+        held = await frontier.claim()
+        elsewhere = await other_run.claim()
+        assert held is not None and elsewhere is not None
+
+        charged = await frontier.charge(held.id)
+        not_ours = await frontier.charge(elsewhere.id)
+        await frontier.release(held.id)
+        reclaimed = await frontier.claim()
+
+        assert (charged, not_ours) == (True, False)
+        assert await frontier.count_charged() == 1
+        assert reclaimed is not None and reclaimed.id == held.id and reclaimed.charged is True
+
+    async def test_count_charged_is_per_job(self, make_frontier) -> None:
+        frontier = make_frontier()
+        other_job = make_frontier(job=_OTHER_JOB)
+        await frontier.add(f"{_SITE}/a", depth=1, via=DiscoveredVia.LINK)
+        await other_job.add(f"{_SITE}/a", depth=1, via=DiscoveredVia.LINK)
+        page = await other_job.claim()
+        assert page is not None
+        await other_job.charge(page.id)
+
+        assert await frontier.count_charged() == 0
+        assert await other_job.count_charged() == 1
+
+    async def test_skip_queued_records_what_is_left(
+        self, make_frontier, pages: PageRepository
+    ) -> None:
+        frontier = make_frontier()
+        await frontier.add_many([_link(f"/p{n}") for n in range(5)])
+        charged = await frontier.claim()  # /p0: charged, then waiting for a retry
+        held = await frontier.claim()  # /p1: in flight
+        assert charged is not None and held is not None
+        await frontier.charge(charged.id)
+        await frontier.retry_later(charged.id, 60)
+
+        soft = await frontier.skip_queued(PageReason.MAX_PAGES, "budget", uncharged_only=True)
+        retry_left = await pages.find_one({"_id": charged.id})
+        hard = await frontier.skip_queued(PageReason.MAX_DURATION, "x" * 600)
+
+        by_url = {p.url: p for p in await pages.find({"job_id": _JOB.job_id})}
+        assert (soft, hard) == (3, 1)
+        assert retry_left is not None and retry_left.status is PageStatus.QUEUED
+        assert by_url[f"{_SITE}/p1"].status is PageStatus.IN_PROGRESS  # in flight: untouched
+        assert {by_url[f"{_SITE}/p{n}"].reason for n in (2, 3, 4)} == {PageReason.MAX_PAGES}
+        retried = by_url[f"{_SITE}/p0"]
+        assert (retried.status, retried.reason, retried.retry_at) == (
+            PageStatus.SKIPPED,
+            PageReason.MAX_DURATION,
+            None,
+        )
+        assert retried.reason_detail is not None and len(retried.reason_detail) == 500
+        assert (await frontier.stats()).ready == 0

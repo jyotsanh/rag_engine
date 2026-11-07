@@ -1548,3 +1548,45 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 77 (task)**: wire `HttpFetcher(SafeHttpClient)`, `BrowserPool.job_context` → `AutoFetcher(http, browser, before_render=render_politeness(robots, limiter))`, `RobotsCache(RedisRobotsStore)`, `DomainRateLimiter`, `SitemapDiscoverer`, `ContentClaimRepository`, then `jobs.start` → `engine.run()` → `begin_finalizing`.
   - Step 54 asserts the browser-rendered SPA (`/app/`, `/app/advanced`) on top of this test.
 - Next: Step 51: Caps & timeouts
+
+### Step 51: Caps & timeouts  (2026-11-07)
+- Status: ✅ done
+- Built: caps enforced inside `CrawlEngine` (`rag_engine/crawling/engine.py`). Each cap stops the crawl **gracefully with a reason**: `CrawlSummary.stop: CrawlStop | None` (`reason: CrawlStopReason`, `detail`), with `CrawlStop` exported from `rag_engine.crawling`. `None` means the frontier drained.
+  - **`max_pages`** (job config) is a **page budget**:
+    - A page is charged once, right before its first fetch (`Page.charged`, new), and only after scope and robots allow it. Retries and rate-limit releases don't charge it again.
+    - A resumed run reads the budget back with `frontier.count_charged()`. A redirect target reuses the alias's fetch and is not charged.
+    - Spending the last page is a **soft** stop. Queued pages that aren't charged become `skipped/max_pages` in bulk. Pages found later are skipped one at a time as they're claimed, with no robots lookup. Charged pages that are waiting for a retry still finish. Sitemap discovery is cancelled.
+  - **`CRAWL_MAX_TOTAL_BYTES`** is a **hard** stop. It's tracked by the new `JobCounters.bytes_downloaded`, which is incremented on every successful fetch and persisted, so a resume continues from it. It's checked after each fetch, so it can be overshot by the pages in flight.
+  - **`CRAWL_MAX_JOB_SECONDS`** is a **hard** stop, measured from the job's first `started_at` (kept across requeues, Step 49). Idle workers wake at the deadline, so a long pending retry doesn't hold the job open.
+  - **On a hard stop** nothing more is fetched:
+    - Workers exit and in-flight pages finish (bounded by the page deadline).
+    - A page claimed after the stop, or whose time ran out while it waited for a rate-limit slot, is released.
+    - `_skip_rest` records everything still queued, pending retries included, as `skipped/max_total_bytes` or `skipped/max_duration`.
+  - Every cap is re-checked when a run starts, so a resumed job that's already over a cap stops right away without fetching.
+  - Precedence: the first cap hit is the reason, except that a hard stop overrides a soft one.
+  - **Per-page deadline** `CRAWL_PAGE_TIMEOUT_SECONDS` (new, 150 s) covers the rate-limit wait plus fetch plus render. It sits on top of the fetchers' own timeouts, so the browser's `before_render` slot wait is bounded too. When it fires, the fetch fails with `FetchTimeoutError` (detail `page deadline of N s exceeded in the fetch | the rate-limit wait`) and goes through the retry policy like any other timeout. Extraction keeps its own `EXTRACTION_TIMEOUT_SECONDS`. Releases and outcome writes run outside the deadline, so a timeout never cuts a DB write.
+- Frontier: `charge(page_id)` (only while this run holds the page), `count_charged()`, `skip_queued(reason, detail, *, uncharged_only=False)`, and a shared `_held()` filter.
+- Domain:
+  - `CrawlStopReason` (`max_pages` is soft; `max_total_bytes` and `max_duration` are hard; `.page_reason`, `.is_hard`).
+  - `PageReason` adds `MAX_TOTAL_BYTES` and `MAX_DURATION` (27 reasons).
+  - `JobCounters.bytes_downloaded` and `Page.charged`.
+- Settings: `CRAWL_PAGE_TIMEOUT_SECONDS`. Validators: page ≥ fetch + render, and lease > page + extraction. This replaces the old "lease > fetch + render" rule. `.env.example` updated.
+- Tests:
+  - `TestCrawlCaps_S51` (8, integration, scripted):
+    - The page budget gives exactly 4 fetches, the other 7 are `max_pages` with no robots lookup, and the counters agree.
+    - A charged page's retry still succeeds after the budget is spent, and its new link is skipped.
+    - One budget holds across a crash and resume (5 distinct URLs fetched over both runs).
+    - Byte budget: the crawl stops on the fetch that crosses it, `bytes_downloaded` equals the sum fetched, a retry pending 60 s is skipped, and the job doesn't wait for it.
+    - Wall time (1 s): the job stops in under 3 s despite a pending 30 s retry, and nothing is left queued or in progress.
+    - A resumed job past its time or over its byte budget stops with zero fetches.
+    - Page deadline: a hanging fetch and a hanging rate-limit wait each fail `timeout` after 2 attempts with the stage in the detail, and the other pages succeed.
+  - `TestFrontierCaps_S51` (3, integration): `charge` is held-only and survives a release; `count_charged` is per job; `skip_queued` (soft keeps charged/in-flight pages, hard takes pending retries, detail capped at 500 characters).
+  - `TestCrawlCapsSettings_S51` (3, unit): default consistency and both validators.
+  - Updated: `TestCrawlEngine_S50` counters include `bytes_downloaded`, `TestJobState` counter names, and `TestDomainModels_S13` (25 → 27 reasons).
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1417 passed, 4 skipped (container) in 196 s. The S50 + S51 engine tests passed 3 runs in a row (~33 s).
+- Decisions/notes:
+  - The byte and time caps are global settings. Per-tenant limits arrive with the quotas (Step 84), which only need to feed `CrawlEngine` a different value. `max_pages` is already per job.
+  - The engine **does not persist** the stop reason on the job. A resume re-detects every cap from persisted state (charged pages, the bytes counter, `started_at`). **Step 53** must put `summary.stop` into the job report. **Step 77** decides the job outcome: a capped crawl still finalizes (it's a partial success, not a failure).
+  - When a stop cancels sitemap discovery before it reported, `summary.sitemap_error = "stopped early: <reason>"`.
+  - **Step 52 (cancel)**: add `CrawlStopReason.CANCELLED` (hard, `page_reason` → `job_cancelled`) and call `engine._stop_crawl(...)` from the cancel poll (expose it publicly then). `_skip_rest` then records the queue as `skipped/job_cancelled`. In-flight pages drain exactly as with the other hard stops.
+- Next: Step 52: Cancellation

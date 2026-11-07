@@ -2,7 +2,7 @@
 
 `CrawlEngine(job, run_id=..., ...).run()` crawls a job that a worker run has started
 (`JobRepository.start`, Step 49) and returns a `CrawlSummary`. Job status transitions,
-the heartbeat, caps (Step 51) and cancellation (Step 52) belong to the caller.
+the heartbeat and cancellation (Step 52) belong to the caller; the caps are enforced here.
 
 **Start**
 1. `frontier.recover()` re-queues pages an earlier (crashed) run held: a resumed job
@@ -37,10 +37,28 @@ Links that were never crawled (out of scope, too deep, nofollow) are then record
 makes "followed later" win. Each page keeps its held-back links on its own row
 (`deferred_links`), so the report includes links seen by an earlier, crashed run.
 
+**Caps** (Step 51). Each one stops the crawl gracefully, with a reason
+(`CrawlSummary.stop`); the first cap hit is the reason, unless a hard stop overrides a soft one.
+- `max_pages` (the job's config) is a **page budget**: a page is charged once, right before
+  its first fetch (`Page.charged`), so retries and rate-limit releases don't spend it again
+  and a resumed run reads it back. A redirect target reuses the alias's fetch, uncharged.
+  Spending the last page is a *soft* stop: queued pages not yet charged are recorded
+  `skipped/max_pages` (pages found later too, without a robots.txt lookup), while charged
+  pages waiting for a retry still finish. Sitemap discovery stops.
+- `CRAWL_MAX_TOTAL_BYTES` over the job (`bytes_downloaded` counter, persisted) and
+  `CRAWL_MAX_JOB_SECONDS` since the job's first start are *hard* stops: nothing more is
+  fetched. Pages in flight finish (bounded by the page deadline); everything still queued,
+  retries included, is recorded `skipped/max_total_bytes` or `skipped/max_duration`. The
+  byte cap is checked after each fetch, so it can be overshot by the pages in flight.
+- Each cap is re-checked when a run starts, so a resumed job stops at once if it was spent.
+- **Per page**, `CRAWL_PAGE_TIMEOUT_SECONDS` bounds the rate-limit wait + fetch + render (on
+  top of the fetchers' own timeouts); over it the fetch fails as a retryable `timeout`.
+  Extraction has its own deadline (`EXTRACTION_TIMEOUT_SECONDS`).
+
 Counters (Step 49): `discovered` = queued pages created; `fetched` once per successful
-fetch; `failed`/`skipped`/`duplicates` once per recorded outcome. A run that lost the job
-(`JobRunSupersededError`) or the database stops the whole engine; pages it held are
-recovered by the next run.
+fetch (`bytes_downloaded` with it); `failed`/`skipped`/`duplicates` once per recorded
+outcome. A run that lost the job (`JobRunSupersededError`) or the database stops the whole
+engine; pages it held are recovered by the next run.
 """
 
 import asyncio
@@ -49,6 +67,7 @@ import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from datetime import timedelta
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -56,7 +75,12 @@ from loguru import logger
 
 from rag_engine.config import Settings, settings
 from rag_engine.crawling.dedupe import ContentClaimStore, ContentDeduper, DedupeOutcome
-from rag_engine.crawling.fetchers import FetchError, FetchResult, HttpStatusError
+from rag_engine.crawling.fetchers import (
+    FetchError,
+    FetchResult,
+    FetchTimeoutError,
+    HttpStatusError,
+)
 from rag_engine.crawling.frontier import (
     Frontier,
     FrontierEntry,
@@ -75,6 +99,7 @@ from rag_engine.domain import (
     MAX_DEFERRED_LINKS,
     ContentKind,
     CrawlJob,
+    CrawlStopReason,
     DeferredLink,
     DiscoveredVia,
     JobStatus,
@@ -147,6 +172,14 @@ def render_politeness(
 
 
 @dataclass(frozen=True, slots=True)
+class CrawlStop:
+    """Why the crawl stopped before its frontier drained."""
+
+    reason: CrawlStopReason
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
 class CrawlSummary:
     seed_url: str  # where the crawl was anchored (the seed's final URL after redirects)
     pages: dict[PageStatus, int]
@@ -158,6 +191,7 @@ class CrawlSummary:
     sitemap_error: str | None
     skipped_links: int  # never-crawled links recorded as skipped pages
     skipped_links_dropped: int  # this run: non-http(s) links, or over the per-page cap
+    stop: CrawlStop | None = None  # a cap stopped the crawl (None: the frontier drained)
 
 
 class CrawlEngine:
@@ -197,6 +231,15 @@ class CrawlEngine:
         self._config = config
         self._concurrency = config.CRAWL_CONCURRENCY
         self._max_wait = config.CRAWL_RATE_LIMIT_MAX_WAIT_SECONDS
+        self._page_timeout = config.CRAWL_PAGE_TIMEOUT_SECONDS
+        self._max_pages = job.config.max_pages
+        self._max_bytes = config.CRAWL_MAX_TOTAL_BYTES
+        self._max_seconds = config.CRAWL_MAX_JOB_SECONDS
+        self._deadline = (job.started_at or utc_now()) + timedelta(seconds=self._max_seconds)
+        self._charged = 0  # pages counted against max_pages (read back in run())
+        self._bytes = job.counters.bytes_downloaded
+        self._stop: CrawlStop | None = None
+        self._sitemap_task: asyncio.Task[None] | None = None
         self._frontier = Frontier(
             pages,
             FrontierJob(job.tenant_id, job.kb_id, job.source_id, job.id),
@@ -218,6 +261,10 @@ class CrawlEngine:
     def scope(self) -> CrawlScope:
         return self._scope
 
+    @property
+    def stop(self) -> CrawlStop | None:
+        return self._stop
+
     def _make_deduper(self) -> ContentDeduper:
         return ContentDeduper(self._job.id, self._scope, self._claims, config=self._config)
 
@@ -226,21 +273,33 @@ class CrawlEngine:
     async def run(self) -> CrawlSummary:
         log = logger.bind(job_id=self._job.id, run_id=self._run_id)
         recovered = await self._frontier.recover()
+        self._charged = await self._frontier.count_charged()
         seed_url = normalize_url(self._job.seed_url)
         created = await self._frontier.add(seed_url, depth=0, via=DiscoveredVia.SEED)
         if created:
             await self._count(discovered=1)
+        await self._check_caps_at_start()
         anchored = await self._anchor(seed_url)
         rules = await self._robots.rules_for(anchored)
         log.info("crawling {} (scope host {})", anchored, self._scope.seed_host)
 
         sitemap: list[SitemapReport | None] = [None]
         sitemap_error: list[str | None] = [None]
-        async with asyncio.TaskGroup() as group:
-            group.create_task(self._discover_sitemaps(anchored, sitemap, sitemap_error))
-            for _ in range(self._concurrency):
-                group.create_task(self._worker())
+        if not self._hard_stopped:
+            async with asyncio.TaskGroup() as group:
+                if self._stop is None:
+                    self._sitemap_task = group.create_task(
+                        self._discover_sitemaps(anchored, sitemap, sitemap_error)
+                    )
+                else:
+                    self._sitemap_done = True
+                for _ in range(self._concurrency):
+                    group.create_task(self._worker())
+            self._sitemap_task = None
+        if self._stop is not None and self._sitemaps is not None and sitemap[0] is None:
+            sitemap_error[0] = sitemap_error[0] or f"stopped early: {self._stop.reason}"
 
+        await self._skip_rest()
         skipped = await self._flush_deferred()
         summary = CrawlSummary(
             seed_url=anchored,
@@ -253,8 +312,13 @@ class CrawlEngine:
             sitemap_error=sitemap_error[0],
             skipped_links=skipped,
             skipped_links_dropped=self._deferred_dropped,
+            stop=self._stop,
         )
-        log.info("crawl finished: {}", {str(k): v for k, v in summary.pages.items()})
+        log.info(
+            "crawl finished ({}): {}",
+            f"stopped: {self._stop.reason}" if self._stop else "drained",
+            {str(k): v for k, v in summary.pages.items()},
+        )
         return summary
 
     async def _anchor(self, seed_url: str) -> str:
@@ -313,6 +377,8 @@ class CrawlEngine:
 
     async def _worker(self) -> None:
         while not self._done:
+            if self._out_of_time():
+                return  # a hard stop: the pages left are recorded by _skip_rest
             page = await self._frontier.claim()
             if page is not None:
                 await self._process(page)
@@ -329,7 +395,7 @@ class CrawlEngine:
                 if not stats.in_flight and stats.next_retry_at is not None:
                     until = (stats.next_retry_at - utc_now()).total_seconds()
                     timeout = min(max(until, 0.0), 30.0)
-            await self._idle(timeout)
+            await self._idle(min(timeout, max(self._seconds_left(), 0.0)))
 
     def _notify(self) -> None:
         """Wake idle workers (work was added, a page finished, discovery ended)."""
@@ -340,6 +406,90 @@ class CrawlEngine:
         with contextlib.suppress(TimeoutError):
             async with asyncio.timeout(seconds):
                 await self._wake.wait()
+
+    # ---- caps ---- #
+
+    @property
+    def _hard_stopped(self) -> bool:
+        return self._stop is not None and self._stop.reason.is_hard
+
+    def _seconds_left(self) -> float:
+        return (self._deadline - utc_now()).total_seconds()
+
+    def _out_of_time(self) -> bool:
+        """True once nothing more may be fetched (a hard stop, or the job's time is up)."""
+        if not self._hard_stopped and self._seconds_left() <= 0:
+            self._stop_crawl(
+                CrawlStopReason.MAX_DURATION,
+                f"the job reached its maximum duration of {self._max_seconds} s",
+            )
+        return self._hard_stopped
+
+    def _stop_crawl(self, reason: CrawlStopReason, detail: str) -> bool:
+        """Record why the crawl stops; True if this call stopped it (or made it hard)."""
+        if self._stop is not None and (self._stop.reason.is_hard or not reason.is_hard):
+            return False
+        self._stop = CrawlStop(reason, detail)
+        logger.bind(job_id=self._job.id).info("crawl stopping: {} ({})", reason, detail)
+        if self._sitemap_task is not None:
+            self._sitemap_task.cancel()  # its URLs would only be skipped
+        self._notify()
+        return True
+
+    async def _check_caps_at_start(self) -> None:
+        """A resumed job whose budget is already spent stops right away."""
+        if self._charged >= self._max_pages:
+            await self._page_budget_spent()
+        if self._bytes >= self._max_bytes:
+            self._stop_crawl(CrawlStopReason.MAX_TOTAL_BYTES, self._bytes_detail())
+        self._out_of_time()
+
+    def _pages_detail(self) -> str:
+        return f"the job's page budget ({self._max_pages} pages) was spent"
+
+    def _bytes_detail(self) -> str:
+        return f"downloaded {self._bytes} bytes; the job's budget is {self._max_bytes} bytes"
+
+    async def _page_budget_spent(self) -> None:
+        if self._stop_crawl(CrawlStopReason.MAX_PAGES, self._pages_detail()):
+            skipped = await self._frontier.skip_queued(
+                PageReason.MAX_PAGES, self._pages_detail(), uncharged_only=True
+            )
+            if skipped:
+                await self._count(skipped=skipped)
+
+    async def _charge(self, page: Page) -> bool:
+        """Spend one page of the budget on `page` before its first fetch.
+
+        False when the budget is gone (the page is recorded `skipped/max_pages`) or this run
+        lost the page's lease.
+        """
+        if self._charged >= self._max_pages:
+            await self._finish(page, _skip(PageReason.MAX_PAGES, self._pages_detail()))
+            return False
+        self._charged += 1  # before the await: concurrent workers see it at once
+        if not await self._frontier.charge(page.id):
+            self._charged -= 1
+            logger.bind(job_id=self._job.id, url=page.url).warning("lost the page's lease")
+            return False
+        if self._charged >= self._max_pages:
+            await self._page_budget_spent()
+        return True
+
+    async def _add_bytes(self, downloaded: int) -> None:
+        self._bytes += downloaded
+        await self._count(bytes_downloaded=downloaded)
+        if self._bytes >= self._max_bytes:
+            self._stop_crawl(CrawlStopReason.MAX_TOTAL_BYTES, self._bytes_detail())
+
+    async def _skip_rest(self) -> None:
+        """After a hard stop: everything still queued is recorded with the stop's reason."""
+        if self._stop is None or not self._stop.reason.is_hard:
+            return  # drained, or a soft stop (whose leftovers were skipped as they came)
+        skipped = await self._frontier.skip_queued(self._stop.reason.page_reason, self._stop.detail)
+        if skipped:
+            await self._count(skipped=skipped)
+            self._notify()
 
     # ---- one page ---- #
 
@@ -375,24 +525,47 @@ class CrawlEngine:
         return None, rules
 
     async def _crawl(self, page: Page) -> None:
+        if self._out_of_time():
+            await self._frontier.release(page.id)  # recorded by _skip_rest
+            return
+        if not page.charged and self._charged >= self._max_pages:
+            # the budget is spent: no robots.txt lookup or anything else for this page
+            await self._finish(page, _skip(PageReason.MAX_PAGES, self._pages_detail()))
+            return
         skip, rules = await self._gate(page)
         if skip is not None:
             await self._finish(page, skip)
             return
+        if not page.charged and not await self._charge(page):
+            return
+
+        deadline = asyncio.get_running_loop().time() + self._page_timeout
         try:
-            await self._limiter.acquire(
-                page.url, crawl_delay=rules.crawl_delay, max_wait=self._max_wait
-            )
+            async with asyncio.timeout_at(deadline):
+                await self._limiter.acquire(
+                    page.url, crawl_delay=rules.crawl_delay, max_wait=self._max_wait
+                )
         except RateLimitWaitExceededError as exc:
             # the host is booked further ahead than a crawler should wait: come back then
             await self._frontier.release(page.id, delay_seconds=exc.reservation.wait_seconds)
             self._notify()
             return
+        except TimeoutError:
+            await self._fetch_failed(page, self._page_timeout_error(page, "the rate-limit wait"))
+            return
+        if self._out_of_time():  # the time ran out while waiting for the host's slot
+            await self._frontier.release(page.id)
+            return
         try:
-            result = await self._fetcher.fetch(page.url)
+            async with asyncio.timeout_at(deadline):
+                result = await self._fetcher.fetch(page.url)
         except FetchError as error:
             await self._fetch_failed(page, error)
             return
+        except TimeoutError:
+            await self._fetch_failed(page, self._page_timeout_error(page, "the fetch"))
+            return
+        await self._add_bytes(result.bytes_downloaded)
 
         try:
             final = normalize_url(result.final_url)
@@ -402,6 +575,13 @@ class CrawlEngine:
             await self._redirected(page, result, final)
         else:
             await self._content(page, result)
+
+    def _page_timeout_error(self, page: Page, stage: str) -> FetchTimeoutError:
+        return FetchTimeoutError(
+            f"page exceeded CRAWL_PAGE_TIMEOUT_SECONDS ({self._page_timeout:g} s) in {stage}",
+            url=page.url,
+            detail=f"page deadline of {self._page_timeout:g} s exceeded in {stage}",
+        )
 
     async def _fetch_failed(self, page: Page, error: FetchError) -> None:
         if isinstance(error, HttpStatusError) and error.retry_after:

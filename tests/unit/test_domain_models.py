@@ -329,4 +329,4 @@ class TestDomainModels_S13:
             "failed",
         ]
         assert [k.value for k in ContentKind] == ["html", "pdf", "docx", "pptx", "xlsx"]
-        assert len(PageReason) == 25
+        assert len(PageReason) == 27

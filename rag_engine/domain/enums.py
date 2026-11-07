@@ -72,7 +72,9 @@ class PageReason(StrEnum):
     OUT_OF_SCOPE = "out_of_scope"
     NOFOLLOW = "nofollow"
     MAX_DEPTH = "max_depth"
-    MAX_PAGES = "max_pages"
+    MAX_PAGES = "max_pages"  # the job's page budget was spent before this page (Step 51)
+    MAX_TOTAL_BYTES = "max_total_bytes"  # the job's download budget ran out (Step 51)
+    MAX_DURATION = "max_duration"  # the job ran out of wall time (Step 51)
     CANONICAL_ELSEWHERE = "canonical_elsewhere"
     UNSUPPORTED_CONTENT_TYPE = "unsupported_content_type"
     EMPTY_CONTENT = "empty_content"
@@ -94,6 +96,24 @@ class PageReason(StrEnum):
     DOCUMENT_UNREADABLE = "document_unreadable"  # encrypted, no text layer
     INTERNAL_ERROR = "internal_error"  # a bug while processing the page (logged)
     WORKER_LOST = "worker_lost"  # claimed the maximum number of times, never reported back
+
+
+class CrawlStopReason(StrEnum):
+    """Why a crawl stopped before its frontier drained (Step 51; cancellation is Step 52)."""
+
+    MAX_PAGES = "max_pages"  # soft: no new pages, but pages already counted still finish
+    MAX_TOTAL_BYTES = "max_total_bytes"  # hard: nothing more is fetched
+    MAX_DURATION = "max_duration"  # hard: nothing more is fetched
+
+    @property
+    def page_reason(self) -> PageReason:
+        """What the pages left in the frontier are recorded as."""
+        return PageReason(self.value)
+
+    @property
+    def is_hard(self) -> bool:
+        """A hard stop fetches nothing more; a soft one only stops taking new pages."""
+        return self is not CrawlStopReason.MAX_PAGES
 
 
 class ContentKind(StrEnum):
@@ -125,6 +145,7 @@ __all__ = [
     "JOB_TRANSITIONS",
     "TERMINAL_JOB_STATUSES",
     "ContentKind",
+    "CrawlStopReason",
     "DiscoveredVia",
     "EmbeddingModelName",
     "JobStatus",
