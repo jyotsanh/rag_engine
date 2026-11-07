@@ -1671,3 +1671,26 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
     - `CrawlSummary.report` is also what the completion webhook can carry.
   - **Step 85**: `GET /jobs/{id}` serves `job.report` as the failure summary. **Step 86** lists every page by status and reason.
 - Next: Step 54: Crawl engine E2E
+
+### Step 54: Crawl engine E2E  (2026-11-07)
+- Status: ✅ done
+- Built: `tests/browser/test_crawl_e2e.py`. It crawls the whole fixture site through `CrawlEngine`, **wired as production will be**: real headless Chromium (`BrowserPool.job_context` around the job, then `AutoFetcher(http, browser, before_render=render_politeness(robots, limiter))`), `RobotsCache(RedisRobotsStore)`, `DomainRateLimiter`, `SitemapDiscoverer`, `ContentClaimRepository` and `RedisCancelFlags`, over real MongoDB and Redis. The `_Crawl.run()` helper is effectively a draft of Step 77's wiring.
+  - Test infra:
+    - The container fixtures moved from `tests/integration/conftest.py` to the pytest plugin `tests/support/containers.py`, registered in `tests/conftest.py` (`pytest_plugins`). Browser tests can now use `integration_settings`, and containers still start lazily once per session.
+    - The S50 outcome check became the shared `assert_crawl_outcomes(site, outcomes, *, rendered)` in `tests/support/fixture_site.py`. S50 uses `rendered=False`; the E2E uses `rendered=True`, which also requires the SPA and its JS-only link.
+    - `tests/README.md` updated.
+  - The module is marked `integration` as well as `browser` (from its directory). It's skipped when Docker or Chromium is missing.
+- Tests: `TestCrawlEngineE2E_S54` (2):
+  - **Full site**:
+    - Every `SITE_PAGES` URL matches `EXPECTED_PAGE_OUTCOME` and nothing is left queued or in progress.
+    - `/app/` is rendered by the browser (`rendered_with=browser`, "Widget configurator" in its Markdown, the `empty_mount` signal), and it's the **only** rendered page. `/app/advanced`, linked only from the rendered DOM, succeeds with `discovered_from=/app/`.
+    - The plan's named cases: the loop fails `redirect_loop`, `/missing.html` fails 404, the PDF is extracted ("1200 items per minute"), the off-site page is `out_of_scope`, and `/private/` is `robots_disallowed`.
+    - Requests: `/private/` is never requested, `/app/` is requested twice (HTTP plus the browser render) and `/app/advanced` once.
+    - The stored report equals the summary's, matches the page table and has no unfinished pages. The robots verdict is OK, sitemap URLs were found, failures by reason exactly match the failures expected by the fixture contract, the counters match, and `bytes_downloaded` > 0.
+  - **Cancel through the API mid-crawl**: after about 12 requests, `request_cancel` (Mongo + Redis flag) gives `stop=cancelled`. Then `finish_cancelled` leaves the job `cancelled` and clears the flag. Nothing is left queued or in progress, the `job_cancelled` pages were never fetched, in-flight pages drained to `succeeded`, and `report.stop_reason=cancelled`.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1448 passed, 4 skipped (container) in 216 s. The E2E passed 3 runs in a row (~31–37 s for both tests).
+- Decisions/notes:
+  - The E2E needed no engine changes: Steps 50–53 handled the browser-rendered site as is.
+  - **Step 77**: lift `_Crawl.run()`'s wiring into the task. Enter `BrowserPool.job_context(job_id=...)` around the engine run, and pass `render_politeness(robots, limiter)` as `before_render`.
+  - Phase F (Crawl Engine, 47–54) is complete. Phase G (Chunking) starts next.
+- Next: Step 55: Chunker framework

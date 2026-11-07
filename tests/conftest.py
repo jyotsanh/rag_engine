@@ -27,7 +27,7 @@ for _key, _value in TEST_ENV.items():
 from rag_engine.config import Settings, settings  # noqa: E402
 from tests.support.fixture_site import FixtureSite  # noqa: E402
 
-pytest_plugins = ["pytester"]
+pytest_plugins = ["pytester", "tests.support.containers"]
 
 TESTS_ROOT = Path(__file__).parent
 _DIRECTORY_MARKERS = {

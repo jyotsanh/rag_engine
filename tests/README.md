@@ -36,8 +36,8 @@ Every test has a 120 s timeout (`pytest-timeout`), so a hang fails the stuck tes
 | Fixture | Scope | Purpose |
 |---|---|---|
 | `override_settings(**fields)` | function | Validated patch of the global `settings` singleton, auto-restored |
-| `mongo_service` / `redis_service` / `qdrant_service` | session | testcontainers with auth, same images as `docker-compose.yml` (`tests/support/services.py`) |
-| `fixture_site` | function (server is session) | Local edge-case website on a free loopback port; request log + `/flaky` reset per test. `SITE_PAGES` maps each URL to its expected crawl outcome (`tests/support/fixture_site.py`) |
+| `mongo_service` / `redis_service` / `qdrant_service` | session | testcontainers with auth, same images as `docker-compose.yml`. A plugin (`tests/support/containers.py`) registered for every test directory, so browser tests can use them too |
+| `fixture_site` | function (server is session) | Local edge-case website on a free loopback port; request log + `/flaky` reset per test. `SITE_PAGES` maps each URL to its expected crawl outcome and `assert_crawl_outcomes` checks a crawl against it (`tests/support/fixture_site.py`) |
 | `integration_settings` | function | Points `settings` at the containers. Unique `MONGO_DB` per test; Mongo DB dropped, Redis DBs flushed and Qdrant collections deleted on teardown |
 
 ## Naming

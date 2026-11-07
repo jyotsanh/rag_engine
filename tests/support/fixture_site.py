@@ -16,7 +16,8 @@ import mimetypes
 import socket
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections import Counter
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -34,7 +35,8 @@ from starlette.responses import (
 )
 from starlette.routing import Route
 
-from rag_engine.domain import PageReason, PageStatus
+from rag_engine.crawling import normalize_and_hash
+from rag_engine.domain import Page, PageReason, PageStatus
 
 SITE_ROOT = Path(__file__).parent.parent / "fixtures" / "site"
 
@@ -320,6 +322,47 @@ EXPECTED_PAGE_OUTCOME: dict[Expect, tuple[PageStatus, PageReason | None]] = {
     Expect.SITEMAP_ONLY: (PageStatus.SUCCEEDED, None),
     Expect.TIMEOUT: (PageStatus.FAILED, PageReason.TIMEOUT),
 }
+
+
+# rendered only by a browser: without one the shell is empty and its JS-only link unseen
+_JS_ONLY_LINKS = {"/app/advanced"}
+
+
+def assert_crawl_outcomes(
+    site: FixtureSite, outcomes: Mapping[str, Page], *, rendered: bool
+) -> None:
+    """Every `SITE_PAGES` URL ended as `EXPECTED_PAGE_OUTCOME` says (`outcomes`: url → page).
+
+    `rendered=False` (no browser): the SPA shell only has to be finished, and its JS-only
+    link is not expected at all. dup-a/dup-b: whichever was fetched second duplicates the
+    first. Out-of-scope URLs only exist when some crawled page links to them.
+    """
+    duplicates = []
+    for path, expect in SITE_PAGES.items():
+        url = site.url(path)
+        if not url.startswith("http") or (not rendered and path in _JS_ONLY_LINKS):
+            continue
+        page = outcomes.get(normalize_and_hash(url)[0])
+        if expect is Expect.DUPLICATE or path == "/dup-a.html":
+            duplicates.append(page)
+            continue
+        if expect is Expect.JS_RENDERED and not rendered:
+            assert page is not None and page.status is not PageStatus.QUEUED, path
+            continue
+        if expect is Expect.OUT_OF_SCOPE and page is None:
+            continue
+        assert page is not None, f"{path} was never discovered"
+        assert (page.status, page.reason) == EXPECTED_PAGE_OUTCOME[expect], (
+            path,
+            page.reason_detail,
+        )
+    assert Counter(p.status for p in duplicates if p) == {
+        PageStatus.SUCCEEDED: 1,
+        PageStatus.DUPLICATE: 1,
+    }
+    original = next(p for p in duplicates if p and p.status is PageStatus.SUCCEEDED)
+    copy = next(p for p in duplicates if p and p.status is PageStatus.DUPLICATE)
+    assert copy.duplicate_of == original.id
 
 
 @dataclass(frozen=True, slots=True)

@@ -72,7 +72,7 @@ from rag_engine.repositories import (
 from rag_engine.security import SafeHttpClient
 from tests.conftest import OverrideSettings
 from tests.support.fakes import InMemoryRobotsStore
-from tests.support.fixture_site import EXPECTED_PAGE_OUTCOME, SITE_PAGES, Expect, FixtureSite
+from tests.support.fixture_site import FixtureSite, assert_crawl_outcomes
 
 _TENANT = "ten_" + "1" * 32
 _KB = "kb_" + "1" * 32
@@ -284,39 +284,6 @@ async def site(
     await redis.close()
 
 
-# without a browser the SPA shell has no content, and its JS-only link is never seen
-_NEEDS_BROWSER = {Expect.JS_RENDERED}
-_JS_ONLY = {"/app/advanced"}
-
-
-def _assert_fixture_outcomes(site: FixtureSite, outcomes: dict[str, Page]) -> None:
-    duplicates = []
-    for path, expect in SITE_PAGES.items():
-        url = site.url(path)
-        if not url.startswith("http") or path in _JS_ONLY:
-            continue
-        normalized, _ = normalize_and_hash(url)
-        page = outcomes.get(normalized)
-        if expect in (Expect.DUPLICATE,) or path == "/dup-a.html":
-            duplicates.append(page)
-            continue
-        if expect in _NEEDS_BROWSER:
-            assert page is not None and page.status is not PageStatus.QUEUED, path
-            continue
-        if expect is Expect.OUT_OF_SCOPE and page is None:
-            continue  # only recorded when some page links to it
-        assert page is not None, f"{path} was never discovered"
-        assert _status(page) == EXPECTED_PAGE_OUTCOME[expect], (path, page.reason_detail)
-    # dup-a / dup-b: whichever was fetched second duplicates the first
-    assert Counter(p.status for p in duplicates if p) == {
-        PageStatus.SUCCEEDED: 1,
-        PageStatus.DUPLICATE: 1,
-    }
-    original = next(p for p in duplicates if p and p.status is PageStatus.SUCCEEDED)
-    copy = next(p for p in duplicates if p and p.status is PageStatus.DUPLICATE)
-    assert copy.duplicate_of == original.id
-
-
 # ---- #
 # Tests
 # ---- #
@@ -338,7 +305,7 @@ class TestCrawlEngine_S50:
 
         # Assert: every page's outcome
         outcomes = await site.env.outcomes(job)
-        _assert_fixture_outcomes(site.site, outcomes)
+        assert_crawl_outcomes(site.site, outcomes, rendered=False)
         assert all(
             p.status not in (PageStatus.QUEUED, PageStatus.IN_PROGRESS) for p in outcomes.values()
         )
@@ -427,7 +394,7 @@ class TestCrawlEngine_S50:
 
         # Assert
         outcomes = await site.env.outcomes(job)
-        _assert_fixture_outcomes(site.site, outcomes)
+        assert_crawl_outcomes(site.site, outcomes, rendered=False)
         # redirects crawled in run-2 still land on their (finished) target: not a refetch
         hops = {site.site.url("/docs/getting-started.html")}
         refetched = {site.site.base_url + r.path for r in site.site.requests} & done_before - hops
