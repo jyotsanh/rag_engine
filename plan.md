@@ -1271,3 +1271,40 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Integration: registry dispatch from `application/octet-stream`; fixture fetched over HTTP.
 - Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1167 passed, 4 skipped (container) in 158 s.
 - Next: Step 43: PPTX extractor
+
+### Step 43: PPTX extractor  (2026-11-07)
+- Status: ✅ done
+- Built:
+  - `rag_engine/extraction/pptx.py` → `PptxExtractor(config)` (`name="pptx"`, `kind=PPTX`, exported). **One section per visible slide**:
+    ```
+    <!-- slide N -->          (slide_marker(); mirrors the PDF page markers for citations)
+    ## <slide title>          ("## Slide N" when untitled)
+    - body bullet             (body/content placeholders; 3 spaces per paragraph level)
+    text box paragraphs
+    | table |                 (merged cells shown once via `is_spanned`)
+    Chart: <chart title>
+    > speaker notes           (one quoted line per notes paragraph)
+    ```
+    - Shapes are read **top-to-bottom, left-to-right**, and group shapes are flattened in place.
+    - Footer/date/slide-number/header placeholders are skipped (template text).
+    - Soft line breaks (`\v`) become spaces.
+    - A slide with no text at all is omitted. A deck with no text → `EmptyContentError`.
+    - **Hidden slides** (`show="0"`) are skipped (drafts/backups), counted in `metadata.hidden_skipped`.
+    - `PPTX_MAX_SLIDES` (new setting, 500) caps visible slides, flagged via `metadata.truncated`.
+    - **Metadata**: `title` (core properties, else the first slide title), `lang` (core `language`, else the first run's `lang`), `description` (subject), `metadata {author, created, modified, slide_count, slides_extracted, hidden_skipped, truncated}`.
+    - **Outlinks**: http(s) hyperlinks from text runs and shape click actions.
+    - The OOXML zip-bomb guard (`check_archive`) runs first. Corrupt files → `ExtractionError("corrupt")`.
+  - `rag_engine/extraction/tables.py` → `render_table(rows)` / `cell_text()`: the **shared GFM table renderer** (whitespace collapsed, `|` escaped, rows padded, empty rows dropped). DOCX was refactored onto it (its tests unchanged and green); XLSX (Step 44) uses it too.
+- Deps: `python-pptx` moved from the dev group to runtime. The re-lock bumped two of its dependencies: `xlsxwriter` 3.2.9 → 3.3.1 and **`pillow` 12.3.0 → 13.0.0 (major)**. Nothing in `rag_engine` uses Pillow directly, and the full suite is green.
+- Tests: `TestPptxExtractor_S43` (16, unit; decks generated with python-pptx):
+  - Fixture `roadmap.pptx`: exact Markdown (3 slide sections, bullets, notes, release table), title, slide count, created date.
+  - Slide content: nested bullets with a soft line break and multi-paragraph notes; text boxes in reading order despite insertion order; table with an escaped pipe and a merged row; group-shape text and a chart title; untitled slide → `## Slide 3`, an empty slide omitted.
+  - Visibility and caps: hidden slide skipped and counted; slide cap truncates and flags.
+  - Metadata and links: core properties incl. `fr-FR` → `fr`; language from a run's `lang`; run hyperlink and click-action outlinks, mailto dropped.
+  - Failures: textless deck; corrupt archive; zip-bomb guard.
+  - Integration: registry dispatch from `application/zip`; fixture fetched over HTTP.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1183 passed, 4 skipped (container) in 163 s.
+- Decisions/notes:
+  - **Step 56** treats `<!-- slide N -->` like `<!-- page N -->` (a location marker, not content).
+  - Pictures' alt text and SmartArt text are not extracted yet (rarely matter for docs sites). This is a known gap.
+- Next: Step 44: XLSX extractor

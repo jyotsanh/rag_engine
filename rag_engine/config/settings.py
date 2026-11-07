@@ -157,6 +157,8 @@ class Settings(BaseSettings):
     PDF_MAX_PAGES: int = Field(default=500, gt=0)
     # Office files (DOCX/PPTX/XLSX) are zips: cap the total *uncompressed* size before parsing
     OOXML_MAX_UNCOMPRESSED_BYTES: int = Field(default=200 * 1024 * 1024, gt=0)
+    # PPTX: visible slides extracted (later slides are dropped, flagged)
+    PPTX_MAX_SLIDES: int = Field(default=500, gt=0)
     # wall-clock cap per extracted document (a parser thread over the cap finishes unobserved)
     EXTRACTION_TIMEOUT_SECONDS: float = Field(default=120.0, gt=0)
     # robots.txt Crawl-delay is honoured up to this; a larger value would stall the job

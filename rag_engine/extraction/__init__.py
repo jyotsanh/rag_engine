@@ -17,6 +17,7 @@ from .exceptions import (
 )
 from .html import HtmlExtractor
 from .pdf import PdfExtractor, page_marker
+from .pptx import PptxExtractor, slide_marker
 from .registry import ExtractorRegistry
 from .sniff import Sniffed, looks_like_text, sniff
 
@@ -36,12 +37,14 @@ __all__ = [
     "MarkdownBlock",
     "MetadataValue",
     "PdfExtractor",
+    "PptxExtractor",
     "Sniffed",
     "StrippedMarkdown",
     "UnsupportedContentError",
     "looks_like_text",
     "normalize_unit",
     "page_marker",
+    "slide_marker",
     "sniff",
     "split_blocks",
 ]

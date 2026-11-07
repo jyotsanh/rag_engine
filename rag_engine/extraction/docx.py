@@ -36,6 +36,7 @@ from rag_engine.domain import ContentKind
 from rag_engine.extraction.base import BaseExtractor, ExtractedDocument, ExtractionInput
 from rag_engine.extraction.exceptions import EmptyContentError, ExtractionError
 from rag_engine.extraction.ooxml import check_archive
+from rag_engine.extraction.tables import render_table
 
 _HEADING_STYLE = re.compile(r"^heading\s*(\d)$", re.I)
 _CODE_STYLE = re.compile(r"code|source|preformatted|verbatim|monospace", re.I)
@@ -280,14 +281,7 @@ def _table_markdown(table: Table) -> str:
             cells.append(text)
             previous, above[column] = tc, tc
         rows.append(cells)
-    rows = [r for r in rows if any(r)]
-    if not rows:
-        return ""
-    width = max(len(r) for r in rows)
-    rows = [r + [""] * (width - len(r)) for r in rows]
-    lines = ["| " + " | ".join(rows[0]) + " |", "|" + "---|" * width]
-    lines += ["| " + " | ".join(r) + " |" for r in rows[1:]]
-    return "\n".join(lines)
+    return render_table(rows)
 
 
 def _cell_text(cell: Any) -> str:
@@ -295,7 +289,7 @@ def _cell_text(cell: Any) -> str:
     for nested in cell.tables:  # nested tables are flattened into the cell
         for row in nested.rows:
             text += " " + " ".join(_cell_text(c) for c in row.cells)
-    return text.strip().replace("|", "\\|")
+    return text.strip()
 
 
 # ---- document level ---- #
