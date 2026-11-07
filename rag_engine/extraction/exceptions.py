@@ -35,6 +35,12 @@ class DocumentUnreadableError(ExtractionError):
     reason = PageReason.DOCUMENT_UNREADABLE
 
 
+class DocumentTooLargeError(ExtractionError):
+    """Over the per-format size cap (bytes); page-count caps truncate instead."""
+
+    reason = PageReason.TOO_LARGE
+
+
 class EmptyContentError(ExtractionError):
     """Readable, but there is no text worth indexing."""
 

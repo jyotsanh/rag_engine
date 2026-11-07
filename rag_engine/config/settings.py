@@ -152,6 +152,9 @@ class Settings(BaseSettings):
     BOILERPLATE_MIN_PAGES: int = Field(default=5, ge=2)
     BOILERPLATE_MIN_RATIO: float = Field(default=0.5, gt=0, le=1)
     BOILERPLATE_KEEP_ONE_MIN_CHARS: int = Field(default=200, ge=0)
+    # PDFs: bytes accepted for parsing, and pages extracted (later pages are dropped, flagged)
+    PDF_MAX_BYTES: int = Field(default=20 * 1024 * 1024, gt=0)
+    PDF_MAX_PAGES: int = Field(default=500, gt=0)
     # wall-clock cap per extracted document (a parser thread over the cap finishes unobserved)
     EXTRACTION_TIMEOUT_SECONDS: float = Field(default=120.0, gt=0)
     # robots.txt Crawl-delay is honoured up to this; a larger value would stall the job

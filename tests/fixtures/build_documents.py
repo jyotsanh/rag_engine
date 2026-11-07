@@ -66,7 +66,7 @@ def build_encrypted_pdf(path: Path) -> None:
     doc.new_page().insert_text((72, 72), "Confidential pricing", fontsize=14)
     doc.save(
         path,
-        encryption=pymupdf.PDF_ENCRYPT_AES_256,  # type: ignore  # set at runtime
+        encryption=pymupdf.PDF_ENCRYPT_AES_256,
         owner_pw="owner-secret",
         user_pw="user-secret",
         no_new_id=True,

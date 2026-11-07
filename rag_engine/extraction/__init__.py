@@ -7,6 +7,7 @@ from .boilerplate import (
     split_blocks,
 )
 from .exceptions import (
+    DocumentTooLargeError,
     DocumentUnreadableError,
     EmptyContentError,
     ExtractionError,
@@ -14,12 +15,14 @@ from .exceptions import (
     UnsupportedContentError,
 )
 from .html import HtmlExtractor
+from .pdf import PdfExtractor, page_marker
 from .registry import ExtractorRegistry
 from .sniff import Sniffed, looks_like_text, sniff
 
 __all__ = [
     "BaseExtractor",
     "BoilerplateIndex",
+    "DocumentTooLargeError",
     "DocumentUnreadableError",
     "EmptyContentError",
     "ExtractedDocument",
@@ -30,11 +33,13 @@ __all__ = [
     "HtmlExtractor",
     "MarkdownBlock",
     "MetadataValue",
+    "PdfExtractor",
     "Sniffed",
     "StrippedMarkdown",
     "UnsupportedContentError",
     "looks_like_text",
     "normalize_unit",
+    "page_marker",
     "sniff",
     "split_blocks",
 ]

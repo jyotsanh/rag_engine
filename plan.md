@@ -1212,3 +1212,36 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Where it runs**: frequency is a whole-job statistic, so stripping can't happen page by page during the crawl. **Step 50** stores each page's extracted Markdown as-is. The **finalize/ingest stage** (before Step 55's chunking) builds the index from the job's pages in crawl order, which picks the keeper, then strips each page. After a crash it is rebuilt from Mongo, so nothing is persisted. Step 46's dedupe hash stays on the unstripped Markdown (duplicates are duplicates either way).
   - Recommended order at ingest: boilerplate strip (40) → text cleaning (45; prunes headings whose sections emptied, applies min content) → chunking (55+).
 - Next: Step 41: PDF extractor
+
+### Step 41: PDF extractor  (2026-11-07)
+- Status: ✅ done
+- Built: `rag_engine/extraction/pdf.py` → `PdfExtractor(config)` (`name="pdf"`, `kind=PDF`, exported).
+  - **Caps**: a body over `PDF_MAX_BYTES` (20 MiB) → new `DocumentTooLargeError` (`too_large`, failed). Only the first `PDF_MAX_PAGES` (500) pages are extracted; `metadata.truncated` / `pages_extracted` / `page_count` record it (not a failure).
+  - **Unreadable** (`DocumentUnreadableError`, `document_unreadable`, failed):
+    - `encrypted`: a user password is required. Owner-password-only PDFs are opened with `authenticate("")` and extracted normally.
+    - `no_text_layer`: no text on any extracted page, i.e. a scan without OCR. **OCR is off** (`use_ocr=False`) by design.
+  - Corrupt → `ExtractionError` (`extraction_failed`, detail `corrupt`). No pages → `EmptyContentError`.
+  - **Markdown** via pymupdf4llm 2.1's layout engine (`pymupdf-layout`, ONNX GNN): headings, lists, **tables as Markdown tables** (verified with a ruled grid), running page headers/footers dropped (`header=False, footer=False`), images ignored.
+    - Each page is prefixed with the marker line **`<!-- page N -->`** (`page_marker()`), which Step 56 uses for page citations. Trailing spaces and blank runs are tidied.
+    - If pymupdf4llm raises, the plain text layer is used (`metadata.extraction="pymupdf_text"`).
+  - **Metadata**:
+    - `title`: document info, unless empty or junk (`Untitled`, `Microsoft Word - …`, file names), then the first heading.
+    - `lang`: catalog `/Lang`, primary subtag.
+    - `description`: subject.
+    - `metadata`: `{extraction, author, created (from `D:YYYYMMDD…`), page_count, pages_extracted, truncated}`.
+  - **Outlinks**: http(s) URI link annotations on the extracted pages, de-duplicated in order (mailto etc. dropped), for `LinkExtractor.filter_urls`.
+  - **Thread safety**: PyMuPDF must not run in several threads at once, and extraction runs in `run_sync` threads, so a process-wide `threading.Lock` serializes PDF parsing. Crawl workers parallelize across processes. MuPDF's stderr warnings/errors are switched off (failures still raise).
+  - Never prints to stdout: with OCR off, pymupdf4llm's "Document parser messages" block (the RapidOCR warning) is not emitted.
+- Deps: runtime `pymupdf4llm` (2.1) and `pymupdf` (moved from the dev group; imported directly). pymupdf 2.1 brings `pymupdf-layout` and **`onnxruntime`** into the runtime closure, so the worker image grows; Step 95 should measure it.
+- Settings: `PDF_MAX_BYTES` (20 MiB), `PDF_MAX_PAGES` (500); `.env.example` updated.
+- Also: removed a now-unused `type: ignore` in `tests/fixtures/build_documents.py` (pymupdf 2.1 declares `PDF_ENCRYPT_AES_256` statically; ty flagged it).
+- Tests: `TestPdfExtractor_S41` (21, unit; PDFs generated with pymupdf where the fixtures don't cover a case):
+  - Content: fixture spec sheet (markers, headings, title/author, counts); ruled table → Markdown table; running header/footer dropped; page markers in order.
+  - Metadata: title/subject/`/Lang`/creation date; 4 junk titles fall back to the first heading; URI outlinks de-duplicated, mailto dropped.
+  - Caps and failures: page cap truncates and flags; byte cap → `too_large`; scanned fixture → `no_text_layer`; password fixture → `encrypted`; owner-only encryption readable; 2 corrupt bodies → `extraction_failed`; layout failure → text-layer fallback.
+  - Integration: 4 concurrent extractions (lock) correct; dispatched by bytes through the registry from `application/octet-stream`; fixture PDF fetched over HTTP.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1150 passed, 4 skipped (container) in 171 s.
+- Decisions/notes:
+  - **Step 56** must treat `<!-- page N -->` lines as page boundaries (attach `page` to chunks), not as content.
+  - The lock means one PDF at a time per worker process. If PDF-heavy crawls are slow, the fix is more worker processes (or a dedicated process pool), not threads.
+- Next: Step 42: DOCX extractor
