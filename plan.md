@@ -1694,3 +1694,43 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 77**: lift `_Crawl.run()`'s wiring into the task. Enter `BrowserPool.job_context(job_id=...)` around the engine run, and pass `render_politeness(robots, limiter)` as `before_render`.
   - Phase F (Crawl Engine, 47–54) is complete. Phase G (Chunking) starts next.
 - Next: Step 55: Chunker framework
+
+### Step 55: Chunker framework  (2026-11-07)
+- Status: ✅ done
+- Built: the `rag_engine/chunking/` package.
+  - `base.py`:
+    - `Tokenizer` protocol (`name`, `count(text)`). tiktoken per model encoding is Step 57.
+    - `ChunkingConfig(target_tokens, max_tokens, overlap_tokens)`, validated, with `.from_settings()`.
+    - `ChunkInput.from_page(page, markdown=None)`: succeeded pages only (`ValueError` otherwise). It carries the storage ids, with `version = page.job_id`. `markdown=` takes the job-level boilerplate-stripped text (Step 40).
+    - `ChunkPiece(text, heading_path, page_number)`: what a strategy outputs.
+    - `ChunkDraft(ordinal, text, embed_text, heading_path, token_count, content_hash, page_number)` with `.to_document(source) -> Chunk`.
+    - `content_hash()`.
+  - **`BaseChunker`** is a template method. Subclasses implement only `split(source) -> Iterable[ChunkPiece]` (plus the `embed_text(source, piece, text)` hook, which defaults to the text and is finalized by Step 58). The final `chunk()` guarantees, for every strategy:
+    - blank lines around a piece are trimmed (indentation kept, for code) and empty pieces dropped;
+    - dense ordinals from 0;
+    - `token_count` is counted on **embed_text**, the string the embedder receives, so Step 62 can pack batches by token budget without recounting;
+    - over `max_tokens` raises `ChunkTooLargeError` (a splitter bug, never silently truncated); 0 tokens for non-empty text raises `TokenizerError`;
+    - `content_hash = sha256(embed_text)`, which the embedding cache can key on (Step 64);
+    - heading paths are capped at `MAX_HEADING_DEPTH=12`, keeping the outermost levels.
+  - `factory.py`: `@register_chunker(ChunkerType.X)` (refuses non-`BaseChunker` classes and a second class for the same kind; registering the same class again is fine), `registered_chunkers()`, `get_chunker(tokenizer, kind=None, *, config, chunking=None)`. An unregistered kind raises `UnknownChunkerError`, listing the registered ones.
+  - `exceptions.py`: `ChunkingError` → `UnknownChunkerError`, `ChunkerRegistrationError`, `ChunkTooLargeError(url, ordinal, token_count, max_tokens)`, `TokenizerError`. These are plain exceptions, not API errors: they mean a bug or misconfiguration.
+- Config:
+  - `ChunkerType` StrEnum (`structure`), exported from `rag_engine.config`.
+  - Settings `CHUNKER` (structure), `CHUNK_TARGET_TOKENS` (400), `CHUNK_MAX_TOKENS` (800, ≤ 8000, under the models' 8191 input limit) and `CHUNK_OVERLAP_TOKENS` (60). Validators: target ≤ max and overlap < target. `.env.example` has a chunking section.
+- Domain: `Chunk.page_number: int | None` (> 0), for the PDF page a chunk starts on (Step 56). `token_count` is documented as tokens of `embed_text`.
+- Tests: `TestChunkerFramework_S55` (20, unit):
+  - input from a succeeded page / override / non-succeeded refused;
+  - dense ordinals with empty pieces dropped, indentation kept, page numbers passed through;
+  - tokens and hash describe embed_text via a contextual subclass; same embed_text gives the same hash;
+  - heading-path cap; oversized → `ChunkTooLargeError` with its fields; zero-token tokenizer refused; no pieces → no chunks;
+  - draft → a valid `Chunk` that round-trips through BSON; `page_number` must be positive;
+  - config from settings plus validation; 5 inconsistent settings rejected;
+  - factory default/explicit budget, unregistered strategy error, registration checks.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1468 passed, 4 skipped (container) in 215 s.
+- Decisions/notes:
+  - **No strategy is registered yet**: `get_chunker()` raises `UnknownChunkerError` until Step 57 registers `StructureChunker` under `ChunkerType.STRUCTURE`. Tests register a fake under an isolated registry.
+  - **Step 56** (parser) should output sections with heading paths and atomic blocks, and map `<!-- page N -->` markers to `ChunkPiece.page_number` (never to content).
+  - **Step 57**: a tiktoken `Tokenizer` per `EmbeddingModelSpec.tokenizer_encoding`. The splitter budgets text against `target_tokens` but must keep embed_text ≤ `max_tokens`, so it should reserve room for Step 58's context (title + heading path).
+  - **Step 58**: override `embed_text` in the base class (or the structure chunker); `text` stays clean for display.
+  - **Step 59**: persist with `draft.to_document(source)`. `(page_id, ordinal)` is already unique.
+- Next: Step 56: Markdown structure parser

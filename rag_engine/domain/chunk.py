@@ -39,5 +39,6 @@ class Chunk(MongoDocument):
     ordinal: NonNegativeInt
     text: str = Field(min_length=1)
     embed_text: str = Field(min_length=1)
-    token_count: int = Field(gt=0)
+    token_count: int = Field(gt=0)  # tokens of `embed_text` (what the embedder receives)
+    page_number: int | None = Field(default=None, gt=0)  # PDF page the chunk starts on (S56)
     content_hash: Sha256Hex

@@ -25,6 +25,12 @@ class RerankerType(StrEnum):
     CROSS_ENCODER = "cross_encoder"
 
 
+class ChunkerType(StrEnum):
+    """Chunking strategies (Step 55 factory). `structure` is built in Steps 56-58."""
+
+    STRUCTURE = "structure"  # Markdown structure (headings, atomic blocks) + token budget
+
+
 class JsRenderMode(StrEnum):
     """When the crawler re-renders HTML pages in headless Chromium (Step 36)."""
 

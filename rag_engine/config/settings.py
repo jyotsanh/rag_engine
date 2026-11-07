@@ -5,6 +5,7 @@ from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from rag_engine.config.enums import (
+    ChunkerType,
     EmbeddingModelName,
     EmbeddingProvider,
     Environment,
@@ -120,6 +121,16 @@ class Settings(BaseSettings):
     OPENAI_MAX_CONCURRENT_REQUESTS: int = Field(default=4, gt=0)
     # tenant default when the admin does not pick one; a KB locks its model at creation
     DEFAULT_EMBEDDING_MODEL: EmbeddingModelName = EmbeddingModelName.TEXT_EMBEDDING_3_SMALL
+
+    # ---- chunking (Steps 55-58) ---- #
+    CHUNKER: ChunkerType = ChunkerType.STRUCTURE
+    # the splitter aims for chunks of about CHUNK_TARGET_TOKENS of text...
+    CHUNK_TARGET_TOKENS: int = Field(default=400, gt=0)
+    # ...never above CHUNK_MAX_TOKENS of embedded text (title + heading path + chunk, Step 58);
+    # far below the embedding models' 8191-token input limit, which also bounds it
+    CHUNK_MAX_TOKENS: int = Field(default=800, gt=0, le=8000)
+    # tokens of the previous chunk repeated at the start of the next (prose only, Step 57)
+    CHUNK_OVERLAP_TOKENS: int = Field(default=60, ge=0)
 
     # ---- reranker ---- #
     ACTIVE_RERANKER: RerankerType = RerankerType.CROSS_ENCODER
@@ -262,6 +273,10 @@ class Settings(BaseSettings):
                 "CRAWL_FRONTIER_LEASE_SECONDS must be > "
                 "CRAWL_PAGE_TIMEOUT_SECONDS + EXTRACTION_TIMEOUT_SECONDS"
             )
+        if self.CHUNK_TARGET_TOKENS > self.CHUNK_MAX_TOKENS:
+            raise ValueError("CHUNK_TARGET_TOKENS must be <= CHUNK_MAX_TOKENS")
+        if self.CHUNK_OVERLAP_TOKENS >= self.CHUNK_TARGET_TOKENS:
+            raise ValueError("CHUNK_OVERLAP_TOKENS must be < CHUNK_TARGET_TOKENS")
         if self.CRAWL_CANCEL_FLAG_TTL_SECONDS < self.CRAWL_MAX_JOB_SECONDS:
             raise ValueError("CRAWL_CANCEL_FLAG_TTL_SECONDS must be >= CRAWL_MAX_JOB_SECONDS")
         if self.CRAWL_MAX_PAGE_BYTES > self.CRAWL_MAX_TOTAL_BYTES:

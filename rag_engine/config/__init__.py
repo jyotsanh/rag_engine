@@ -1,4 +1,5 @@
 from .enums import (
+    ChunkerType,
     EmbeddingModelName,
     EmbeddingProvider,
     Environment,
@@ -17,6 +18,7 @@ from .logging import (  # isort: skip
 )
 
 __all__ = [
+    "ChunkerType",
     "EmbeddingModelName",
     "EmbeddingProvider",
     "Environment",
