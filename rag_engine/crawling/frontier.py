@@ -74,6 +74,15 @@ class FrontierEntry:
     discovered_from: str | None = None
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SkippedEntry:
+    url: str
+    depth: int
+    reason: PageReason
+    detail: str | None = None
+    discovered_from: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class FrontierStats:
     ready: int  # claimable now
@@ -153,6 +162,37 @@ class Frontier:
             await self._promote(pages)
         return inserted
 
+    async def add_skipped(self, entries: Iterable[SkippedEntry]) -> int:
+        """Record URLs that won't be crawled (out of scope, too deep, nofollow) as skipped.
+
+        Only URLs the job doesn't know yet are recorded: a URL that was also queued (some
+        other link reached it in scope) keeps its real outcome. Returns how many were new.
+        """
+        best: dict[str, Page] = {}
+        for entry in entries:
+            try:
+                url, url_hash = normalize_and_hash(entry.url)
+            except UrlNormalizationError:
+                continue
+            if url_hash in best:
+                continue
+            best[url_hash] = Page(
+                tenant_id=self._job.tenant_id,
+                kb_id=self._job.kb_id,
+                source_id=self._job.source_id,
+                job_id=self._job.job_id,
+                url=url,
+                url_hash=url_hash,
+                depth=entry.depth,
+                discovered_from=entry.discovered_from,
+                discovered_via=DiscoveredVia.LINK,
+                priority=frontier_priority(DiscoveredVia.LINK, entry.depth),
+                status=PageStatus.SKIPPED,
+                reason=entry.reason,
+                reason_detail=(entry.detail or "")[:500] or None,
+            )
+        return await self._pages.add_many_discovered(best.values())
+
     def _page(self, entry: FrontierEntry) -> Page:
         url, url_hash = normalize_and_hash(entry.url)
         return Page(
@@ -219,6 +259,23 @@ class Frontier:
             )
         return page
 
+    async def claim_url(self, url: str) -> Page | None:
+        """Claim one specific queued page (e.g. a redirect target whose content we hold).
+
+        None if the URL is unknown, invalid, or not queued (done, or held by a crawler).
+        """
+        try:
+            _, url_hash = normalize_and_hash(url)
+        except UrlNormalizationError:
+            return None
+        now = self._clock()
+        filter_ = {
+            "job_id": self._job.job_id,
+            "url_hash": url_hash,
+            "status": PageStatus.QUEUED.value,
+        }
+        return await self._claim_one(filter_, now)
+
     def _ready(self, now: datetime) -> dict[str, Any]:
         """Queued pages of this job that are claimable now (no retry pending)."""
         return {
@@ -258,10 +315,17 @@ class Frontier:
         now = self._clock()
         return await self._give_back(page_id, now + timedelta(seconds=delay_seconds), now)
 
-    async def release(self, page_id: str) -> bool:
-        """Put a held page back unprocessed (e.g. stopping early); the attempt is refunded."""
+    async def release(self, page_id: str, *, delay_seconds: float = 0) -> bool:
+        """Put a held page back unprocessed; the attempt is refunded.
+
+        For pages that were never tried: stopping early, or a host whose rate-limit slot is
+        further away than a crawler should wait (`delay_seconds` until it is claimable).
+        """
+        if delay_seconds < 0:
+            raise ValueError("delay_seconds must be >= 0")
         now = self._clock()
-        return await self._give_back(page_id, None, now, refund=True)
+        retry_at = now + timedelta(seconds=delay_seconds) if delay_seconds else None
+        return await self._give_back(page_id, retry_at, now, refund=True)
 
     async def _give_back(
         self, page_id: str, retry_at: datetime | None, now: datetime, *, refund: bool = False

@@ -18,7 +18,7 @@ from .enums import (
 )
 from .job import CrawlConfig, CrawlJob, EmbeddingUsage, JobCounters, JobError
 from .knowledge_base import KnowledgeBase
-from .page import Page
+from .page import MAX_DEFERRED_LINKS, DeferredLink, Page
 from .source import Source, SourceStats
 from .tenant import TENANT_NAME_COLLATION, Tenant, TenantQuotas
 
@@ -26,6 +26,7 @@ __all__ = [
     "ACTIVE_JOB_STATUSES",
     "CLAIM_TTL_SECONDS",
     "JOB_TRANSITIONS",
+    "MAX_DEFERRED_LINKS",
     "TENANT_NAME_COLLATION",
     "TERMINAL_JOB_STATUSES",
     "ApiKey",
@@ -34,6 +35,7 @@ __all__ = [
     "ContentKind",
     "CrawlConfig",
     "CrawlJob",
+    "DeferredLink",
     "DiscoveredVia",
     "EmbeddingModelName",
     "EmbeddingUsage",

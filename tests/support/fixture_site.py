@@ -225,7 +225,7 @@ class Expect(StrEnum):
     JS_RENDERED = "js_rendered"  # empty without JavaScript; must be rendered
     DOCUMENT = "document"  # PDF/DOCX/PPTX/XLSX extracted
     DOCUMENT_UNREADABLE = "document_unreadable"  # no text layer / encrypted
-    REDIRECT = "redirect"  # followed to an in-scope target
+    REDIRECT = "redirect"  # followed; the content is recorded under the target URL
     REDIRECT_LOOP = "redirect_loop"
     BLOCKED_SSRF = "blocked_ssrf"  # redirect into a forbidden network
     NOT_FOUND = "not_found"
@@ -302,7 +302,8 @@ EXPECTED_PAGE_OUTCOME: dict[Expect, tuple[PageStatus, PageReason | None]] = {
     Expect.JS_RENDERED: (PageStatus.SUCCEEDED, None),
     Expect.DOCUMENT: (PageStatus.SUCCEEDED, None),
     Expect.DOCUMENT_UNREADABLE: (PageStatus.FAILED, PageReason.DOCUMENT_UNREADABLE),
-    Expect.REDIRECT: (PageStatus.SUCCEEDED, None),
+    # the target URL's own page holds the content (no duplicate of a linked target, Step 50)
+    Expect.REDIRECT: (PageStatus.SKIPPED, PageReason.REDIRECTED),
     Expect.REDIRECT_LOOP: (PageStatus.FAILED, PageReason.REDIRECT_LOOP),
     Expect.BLOCKED_SSRF: (PageStatus.FAILED, PageReason.SSRF_BLOCKED),
     Expect.NOT_FOUND: (PageStatus.FAILED, PageReason.HTTP_CLIENT_ERROR),

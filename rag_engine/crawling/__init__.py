@@ -5,6 +5,15 @@ from .dedupe import (
     DedupeOutcome,
     content_hash,
 )
+from .engine import (
+    CrawlEngine,
+    CrawlSummary,
+    PageFetcher,
+    RateLimiter,
+    RobotsSource,
+    SitemapSource,
+    render_politeness,
+)
 from .fetchers import RawFetcher
 from .frontier import (
     Frontier,
@@ -12,6 +21,7 @@ from .frontier import (
     FrontierJob,
     FrontierStats,
     RecoveryReport,
+    SkippedEntry,
     frontier_priority,
 )
 from .js_shell import (
@@ -95,7 +105,9 @@ __all__ = [
     "Classification",
     "ContentClaimStore",
     "ContentDeduper",
+    "CrawlEngine",
     "CrawlScope",
+    "CrawlSummary",
     "DedupeDecision",
     "DedupeOutcome",
     "DomainRateLimiter",
@@ -111,9 +123,11 @@ __all__ = [
     "Link",
     "LinkExtractor",
     "LinkSource",
+    "PageFetcher",
     "PageLinks",
     "ParsedSitemap",
     "RateLimitWaitExceededError",
+    "RateLimiter",
     "RawFetcher",
     "RecoveryReport",
     "RedisRobotsStore",
@@ -124,6 +138,7 @@ __all__ = [
     "RetryPolicy",
     "RobotsCache",
     "RobotsRules",
+    "RobotsSource",
     "RobotsStatus",
     "RobotsStore",
     "ScopeDecision",
@@ -135,6 +150,8 @@ __all__ = [
     "SitemapParseError",
     "SitemapProblem",
     "SitemapReport",
+    "SitemapSource",
+    "SkippedEntry",
     "UrlNormalizationError",
     "call_with_retries",
     "canonical_from_link_header",
@@ -150,6 +167,7 @@ __all__ = [
     "parse_x_robots_tag",
     "rate_limit_host",
     "registrable_domain",
+    "render_politeness",
     "robots_token",
     "url_hash",
 ]

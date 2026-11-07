@@ -192,6 +192,9 @@ class Settings(BaseSettings):
     # a claimed frontier page whose crawler hasn't reported back within this is reclaimed
     # (a crashed worker); must outlast one fetch + render, with room for extraction
     CRAWL_FRONTIER_LEASE_SECONDS: int = Field(default=10 * 60, gt=0)
+    # a crawler waits at most this for a host's rate-limit slot, then re-queues the page
+    # for that time instead of holding a concurrency slot (slow hosts can't starve others)
+    CRAWL_RATE_LIMIT_MAX_WAIT_SECONDS: float = Field(default=5.0, ge=0)
     # link candidates considered per page; link farms beyond this are cut (and flagged)
     CRAWL_MAX_LINKS_PER_PAGE: int = Field(default=5_000, gt=0, le=100_000)
     # re-render HTML in headless Chromium: auto (JS-shell detector) / always / never

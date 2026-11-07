@@ -77,6 +77,8 @@ class PageReason(StrEnum):
     UNSUPPORTED_CONTENT_TYPE = "unsupported_content_type"
     EMPTY_CONTENT = "empty_content"
     JOB_CANCELLED = "job_cancelled"
+    REDIRECTED = "redirected"  # its content is recorded under the redirect target's page
+    NOINDEX = "noindex"  # robots meta / X-Robots-Tag noindex: links followed, not indexed
     # failed
     TOO_LARGE = "too_large"
     REDIRECT_LOOP = "redirect_loop"
@@ -90,6 +92,7 @@ class PageReason(StrEnum):
     RENDER_FAILED = "render_failed"
     EXTRACTION_FAILED = "extraction_failed"
     DOCUMENT_UNREADABLE = "document_unreadable"  # encrypted, no text layer
+    INTERNAL_ERROR = "internal_error"  # a bug while processing the page (logged)
     WORKER_LOST = "worker_lost"  # claimed the maximum number of times, never reported back
 
 

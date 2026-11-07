@@ -12,6 +12,7 @@ from rag_engine.crawling import (
     Frontier,
     FrontierEntry,
     FrontierJob,
+    SkippedEntry,
     frontier_priority,
     normalize_and_hash,
 )
@@ -424,3 +425,71 @@ class TestFrontier_S48:
 
         assert list(indexes["job_frontier"]["key"]) == ["job_id", "status", "priority", "_id"]
         assert indexes["job_url_unique"]["unique"] is True
+
+
+class TestFrontierEngineSupport_S50:
+    """S50 — Frontier additions for the engine: claim a given URL, delayed release, skips."""
+
+    async def test_claim_url_takes_that_queued_page(self, make_frontier) -> None:
+        frontier = make_frontier()
+        await frontier.add_many([_link("/first"), _link("/target")])
+
+        target = await frontier.claim_url(f"{_SITE}/target#section")
+        again = await frontier.claim_url(f"{_SITE}/target")
+        unknown = await frontier.claim_url(f"{_SITE}/nope")
+        invalid = await frontier.claim_url("not a url")
+
+        assert target is not None and target.url == f"{_SITE}/target"
+        assert (target.status, target.claimed_by, target.attempts) == (
+            PageStatus.IN_PROGRESS,
+            "run-1",
+            1,
+        )
+        assert again is unknown is invalid is None
+
+    async def test_release_with_a_delay_refunds_and_waits(
+        self, make_frontier, clock: _Clock
+    ) -> None:
+        frontier = make_frontier()
+        await frontier.add(f"{_SITE}/busy-host", depth=1, via=DiscoveredVia.LINK)
+        page = await frontier.claim()
+        assert page is not None
+
+        assert await frontier.release(page.id, delay_seconds=2) is True
+        too_early = await frontier.claim()
+        clock.advance(2)
+        later = await frontier.claim()
+
+        assert too_early is None
+        assert later is not None and later.attempts == 1  # the first claim was refunded
+        with pytest.raises(ValueError, match="delay_seconds"):
+            await frontier.release(page.id, delay_seconds=-1)
+
+    async def test_add_skipped_never_overrides_a_known_url(
+        self, make_frontier, pages: PageRepository
+    ) -> None:
+        frontier = make_frontier()
+        await frontier.add(f"{_SITE}/reached", depth=1, via=DiscoveredVia.LINK)
+
+        recorded = await frontier.add_skipped(
+            [
+                SkippedEntry(url=f"{_SITE}/reached", depth=6, reason=PageReason.MAX_DEPTH),
+                SkippedEntry(url=f"{_SITE}/held", depth=2, reason=PageReason.NOFOLLOW,
+                             detail="rel=nofollow", discovered_from=f"{_SITE}/"),
+                SkippedEntry(url=f"{_SITE}/held", depth=3, reason=PageReason.NOFOLLOW),
+                SkippedEntry(url="mailto:x@acme.example", depth=1, reason=PageReason.OUT_OF_SCOPE),
+            ]
+        )  # fmt: skip
+
+        reached = await pages.find_one({"url": f"{_SITE}/reached"})
+        held = await pages.find_one({"url": f"{_SITE}/held"})
+        assert recorded == 1
+        assert reached is not None and reached.status is PageStatus.QUEUED
+        assert held is not None
+        assert (held.status, held.reason, held.reason_detail, held.depth) == (
+            PageStatus.SKIPPED,
+            PageReason.NOFOLLOW,
+            "rel=nofollow",
+            2,
+        )
+        assert (await frontier.stats()).ready == 1  # skipped rows are never claimable

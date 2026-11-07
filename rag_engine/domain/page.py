@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Self
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 from pymongo import IndexModel
 
 from rag_engine.domain.base import MongoDocument
@@ -24,6 +24,16 @@ from rag_engine.domain.types import (
 )
 
 _NEEDS_REASON = {PageStatus.SKIPPED, PageStatus.FAILED}
+MAX_DEFERRED_LINKS = 1000  # per page
+
+
+class DeferredLink(BaseModel):
+    """A link of this page that won't be crawled from here (Step 50): out of scope, too deep
+    or nofollow. Kept on the page so the end-of-crawl report survives a crash."""
+
+    url: HttpUrlStr
+    reason: PageReason
+    detail: str | None = Field(default=None, max_length=100)
 
 
 class Page(MongoDocument):
@@ -78,6 +88,7 @@ class Page(MongoDocument):
     claimed_by: str | None = Field(default=None, max_length=100)  # crawl run holding the lease
     lease_expires_at: datetime | None = None  # an in-progress page past this is reclaimable
     fetched_at: datetime | None = None
+    deferred_links: list[DeferredLink] = Field(default_factory=list, max_length=MAX_DEFERRED_LINKS)
 
     @model_validator(mode="after")
     def _consistent_outcome(self) -> Self:

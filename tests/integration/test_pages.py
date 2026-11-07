@@ -2,15 +2,24 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import ValidationError
 
 from rag_engine.config import Settings
-from rag_engine.domain import ContentKind, Page, PageReason, PageStatus, RenderedWith
+from rag_engine.domain import (
+    ContentKind,
+    DeferredLink,
+    Page,
+    PageReason,
+    PageStatus,
+    RenderedWith,
+)
 from rag_engine.exceptions import AppValidationError
 from rag_engine.infrastructure import MongoConnection
-from rag_engine.repositories import PageOutcome, PageRepository
+from rag_engine.repositories import PageNotFoundError, PageOutcome, PageRepository
 from tests.conftest import OverrideSettings
 
 _TENANT = "ten_" + "1" * 32
@@ -275,3 +284,45 @@ class TestPageRepository_S47:
         assert indexes["job_url_unique"]["unique"] is True
         assert list(indexes["job_url_unique"]["key"]) == ["job_id", "url_hash"]
         assert list(indexes["job_status"]["key"]) == ["job_id", "status", "_id"]
+
+
+class TestPageRepositoryEngineSupport_S50:
+    """S50 — Page repository additions for the engine: lease-guarded outcomes, deferred links."""
+
+    async def test_outcome_only_lands_while_the_run_holds_the_page(
+        self, repo: PageRepository
+    ) -> None:
+        page, _ = await repo.add_discovered(_page(1))
+        await repo.collection.update_one(
+            {"_id": page.id}, {"$set": {"status": "in_progress", "claimed_by": "run-new"}}
+        )
+
+        with pytest.raises(PageNotFoundError):
+            await repo.record_outcome(page.id, _success(), held_by="run-old")
+        stored = await repo.record_outcome(page.id, _success(), held_by="run-new")
+
+        assert stored.status is PageStatus.SUCCEEDED
+        with pytest.raises(PageNotFoundError):  # done: no longer in progress
+            await repo.record_outcome(page.id, _success(), held_by="run-new")
+
+    async def test_deferred_links_round_trip_and_stream(self, repo: PageRepository) -> None:
+        links = (
+            DeferredLink(url="https://offsite.example/x", reason=PageReason.OUT_OF_SCOPE,
+                         detail="other_host"),
+            DeferredLink(url="https://acme.example/held", reason=PageReason.NOFOLLOW),
+        )  # fmt: skip
+        with_links, _ = await repo.add_discovered(_page(1, depth=2))
+        await repo.add_discovered(_page(2))  # no deferred links: not streamed
+        await repo.record_outcome(with_links.id, replace(_success(), deferred_links=links))
+
+        streamed = [row async for row in repo.iter_deferred_links(_JOB)]
+
+        assert streamed == [(with_links.url, 2, list(links))]
+        retried = await repo.record_outcome(with_links.id, _success())  # cleared on rewrite
+        assert retried.deferred_links == []
+
+    def test_deferred_link_validation(self) -> None:
+        with pytest.raises(ValidationError):
+            DeferredLink(url="mailto:x@acme.example", reason=PageReason.OUT_OF_SCOPE)
+        with pytest.raises(ValidationError):
+            DeferredLink(url="https://a.example/", reason=PageReason.NOFOLLOW, detail="x" * 101)

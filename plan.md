@@ -1504,3 +1504,47 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Counter semantics for Step 50: `discovered` += `frontier.add_many(...)` new count; `fetched/failed/skipped/duplicates` once per recorded page outcome. A crash between `record_outcome` and `increment` loses a count, so the resumed run (and Step 53's summary) should `set_counters` from `PageRepository.count_by_status`.
   - Step 79 adds the one-active-job-per-source partial unique index and the tenant concurrency check.
 - Next: Step 50: Crawl engine core
+
+### Step 50: Crawl engine core  (2026-11-07)
+- Status: ✅ done
+- Built: `rag_engine/crawling/engine.py` (exported from `rag_engine.crawling`). `CrawlEngine(job, run_id=, pages, jobs, claims, fetcher, robots, limiter, sitemaps=, registry=, cleaner=, links=, policy=, config).run() -> CrawlSummary`. It needs a job already started by this run (Step 49); status transitions, heartbeat, caps (51) and cancel (52) stay with the caller. Collaborators are typed as protocols (`PageFetcher`, `RobotsSource`, `RateLimiter`, `SitemapSource`), so tests script them.
+  - **Start**:
+    - `frontier.recover()`, then queue the seed (`SEED`).
+    - The seed is crawled **alone first**. If it redirects to another host, the scope is re-anchored (`with_seed_host`, as Step 31 asked) and the deduper rebuilt. On a resume, the re-anchor is derived from the seed row.
+    - Sitemap discovery runs in the background (depth 0, `SITEMAP`) while `CRAWL_CONCURRENCY` workers drain the frontier.
+  - **Per page**: scope → robots.txt (an unreachable robots.txt skips with its status/detail) → rate limit → fetch → redirect? → extract (`default_registry`) → clean (Step 45) → links (Step 32, or `filter_urls` for document outlinks) → dedupe (Step 46) → enqueue outlinks (`LINK`, depth+1) / canonical target (`CANONICAL`) → persist the outcome → `$inc` counters.
+    - **Rate limit**: wait at most `CRAWL_RATE_LIMIT_MAX_WAIT_SECONDS` (new, 5 s). Past that, `frontier.release(page, delay_seconds=wait)` refunds the claim and the page returns when its slot opens (Step 30's note).
+    - **Fetch failures**: `policy.decide(error, page.attempts)`. A retry goes through `frontier.retry_later` (not-before time). A `Retry-After` also calls `limiter.pause` for the host. A final outcome records reason/detail/`http_status`.
+    - **Redirects**: the URL that serves the content owns it. The redirecting URL → `skipped/redirected` (new reason, with `final_url`). The target URL is queued and **claimed directly** (`frontier.claim_url`, new), gated by scope/robots, and gets the content, so it isn't fetched again and a linked target can't become a duplicate of its own redirect. **The fixture oracle changed** to `Expect.REDIRECT → (skipped, redirected)`.
+    - **noindex** (robots meta / `X-Robots-Tag`) → `skipped/noindex` (new reason); links still followed.
+    - **Canonical cycles** (the open item from Step 46): a canonical whose target row is itself `skipped/canonical_elsewhere` is ignored, so A↔B keeps one copy.
+    - Outlinks are enqueued **before** the outcome is written, so the frontier never looks drained mid-page.
+    - Any unexpected exception fails only that page: `failed/internal_error` (new reason) with `Type: message`, logged. `JobRunSupersededError`/`DatabaseUnavailableError` stop the engine (TaskGroup); pages it held are recovered by the next run.
+    - **Zombie guard** (Step 48 note): `PageRepository.record_outcome(..., held_by=run_id)` only writes while that run holds the page (`claimed_by` + `in_progress`), otherwise `PageNotFoundError`, which the engine logs and drops.
+  - **End**: drained (nothing ready/delayed/in flight) and sitemap discovery finished. Workers idle on a wake event (1 s cap, or until the next retry). Then **never-crawled links** (rejected by scope: out of scope / too deep; nofollow) become `skipped` rows via `frontier.add_skipped` (new), only for URLs the job doesn't know: "followed later wins" (Step 32's note). Each page keeps them on its row (`Page.deferred_links`, new, `DeferredLink{url, reason, detail}`, ≤ 1000 per page) and the flush streams `PageRepository.iter_deferred_links`, so links seen by a crashed run are reported too. Non-http(s) links (mailto:, tel:) can't be page rows; they're counted in `skipped_links_dropped`.
+  - `CrawlSummary`: anchored seed URL, pages by status, reasons, recovery report, seed robots status/detail, the `SitemapReport` (or its error), skipped/dropped link counts.
+  - Counters: `discovered` = queued pages created; `fetched` once per successful fetch (counted on the redirect target when it uses the content); `failed/skipped/duplicates` per recorded outcome, deferred skips included.
+  - **Render politeness** (Step 36's note): `AutoFetcher(before_render=...)` (new hook) + `render_politeness(robots, limiter)`. The browser's second request books its own slot with the site's crawl delay.
+- Settings: `CRAWL_RATE_LIMIT_MAX_WAIT_SECONDS` (5). `.env.example` updated.
+- Also:
+  - `PageReason` + `REDIRECTED`, `NOINDEX`, `INTERNAL_ERROR` (`TestDomainModels_S13` count 22 → 25).
+  - `Frontier.release(page, delay_seconds=)`; `Frontier.claim_url`; `Frontier.add_skipped` + `SkippedEntry`.
+  - `PageOutcome.deferred_links` (cleared on every rewrite like the other outcome fields).
+- Tests:
+  - `TestCrawlEngine_S50` (12, integration):
+    - **Fixture site over real HTTP** (real Mongo + Redis limiter, `CRAWL_JS_RENDERING=never`): every `SITE_PAGES` URL ends with its `EXPECTED_PAGE_OUTCOME` (SPA shell excluded: Step 54 renders it). dup-a/dup-b = one original + one duplicate pointing at it. No page left queued/in progress; all four document formats extracted. Requests: `/private/` never requested, assets never fetched, `/flaky` 3, `/error` 3, `/rate-limited` 1, no page refetched beyond retries and redirect hops, ≤ 11 requests in any 1 s window (robots `Crawl-delay: 0.1`). Summary/counters agree with the page table.
+    - **Crash and resume on the fixture site**: run-1 cancelled after 12 fetches, job requeued, run-2 resumes; the same final outcomes, and no page finished by run-1 is requested again.
+    - Scripted (fake fetcher/robots/limiter, real Mongo): redirect content under the target (fetched at most once); seed redirect to another host re-anchors the scope (old host's link → out_of_scope); mutual canonicals keep one copy; noindex skipped with links followed; never-crawled links (max_depth, nofollow, offsite recorded; a too-deep URL reached at an allowed depth is crawled; mailto dropped); retries/rate-limit release (attempt refunded)/404/429 with host pause; a bug fails one page; counters exact (13 discovered, 11 fetched, 6 duplicates, 2 failed); a superseded run stops; engine refuses an unstarted job.
+  - `TestFrontierEngineSupport_S50` (3, integration): `claim_url`, delayed release, `add_skipped` never overrides a known URL.
+  - `TestPageRepositoryEngineSupport_S50` (3): lease-guarded outcomes; deferred links round-trip, stream and clear; `DeferredLink` validation.
+  - `TestRenderPoliteness_S50` (4, unit): the hook books with the crawl delay (no max wait); `AutoFetcher` books before rendering; no slot when no render.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1403 passed, 4 skipped (container) in 197 s. The engine tests passed 3 runs in a row (~28 s).
+- Decisions/notes:
+  - Test fixes during the step, not engine bugs: the HTTP client follows redirects, so the server sees the target requested once per redirect hop; and request arrival jitters by tens of ms around the 0.1 s slots, so politeness is asserted as a rate (requests per 1 s window), not a minimum gap.
+  - A redirect into a robots-disallowed or out-of-scope path is fetched (the client follows it) but not kept: the target is gated before its content is used.
+  - **Step 51 (caps)**: the engine has no `max_pages`/bytes/time cap yet. Stop claiming at the cap and mark the rest `skipped/max_pages`. `CrawlConfig.max_pages` already bounds sitemap discovery.
+  - **Step 52 (cancel)**: check the cancel flag in the worker loop (between claims), `release()` held pages or let them finish, then mark the rest `skipped/job_cancelled`.
+  - **Step 53**: `CrawlSummary` + `count_by_reason` are the inputs for the job report; reconcile counters with `set_counters` there.
+  - **Step 77 (task)**: wire `HttpFetcher(SafeHttpClient)`, `BrowserPool.job_context` → `AutoFetcher(http, browser, before_render=render_politeness(robots, limiter))`, `RobotsCache(RedisRobotsStore)`, `DomainRateLimiter`, `SitemapDiscoverer`, `ContentClaimRepository`, then `jobs.start` → `engine.run()` → `begin_finalizing`.
+  - Step 54 asserts the browser-rendered SPA (`/app/`, `/app/advanced`) on top of this test.
+- Next: Step 51: Caps & timeouts

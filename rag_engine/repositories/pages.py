@@ -26,6 +26,7 @@ from pymongo.errors import BulkWriteError, PyMongoError
 from rag_engine.config import Settings, settings
 from rag_engine.domain import (
     ContentKind,
+    DeferredLink,
     MongoDocument,
     Page,
     PageReason,
@@ -73,11 +74,13 @@ class PageOutcome:
     fetch_ms: int | None = None
     extract_ms: int | None = None
     fetched_at: datetime | None = None
+    deferred_links: tuple[DeferredLink, ...] = ()
 
     def changes(self, max_markdown_bytes: int) -> dict[str, Any]:
         values = asdict(self)
         values["js_signals"] = list(self.js_signals)
         values["doc_metadata"] = dict(self.doc_metadata)
+        values["deferred_links"] = [link.model_dump() for link in self.deferred_links]
         values["reason_detail"] = (self.reason_detail or "")[:500] or None
         markdown, truncated = truncate_markdown(self.markdown, max_markdown_bytes)
         values["markdown"], values["markdown_truncated"] = markdown, truncated
@@ -140,9 +143,19 @@ class PageRepository(BaseRepository[Page]):
 
     # ---- outcomes ---- #
 
-    async def record_outcome(self, page_id: str, outcome: PageOutcome) -> Page:
-        """Write the whole outcome (validated as a `Page` first); returns the stored page."""
-        return await self.update(page_id, outcome.changes(self._max_markdown_bytes))
+    async def record_outcome(
+        self, page_id: str, outcome: PageOutcome, *, held_by: str | None = None
+    ) -> Page:
+        """Write the whole outcome (validated as a `Page` first); returns the stored page.
+
+        With `held_by` (a crawl run id), only while that run still holds the page: a
+        crawler that outlived its frontier lease gets `PageNotFoundError` instead of
+        overwriting the run that reclaimed the page.
+        """
+        scope = None
+        if held_by is not None:
+            scope = {"claimed_by": held_by, "status": PageStatus.IN_PROGRESS.value}
+        return await self.update(page_id, outcome.changes(self._max_markdown_bytes), scope=scope)
 
     # ---- job-level reads ---- #
 
@@ -190,6 +203,20 @@ class PageRepository(BaseRepository[Page]):
         return await self.paginate(
             filter_, scope={"tenant_id": tenant_id}, limit=limit, cursor=cursor, order="asc"
         )
+
+    async def iter_deferred_links(
+        self, job_id: str, *, batch_size: int = 200
+    ) -> AsyncIterator[tuple[str, int, list[DeferredLink]]]:
+        """`(page url, depth, links)` of every page that held back links (Step 50's report)."""
+        cursor = self.collection.find(
+            {"job_id": job_id, "deferred_links.0": {"$exists": True}},
+            projection={"url": 1, "depth": 1, "deferred_links": 1},
+            sort=[("_id", ASCENDING)],
+            batch_size=batch_size,
+        )
+        async for raw in cursor:
+            links = [DeferredLink.model_validate(link) for link in raw["deferred_links"]]
+            yield raw["url"], raw.get("depth", 0), links
 
     async def delete_job(self, job_id: str) -> int:
         return await self.delete_many({"job_id": job_id})

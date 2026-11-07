@@ -1,0 +1,676 @@
+"""Crawl engine in real MongoDB (+ Redis for the fixture-site crawl).
+
+Scripted tests drive the engine with an in-memory fetcher/robots/limiter for exact edge
+cases; the fixture-site tests crawl the local edge-case website over real HTTP.
+"""
+
+import asyncio
+import contextlib
+import time
+from collections import Counter
+from collections.abc import AsyncIterator, Callable, Mapping
+from dataclasses import dataclass, field
+
+import pytest
+
+from rag_engine.config import JsRenderMode, Settings
+from rag_engine.crawling import (
+    CachedRobots,
+    CrawlEngine,
+    DomainRateLimiter,
+    RateLimitWaitExceededError,
+    Reservation,
+    RetryPolicy,
+    RobotsCache,
+    RobotsRules,
+    RobotsStatus,
+    SitemapDiscoverer,
+    normalize_and_hash,
+    origin_of,
+    rate_limit_host,
+)
+from rag_engine.crawling.fetchers import AutoFetcher, FetchResult, HttpFetcher, HttpStatusError
+from rag_engine.domain import (
+    ContentHashClaim,
+    ContentKind,
+    CrawlConfig,
+    CrawlJob,
+    DiscoveredVia,
+    JobCounters,
+    Page,
+    PageReason,
+    PageStatus,
+)
+from rag_engine.extraction import CleanedText, TextCleaner
+from rag_engine.infrastructure import MongoConnection, RedisConnection
+from rag_engine.repositories import (
+    ContentClaimRepository,
+    JobRepository,
+    JobRunSupersededError,
+    PageRepository,
+)
+from rag_engine.security import SafeHttpClient
+from tests.conftest import OverrideSettings
+from tests.support.fakes import InMemoryRobotsStore
+from tests.support.fixture_site import EXPECTED_PAGE_OUTCOME, SITE_PAGES, Expect, FixtureSite
+
+_TENANT = "ten_" + "1" * 32
+_KB = "kb_" + "1" * 32
+_SOURCE = "src_" + "1" * 32
+_SITE = "https://acme.example"
+_TEXT = "Widgets are sorted at 1200 items per minute by the WX-2048."
+
+
+# ---- in-memory collaborators for scripted crawls ---- #
+
+
+def _html(body: str, *, title: str = "Page", head: str = "") -> str:
+    return f"<html><head><title>{title}</title>{head}</head><body><main>{body}</main></body></html>"
+
+
+def _page(
+    url: str, html: str, *, final_url: str | None = None, chain: tuple[str, ...] = ()
+) -> FetchResult:
+    body = html.encode()
+    return FetchResult(
+        requested_url=url,
+        final_url=final_url or url,
+        redirect_chain=chain,
+        status_code=200,
+        mime_type="text/html",
+        content_kind=ContentKind.HTML,
+        body=body,
+        text=html,
+        encoding="utf-8",
+        bytes_downloaded=len(body),
+        elapsed_ms=3,
+        headers={"content-type": "text/html; charset=utf-8"},
+    )
+
+
+@dataclass
+class _ScriptedFetcher:
+    """`PageFetcher` answering from {url: FetchResult | exception}; unknown URLs 404."""
+
+    responses: Mapping[str, FetchResult | Exception]
+    calls: list[str] = field(default_factory=list)
+    on_fetch: Callable[[str], object] | None = None
+
+    async def fetch(self, url: str) -> FetchResult:
+        self.calls.append(url)
+        if self.on_fetch is not None:
+            result = self.on_fetch(url)
+            if asyncio.iscoroutine(result):
+                await result
+        outcome = self.responses.get(url, HttpStatusError(url=url, status_code=404))
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class _AllowAllRobots:
+    async def rules_for(self, url: str) -> RobotsRules:
+        entry = CachedRobots(
+            status=RobotsStatus.UNAVAILABLE, body="", fetched_at=0, expires_at=1e12
+        )
+        return RobotsRules.from_cached(origin_of(url), entry, "ragenginebot")
+
+
+@dataclass
+class _Limiter:
+    """Never waits; `refuse` lists URLs whose first slot is too far away."""
+
+    refuse: set[str] = field(default_factory=set)
+    acquired: list[str] = field(default_factory=list)
+    paused: list[tuple[str, float]] = field(default_factory=list)
+
+    async def acquire(
+        self, url: str, *, crawl_delay: float | None = None, max_wait: float | None = None
+    ) -> Reservation:
+        reservation = Reservation(rate_limit_host(url), True, 0.0, 0.0, 0.0, 1)
+        if url in self.refuse:
+            self.refuse.discard(url)
+            raise RateLimitWaitExceededError(Reservation(reservation.host, False, 0.2, 0.0, 0.0, 1))
+        self.acquired.append(url)
+        return reservation
+
+    async def pause(self, url: str, seconds: float) -> float:
+        self.paused.append((url, seconds))
+        return seconds
+
+
+class _ExplodingCleaner(TextCleaner):
+    """A bug in the pipeline for one page (anything mentioning BOOM)."""
+
+    def clean(self, markdown: str) -> CleanedText:
+        if "BOOM" in markdown:
+            raise RuntimeError("cleaner bug")
+        return super().clean(markdown)
+
+
+@dataclass
+class _Env:
+    pages: PageRepository
+    jobs: JobRepository
+    claims: ContentClaimRepository
+    config: Settings
+
+    async def job(self, seed: str, **config: object) -> CrawlJob:
+        job = await self.jobs.insert(
+            CrawlJob(
+                tenant_id=_TENANT,
+                kb_id=_KB,
+                source_id=_SOURCE,
+                seed_url=seed,
+                config=CrawlConfig.model_validate({"max_depth": 5, **config}),
+            )
+        )
+        return await self.jobs.start(job.id, "run-1")
+
+    def engine(
+        self, job: CrawlJob, fetcher: object, *, run_id: str = "run-1", **kwargs: object
+    ) -> CrawlEngine:
+        return CrawlEngine(
+            job,
+            run_id=run_id,
+            pages=self.pages,
+            jobs=self.jobs,
+            claims=self.claims,
+            fetcher=fetcher,  # ty: ignore[invalid-argument-type]
+            robots=kwargs.pop("robots", _AllowAllRobots()),  # ty: ignore[invalid-argument-type]
+            limiter=kwargs.pop("limiter", _Limiter()),  # ty: ignore[invalid-argument-type]
+            config=self.config,
+            **kwargs,  # ty: ignore[invalid-argument-type]
+        )
+
+    async def outcomes(self, job: CrawlJob) -> dict[str, Page]:
+        return {p.url: p for p in await self.pages.find({"job_id": job.id})}
+
+
+@pytest.fixture
+async def env(
+    integration_settings: Settings, override_settings: OverrideSettings
+) -> AsyncIterator[_Env]:
+    config = override_settings(CRAWL_CONCURRENCY=3)
+    mongo = MongoConnection(integration_settings)
+    await mongo.connect()
+    await mongo.ensure_indexes([Page, CrawlJob, ContentHashClaim])
+    yield _Env(
+        PageRepository(mongo.db), JobRepository(mongo.db), ContentClaimRepository(mongo.db), config
+    )
+    await mongo.close()
+
+
+def _status(page: Page) -> tuple[PageStatus, PageReason | None]:
+    return page.status, page.reason
+
+
+# ---- fixture-site crawl ---- #
+
+
+@pytest.fixture
+def site_config(override_settings: OverrideSettings, integration_settings: Settings) -> Settings:
+    return override_settings(
+        SSRF_ALLOW_PRIVATE_NETWORKS=True,
+        CRAWL_JS_RENDERING=JsRenderMode.NEVER,  # the browser E2E is Step 54
+        CRAWL_CONCURRENCY=4,
+        CRAWL_PER_DOMAIN_RPS=50.0,  # robots.txt's Crawl-delay (0.1 s) sets the pace
+        CRAWL_READ_TIMEOUT_SECONDS=1,
+        CRAWL_FETCH_TIMEOUT_SECONDS=2,
+        CRAWL_MAX_RETRIES=2,
+        CRAWL_RETRY_BASE_DELAY_SECONDS=0.05,
+        CRAWL_RETRY_MAX_DELAY_SECONDS=0.1,
+        CRAWL_RETRY_AFTER_MAX_SECONDS=1,
+    )
+
+
+@dataclass
+class _Site:
+    env: _Env
+    site: FixtureSite
+    config: Settings
+    redis: RedisConnection
+    http: HttpFetcher
+
+    def engine(
+        self, job: CrawlJob, *, run_id: str = "run-1", fetcher: object = None
+    ) -> CrawlEngine:
+        robots = RobotsCache(self.http, InMemoryRobotsStore(), config=self.config)
+        limiter = DomainRateLimiter(self.redis.client, self.redis.keys, self.config)
+        return CrawlEngine(
+            job,
+            run_id=run_id,
+            pages=self.env.pages,
+            jobs=self.env.jobs,
+            claims=self.env.claims,
+            fetcher=fetcher or AutoFetcher(self.http, None, config=self.config),  # ty: ignore[invalid-argument-type]
+            robots=robots,
+            limiter=limiter,
+            sitemaps=SitemapDiscoverer(
+                self.http, robots=robots, limiter=limiter, config=self.config
+            ),
+            config=self.config,
+        )
+
+
+@pytest.fixture
+async def site(
+    env: _Env, fixture_site: FixtureSite, site_config: Settings, integration_settings: Settings
+) -> AsyncIterator[_Site]:
+    redis = RedisConnection(integration_settings)
+    await redis.connect()
+    async with SafeHttpClient(site_config) as client:
+        yield _Site(env, fixture_site, site_config, redis, HttpFetcher(client, site_config))
+    await redis.close()
+
+
+# without a browser the SPA shell has no content, and its JS-only link is never seen
+_NEEDS_BROWSER = {Expect.JS_RENDERED}
+_JS_ONLY = {"/app/advanced"}
+
+
+def _assert_fixture_outcomes(site: FixtureSite, outcomes: dict[str, Page]) -> None:
+    duplicates = []
+    for path, expect in SITE_PAGES.items():
+        url = site.url(path)
+        if not url.startswith("http") or path in _JS_ONLY:
+            continue
+        normalized, _ = normalize_and_hash(url)
+        page = outcomes.get(normalized)
+        if expect in (Expect.DUPLICATE,) or path == "/dup-a.html":
+            duplicates.append(page)
+            continue
+        if expect in _NEEDS_BROWSER:
+            assert page is not None and page.status is not PageStatus.QUEUED, path
+            continue
+        if expect is Expect.OUT_OF_SCOPE and page is None:
+            continue  # only recorded when some page links to it
+        assert page is not None, f"{path} was never discovered"
+        assert _status(page) == EXPECTED_PAGE_OUTCOME[expect], (path, page.reason_detail)
+    # dup-a / dup-b: whichever was fetched second duplicates the first
+    assert Counter(p.status for p in duplicates if p) == {
+        PageStatus.SUCCEEDED: 1,
+        PageStatus.DUPLICATE: 1,
+    }
+    original = next(p for p in duplicates if p and p.status is PageStatus.SUCCEEDED)
+    copy = next(p for p in duplicates if p and p.status is PageStatus.DUPLICATE)
+    assert copy.duplicate_of == original.id
+
+
+# ---- #
+# Tests
+# ---- #
+
+
+class TestCrawlEngine_S50:
+    """S50 — Crawl engine core: per-URL pipeline, bounded concurrency, fixture-site crawl."""
+
+    # ---- the fixture site over real HTTP ---- #
+
+    async def test_crawls_the_fixture_site(self, site: _Site) -> None:
+        # Arrange
+        job = await site.env.job(site.site.url("/"), max_depth=10)
+
+        # Act
+        started = time.monotonic()
+        summary = await site.engine(job).run()
+        elapsed = time.monotonic() - started
+
+        # Assert: every page's outcome
+        outcomes = await site.env.outcomes(job)
+        _assert_fixture_outcomes(site.site, outcomes)
+        assert all(
+            p.status not in (PageStatus.QUEUED, PageStatus.IN_PROGRESS) for p in outcomes.values()
+        )
+        succeeded = [p for p in outcomes.values() if p.status is PageStatus.SUCCEEDED]
+        assert all(p.markdown and p.content_hash and p.fetched_at for p in succeeded)
+        kinds = Counter(p.content_kind for p in succeeded)
+        assert kinds[ContentKind.HTML] >= 15
+        assert {ContentKind.PDF, ContentKind.DOCX, ContentKind.PPTX, ContentKind.XLSX} <= set(kinds)
+
+        # Assert: requests (robots respected, nothing fetched twice, retries happened)
+        requested = Counter(r.path for r in site.site.requests)
+        assert requested["/private/secret.html"] == 0
+        assert requested["/data.json"] == requested["/images/logo.png"] == 0  # asset: never fetched
+        # every redirect hop lands on getting-started; beyond those, at most one direct fetch
+        direct = requested["/docs/getting-started.html"] - requested["/redirect-me"]
+        assert direct <= 1
+        assert requested["/flaky"] == 3  # 503 twice, then 200
+        assert requested["/error"] == 3  # CRAWL_MAX_RETRIES=2 → 3 attempts
+        assert requested["/rate-limited"] == 1  # Retry-After over the cap: gives up at once
+        pages_fetched = [
+            p for p, n in requested.items() if not p.startswith(("/robots", "/sitemap"))
+        ]
+        repeat = {p: requested[p] for p in pages_fetched if requested[p] > 1}
+        redirect_hops = {"/redirect-me", "/docs/getting-started.html"}  # see above
+        assert set(repeat) <= {"/flaky", "/error", "/slow", *redirect_hops}, repeat
+
+        # Assert: politeness. robots.txt asks for a 0.1 s Crawl-delay; slots are booked exactly
+        # 0.1 s apart (Step 30), arrival jitters by event-loop scheduling, so check the rate:
+        # at most 10 requests (+1 at the window edge) in any 1 s window.
+        # One fetch follows its redirects at once (one slot); robots.txt is fetched unthrottled.
+        hops = {"/robots.txt", "/redirect-me", "/redirect-chain", "/loop-a", "/loop-b"}
+        hops.add("/docs/getting-started.html")
+        starts = sorted(r.at for r in site.site.requests if r.path not in hops)
+        busiest = max(sum(1 for t in starts if s0 <= t < s0 + 1.0) for s0 in starts)
+        assert busiest <= 11, busiest
+
+        # Assert: summary and counters agree with the page table
+        assert summary.robots_status is RobotsStatus.OK
+        assert summary.sitemap is not None and site.site.url("/orphan.html") in summary.sitemap.urls
+        assert summary.pages == {
+            s: n for s, n in Counter(p.status for p in outcomes.values()).items()
+        }
+        counters = (await site.env.jobs.get_or_raise(job.id)).counters
+        by_status = summary.pages
+        assert counters.failed == by_status[PageStatus.FAILED]
+        assert counters.skipped == by_status[PageStatus.SKIPPED]
+        assert counters.duplicates == by_status[PageStatus.DUPLICATE]
+        assert counters.discovered == len(outcomes) - summary.skipped_links
+        assert counters.fetched >= by_status[PageStatus.SUCCEEDED] + by_status[PageStatus.DUPLICATE]
+        assert elapsed < 60
+
+    async def test_resumes_after_a_crash_without_refetching_finished_pages(
+        self, site: _Site
+    ) -> None:
+        # Arrange: run-1 crashes (its task is cancelled) after a handful of pages
+        job = await site.env.job(site.site.url("/"), max_depth=10)
+        fetched_enough = asyncio.Event()
+        http = AutoFetcher(site.http, None, config=site.config)
+
+        class _CountingFetcher:
+            calls = 0
+
+            async def fetch(self, url: str) -> FetchResult:
+                type(self).calls += 1
+                if self.calls >= 12:
+                    fetched_enough.set()
+                return await http.fetch(url)
+
+        crashed = site.engine(job, run_id="run-1", fetcher=_CountingFetcher())
+        task = asyncio.create_task(crashed.run())
+        await fetched_enough.wait()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        done_before = {
+            p.url
+            for p in await site.env.pages.find({"job_id": job.id})
+            if p.status is PageStatus.SUCCEEDED
+        }
+
+        # Act: the job is requeued (Step 80) and a new run resumes it
+        await site.env.jobs.requeue(job.id, stale_run_id="run-1")
+        resumed_job = await site.env.jobs.start(job.id, "run-2")
+        site.site.reset()
+        summary = await site.engine(resumed_job, run_id="run-2").run()
+
+        # Assert
+        outcomes = await site.env.outcomes(job)
+        _assert_fixture_outcomes(site.site, outcomes)
+        # redirects crawled in run-2 still land on their (finished) target: not a refetch
+        hops = {site.site.url("/docs/getting-started.html")}
+        refetched = {site.site.base_url + r.path for r in site.site.requests} & done_before - hops
+        assert refetched == set()
+        assert summary.recovered.abandoned == 0
+
+    # ---- scripted edge cases ---- #
+
+    async def test_redirect_content_is_recorded_under_the_target(self, env: _Env) -> None:
+        target = f"{_SITE}/docs/start"
+        fetcher = _ScriptedFetcher(
+            {
+                f"{_SITE}/": _page(
+                    f"{_SITE}/",
+                    _html(f"<p>{_TEXT}</p><a href='/go'>go</a><a href='/docs/start'>start</a>"),
+                ),
+                f"{_SITE}/go": _page(
+                    f"{_SITE}/go",
+                    _html(f"<h1>Start</h1><p>{_TEXT} Start here.</p>"),
+                    final_url=target,
+                    chain=(f"{_SITE}/go",),
+                ),
+                target: _page(target, _html(f"<h1>Start</h1><p>{_TEXT} Start here.</p>")),
+            }
+        )
+        job = await env.job(f"{_SITE}/")
+
+        await env.engine(job, fetcher).run()
+
+        outcomes = await env.outcomes(job)
+        assert _status(outcomes[f"{_SITE}/go"]) == (PageStatus.SKIPPED, PageReason.REDIRECTED)
+        assert outcomes[f"{_SITE}/go"].final_url == target
+        assert _status(outcomes[target]) == (PageStatus.SUCCEEDED, None)
+        assert fetcher.calls.count(target) <= 1  # never fetched again for the redirect
+
+    async def test_seed_redirect_to_another_host_reanchors_the_scope(self, env: _Env) -> None:
+        moved = "https://acme.io/"
+        fetcher = _ScriptedFetcher(
+            {
+                f"{_SITE}/": _page(
+                    f"{_SITE}/",
+                    _html(f"<p>{_TEXT}</p><a href='/about'>about</a><a href='{_SITE}/old'>old</a>"),
+                    final_url=moved,
+                    chain=(f"{_SITE}/",),
+                ),
+                "https://acme.io/about": _page(
+                    "https://acme.io/about", _html(f"<p>About us. {_TEXT}</p>")
+                ),
+            }
+        )
+        job = await env.job(f"{_SITE}/")
+
+        engine = env.engine(job, fetcher)
+        summary = await engine.run()
+
+        outcomes = await env.outcomes(job)
+        assert summary.seed_url == moved and engine.scope.seed_host == "acme.io"
+        assert _status(outcomes[f"{_SITE}/"]) == (PageStatus.SKIPPED, PageReason.REDIRECTED)
+        assert _status(outcomes[moved]) == (PageStatus.SUCCEEDED, None)
+        assert _status(outcomes["https://acme.io/about"]) == (PageStatus.SUCCEEDED, None)
+        assert _status(outcomes[f"{_SITE}/old"]) == (PageStatus.SKIPPED, PageReason.OUT_OF_SCOPE)
+
+    async def test_mutual_canonicals_keep_one_copy(self, env: _Env) -> None:
+        a, b = f"{_SITE}/a", f"{_SITE}/b"
+        content = f"<p>{_TEXT} Shared article.</p>"
+        fetcher = _ScriptedFetcher(
+            {
+                f"{_SITE}/": _page(f"{_SITE}/", _html(f"<p>{_TEXT} Home.</p><a href='/a'>a</a>")),
+                a: _page(a, _html(content, head=f"<link rel='canonical' href='{b}'>")),
+                b: _page(b, _html(content, head=f"<link rel='canonical' href='{a}'>")),
+            }
+        )
+        job = await env.job(f"{_SITE}/")
+
+        await env.engine(job, fetcher).run()
+
+        outcomes = await env.outcomes(job)
+        assert _status(outcomes[a]) == (PageStatus.SKIPPED, PageReason.CANONICAL_ELSEWHERE)
+        assert outcomes[b].discovered_via is DiscoveredVia.CANONICAL
+        assert _status(outcomes[b]) == (PageStatus.SUCCEEDED, None)  # the cycle is broken here
+
+    async def test_noindex_page_is_skipped_but_its_links_are_followed(self, env: _Env) -> None:
+        fetcher = _ScriptedFetcher(
+            {
+                f"{_SITE}/": _page(f"{_SITE}/", _html(f"<p>{_TEXT}</p><a href='/hub'>hub</a>")),
+                f"{_SITE}/hub": _page(
+                    f"{_SITE}/hub",
+                    _html(
+                        f"<p>Hub. {_TEXT}</p><a href='/leaf'>leaf</a>",
+                        head="<meta name='robots' content='noindex'>",
+                    ),
+                ),
+                f"{_SITE}/leaf": _page(f"{_SITE}/leaf", _html(f"<p>Leaf. {_TEXT}</p>")),
+            }
+        )
+        job = await env.job(f"{_SITE}/")
+
+        await env.engine(job, fetcher).run()
+
+        outcomes = await env.outcomes(job)
+        assert _status(outcomes[f"{_SITE}/hub"]) == (PageStatus.SKIPPED, PageReason.NOINDEX)
+        assert outcomes[f"{_SITE}/hub"].markdown is None
+        assert _status(outcomes[f"{_SITE}/leaf"]) == (PageStatus.SUCCEEDED, None)
+
+    async def test_never_crawled_links_are_reported_unless_reached_otherwise(
+        self, env: _Env
+    ) -> None:
+        fetcher = _ScriptedFetcher(
+            {
+                f"{_SITE}/": _page(
+                    f"{_SITE}/",
+                    _html(
+                        f"<p>{_TEXT}</p><a href='/a'>a</a><a href='/c'>c</a>"
+                        "<a href='/held' rel='nofollow'>held</a><a href='https://offsite.example/x'>x</a>"
+                        "<a href='mailto:hi@acme.example'>mail</a>"
+                    ),
+                ),
+                f"{_SITE}/a": _page(
+                    f"{_SITE}/a",
+                    _html(f"<p>A. {_TEXT}</p><a href='/c'>c</a><a href='/deep'>deep</a>"),
+                ),
+                f"{_SITE}/c": _page(f"{_SITE}/c", _html(f"<p>C. {_TEXT}</p>")),
+            }
+        )
+        job = await env.job(f"{_SITE}/", max_depth=1)
+
+        summary = await env.engine(job, fetcher).run()
+
+        outcomes = await env.outcomes(job)
+        assert _status(outcomes[f"{_SITE}/c"]) == (PageStatus.SUCCEEDED, None)
+        assert _status(outcomes[f"{_SITE}/deep"]) == (PageStatus.SKIPPED, PageReason.MAX_DEPTH)
+        assert _status(outcomes[f"{_SITE}/held"]) == (PageStatus.SKIPPED, PageReason.NOFOLLOW)
+        assert _status(outcomes["https://offsite.example/x"]) == (
+            PageStatus.SKIPPED,
+            PageReason.OUT_OF_SCOPE,
+        )
+        assert f"{_SITE}/held" not in fetcher.calls and f"{_SITE}/deep" not in fetcher.calls
+        assert (summary.skipped_links, summary.skipped_links_dropped) == (3, 1)  # mailto: dropped
+        assert (await env.jobs.get_or_raise(job.id)).counters.skipped == 3
+
+    async def test_retries_rate_limit_waits_and_failures(self, env: _Env) -> None:
+        flaky = f"{_SITE}/flaky"
+        attempts = {"n": 0}
+        responses: dict[str, FetchResult | Exception] = {
+            f"{_SITE}/": _page(
+                f"{_SITE}/",
+                _html(
+                    f"<p>{_TEXT}</p><a href='/flaky'>f</a><a href='/busy'>b</a>"
+                    "<a href='/gone'>g</a><a href='/throttled'>t</a>"
+                ),
+            ),
+            f"{_SITE}/busy": _page(f"{_SITE}/busy", _html(f"<p>Busy host page. {_TEXT}</p>")),
+            f"{_SITE}/throttled": HttpStatusError(
+                url=f"{_SITE}/throttled", status_code=429, retry_after=0.5
+            ),
+        }
+
+        class _Flaky(_ScriptedFetcher):
+            async def fetch(self, url: str) -> FetchResult:
+                if url == flaky and attempts["n"] < 2:
+                    attempts["n"] += 1
+                    self.calls.append(url)
+                    raise HttpStatusError(url=url, status_code=503)
+                if url == flaky:
+                    self.calls.append(url)
+                    return _page(url, _html(f"<p>Recovered. {_TEXT}</p>"))
+                return await super().fetch(url)
+
+        fetcher = _Flaky(responses)
+        limiter = _Limiter(refuse={f"{_SITE}/busy"})
+        job = await env.job(f"{_SITE}/")
+        policy = RetryPolicy(max_attempts=3, base_delay=0.01, max_delay=0.02, max_retry_after=5)
+
+        await env.engine(job, fetcher, limiter=limiter, policy=policy).run()
+
+        outcomes = await env.outcomes(job)
+        assert _status(outcomes[flaky]) == (PageStatus.SUCCEEDED, None)
+        assert (fetcher.calls.count(flaky), outcomes[flaky].attempts) == (3, 3)
+        busy = outcomes[f"{_SITE}/busy"]
+        assert _status(busy) == (PageStatus.SUCCEEDED, None)
+        assert busy.attempts == 1  # the rate-limit release refunded its first claim
+        gone = outcomes[f"{_SITE}/gone"]
+        assert _status(gone) == (PageStatus.FAILED, PageReason.HTTP_CLIENT_ERROR)
+        assert gone.http_status == 404 and fetcher.calls.count(f"{_SITE}/gone") == 1
+        throttled = outcomes[f"{_SITE}/throttled"]
+        assert _status(throttled) == (PageStatus.FAILED, PageReason.RATE_LIMITED)
+        assert (f"{_SITE}/throttled", 0.5) in limiter.paused  # the whole host was paused
+        assert fetcher.calls.count(f"{_SITE}/throttled") == 3
+
+    async def test_a_bug_fails_only_that_page(self, env: _Env) -> None:
+        fetcher = _ScriptedFetcher(
+            {
+                f"{_SITE}/": _page(
+                    f"{_SITE}/", _html(f"<p>{_TEXT}</p><a href='/bad'>b</a><a href='/good'>g</a>")
+                ),
+                f"{_SITE}/bad": _page(f"{_SITE}/bad", _html(f"<p>BOOM {_TEXT}</p>")),
+                f"{_SITE}/good": _page(f"{_SITE}/good", _html(f"<p>Good. {_TEXT}</p>")),
+            }
+        )
+        job = await env.job(f"{_SITE}/")
+
+        await env.engine(job, fetcher, cleaner=_ExplodingCleaner(config=env.config)).run()
+
+        outcomes = await env.outcomes(job)
+        bad = outcomes[f"{_SITE}/bad"]
+        assert _status(bad) == (PageStatus.FAILED, PageReason.INTERNAL_ERROR)
+        assert bad.reason_detail == "RuntimeError: cleaner bug"
+        assert _status(outcomes[f"{_SITE}/good"]) == (PageStatus.SUCCEEDED, None)
+
+    async def test_counters_match_the_page_table(self, env: _Env) -> None:
+        fetcher = _ScriptedFetcher(
+            {
+                f"{_SITE}/": _page(
+                    f"{_SITE}/",
+                    _html(f"<p>{_TEXT}</p>" + "".join(f"<a href='/p{n}'>p</a>" for n in range(12))),
+                ),
+                **{
+                    f"{_SITE}/p{n}": _page(f"{_SITE}/p{n}", _html(f"<p>Page {n % 4}. {_TEXT}</p>"))
+                    for n in range(10)
+                },
+            }
+        )
+        job = await env.job(f"{_SITE}/")
+
+        summary = await env.engine(job, fetcher).run()
+
+        counters = (await env.jobs.get_or_raise(job.id)).counters
+        assert summary.pages == {
+            PageStatus.SUCCEEDED: 5,
+            PageStatus.DUPLICATE: 6,
+            PageStatus.FAILED: 2,
+        }
+        assert counters == JobCounters(discovered=13, fetched=11, failed=2, duplicates=6)
+
+    async def test_a_superseded_run_stops(self, env: _Env) -> None:
+        job = await env.job(f"{_SITE}/")
+
+        async def requeue_mid_crawl(url: str) -> None:
+            if url.endswith("/p3"):
+                await env.jobs.requeue(job.id, stale_run_id="run-1")
+
+        fetcher = _ScriptedFetcher(
+            {
+                f"{_SITE}/": _page(
+                    f"{_SITE}/",
+                    _html(f"<p>{_TEXT}</p>" + "".join(f"<a href='/p{n}'>p</a>" for n in range(10))),
+                ),
+                **{
+                    f"{_SITE}/p{n}": _page(f"{_SITE}/p{n}", _html(f"<p>Page {n}. {_TEXT}</p>"))
+                    for n in range(10)
+                },
+            },
+            on_fetch=requeue_mid_crawl,
+        )
+
+        with pytest.raises(ExceptionGroup) as exc:
+            await env.engine(job, fetcher).run()
+
+        assert exc.group_contains(JobRunSupersededError)
+        assert len(fetcher.calls) < 11  # it stopped instead of crawling on
+
+    def test_engine_needs_a_started_job(self, env: _Env) -> None:
+        job = CrawlJob(tenant_id=_TENANT, kb_id=_KB, source_id=_SOURCE, seed_url=f"{_SITE}/")
+
+        with pytest.raises(ValueError, match="running"):
+            env.engine(job, _ScriptedFetcher({}))

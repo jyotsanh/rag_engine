@@ -5,7 +5,8 @@
 2. Non-HTML content, `CRAWL_JS_RENDERING=never`, or no browser context → the HTTP result.
 3. HTML: the JS-shell detector (Step 33) runs, and its signals are recorded on the result.
    With `auto`, only flagged pages are rendered; with `always`, every HTML page is.
-4. Render in the job's browser context (SSRF-enforced, Step 35): load, then network idle
+4. `before_render(url)` (the engine books a rate-limit slot for the second request), then
+   render in the job's browser context (SSRF-enforced, Step 35): load, then network idle
    (capped), then auto-scroll for lazy content (capped), then idle again.
 5. Keep the better of the two:
    - rendering failed, or the rendered document is not 2xx → HTTP result, `render_note` says why
@@ -16,6 +17,7 @@
 A render failure never fails the page: the HTTP body is still a valid, if thinner, result.
 """
 
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 
 from loguru import logger
@@ -36,11 +38,14 @@ class AutoFetcher:
         config: Settings = settings,
         mode: JsRenderMode | None = None,
         detector: JsShellDetector | None = None,
+        before_render: Callable[[str], Awaitable[object]] | None = None,
     ) -> None:
         self._http = http
         self._browser = browser
         self._mode = mode or config.CRAWL_JS_RENDERING
         self._detector = detector or JsShellDetector()
+        # the render re-requests the document: the engine books a rate-limit slot here
+        self._before_render = before_render
         self._idle_timeout = config.CRAWL_RENDER_NETWORKIDLE_SECONDS
         self._scroll_seconds = config.CRAWL_RENDER_SCROLL_SECONDS
         self._scroll_steps = config.CRAWL_RENDER_SCROLL_MAX_STEPS
@@ -59,6 +64,8 @@ class AutoFetcher:
         if self._mode is JsRenderMode.AUTO and not verdict.needs_rendering:
             return result
 
+        if self._before_render is not None:
+            await self._before_render(result.final_url)
         try:
             rendered = await self._browser.render(
                 result.final_url,
