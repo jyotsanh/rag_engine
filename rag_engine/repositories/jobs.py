@@ -29,6 +29,7 @@ from pymongo.errors import PyMongoError
 from rag_engine.domain import (
     JOB_TRANSITIONS,
     CrawlJob,
+    CrawlReport,
     JobCounters,
     JobError,
     JobStatus,
@@ -310,6 +311,34 @@ class JobRepository(BaseRepository[CrawlJob]):
             job_id,
             run_id,
             {"$set": {"counters": counters.model_dump(), "updated_at": self._clock()}},
+        )
+        return self._load(raw)
+
+    async def reconcile_counters(self, job_id: str, run_id: str, **values: int) -> JobCounters:
+        """Overwrite only the named counters with values recounted from the page table.
+
+        Unlike `set_counters`, counters another component is still `$inc`-ing (chunked,
+        embedded) are left alone. Returns the counters as stored afterwards.
+        """
+        unknown = set(values) - JobCounters.names()
+        if unknown:
+            raise ValueError(f"unknown job counters: {sorted(unknown)}")
+        if any(value < 0 for value in values.values()):
+            raise ValueError("counter values must be >= 0")
+        if not values:
+            return (await self.get_or_raise(job_id)).counters
+        fields = {f"counters.{name}": value for name, value in values.items()}
+        raw = await self._held_update(
+            job_id, run_id, {"$set": {**fields, "updated_at": self._clock()}}
+        )
+        return self._load(raw).counters
+
+    async def set_report(self, job_id: str, run_id: str, report: CrawlReport) -> CrawlJob:
+        """Store the run's crawl report (replaces an earlier run's)."""
+        raw = await self._held_update(
+            job_id,
+            run_id,
+            {"$set": {"report": report.model_dump(), "updated_at": self._clock()}},
         )
         return self._load(raw)
 

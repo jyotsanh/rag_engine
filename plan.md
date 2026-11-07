@@ -1636,3 +1636,38 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 87**: `DELETE /jobs/{id}` → `request_cancel(...)`. It's already idempotent and tenant-scoped, and maps `InvalidJobTransitionError` to 409 and `JobNotFoundError` to 404.
   - Step 80's `requeue` already cancels (instead of requeuing) a dead run's job when a cancel is pending, so the flag can be left to expire there.
 - Next: Step 53: Engine error accounting
+
+### Step 53: Engine error accounting  (2026-11-07)
+- Status: ✅ done
+- Built: every page ends as a row with a classified reason, and each run stores a `CrawlReport` (the failure summary) on the job.
+  - **Gaps found and closed**:
+    - **Redis outages** (robots store, rate limiter, the render-slot hook) reached the engine as raw `RedisError` and became `internal_error`, as if they were bugs. `CrawlEngine._guarded` now classifies `RedisError`/`RedisUnavailableError`: the page is retried with the policy's backoff while it has attempts left (`frontier.max_attempts`), then fails as **`service_unavailable`** (new) with `... (gave up after N attempts)`. The seed's robots verdict for the report tolerates an outage (`robots_status=None`, detail `robots.txt verdict unavailable: ...`), so the run carries on.
+    - **Redirect targets** processed with their alias's content had no guard of their own: an exception left the target `in_progress` until its 10-minute lease expired, which kept the frontier undrained. They now go through `_guarded` too (`_redirect_target`).
+    - **`render_failed`** was never recorded: AutoFetcher falls back to the HTTP shell, which then showed up as `skipped/empty_content`. An `EMPTY_CONTENT` extraction on a result whose `render_note` starts with `render_failed` is now `failed/render_failed` (detail: the note plus "the HTTP response has no content").
+    - **Counter drift**: pages the frontier fails as `worker_lost` (`recover()`, expired-lease abandonment) never passed through `_finish`, so `failed` undercounted. A crash between an outcome and its `$inc` drifts the counters too. At the end of each run the engine recounts `failed`/`skipped`/`duplicates` from the page table and writes them with the new `JobRepository.reconcile_counters` (an `$set` of the named fields only, so `chunked`/`embedded` from the pipeline are untouched). It logs any drift and only writes when it finds some.
+    - **Failed jobs**: the new `PageRepository.close_out_job(job_id, detail) -> (skipped, failed)` turns queued pages into `skipped/job_failed` and in-progress pages into `failed/job_failed` (new reason, 29 in total). Finished pages are untouched. It's for Step 77/80 when a job fails.
+  - **Report**:
+    - Domain `rag_engine/domain/report.py`: `CrawlReport` holds `generated_at`, `seed_url`, `stop_reason`/`stop_detail`, `pages` by status, and `failures` and `skips` (each a list of `ReasonCount{status, reason, count, samples≤5}`, largest first; `PageSample{url, detail, http_status}`). It also holds `robots_status`/`detail`, `sitemap_urls`/`sitemap_error`, `skipped_links`(`_dropped`), `recovered_pages`/`abandoned_pages`, and the properties `failed` and `unfinished`. `CrawlJob.report` defaults to None.
+    - `PageRepository.reason_breakdown(job_id, samples=5)` is one aggregation that groups by (status, reason) and samples the first pages found (`$topN` by `_id`, Mongo ≥ 5.2; we run 8.0).
+    - `rag_engine/crawling/report.py`: `build_report(pages, job_id, ...)` is exported, so the worker can build a report without the engine.
+    - At the end of `run()`, the engine reconciles, builds and stores the report (`JobRepository.set_report`, guarded by the run, replacing the earlier run's) and returns it as `CrawlSummary.report`.
+- Tests:
+  - `TestEngineErrorAccounting_S53` (5, integration):
+    - One page per failure kind gives the exact (status, reason) and a non-empty detail. The kinds: 404, 500 exhausted, 429, timeout, network, SSRF, too large, redirect loop, too many redirects, unsupported type (skip), empty (skip), render failed, corrupt PDF → extraction_failed, a bug → internal_error, Redis down → service_unavailable after 2 attempts. The report's failures and skips match per reason, the samples carry URL and HTTP status, the stored report equals the returned one, and the counters match.
+    - A one-off Redis blip is retried and the page succeeds on attempt 2.
+    - A redirect target whose content crashes ends `internal_error` in under 5 s, with nothing unfinished.
+    - Reconciliation: a `worker_lost` page counts as failed, an inflated `skipped` is corrected, and `abandoned_pages=1`.
+    - A robots-store outage fails the seed as `service_unavailable` with no fetch, and the report notes the robots verdict was unavailable.
+  - `TestPageAccounting_S53` (2, integration): breakdown order, counts, the first 5 samples, `samples=` override, per job; `close_out_job` reasons, detail cap, finished/other-job pages untouched, idempotent.
+  - `TestJobReport_S53` (3, integration): the report round trips and is replaced, it's guarded by the run, and `reconcile_counters` only touches the named counters (plus validation).
+  - `TestCrawlReport_S53` (3, unit): totals, sample cap, job round trip.
+  - `TestDomainModels_S13`: 27 → 29 reasons.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1446 passed, 4 skipped (container) in 218 s. The integration suite passed twice in a row after the fix below.
+- Decisions/notes:
+  - A pre-existing race (Step 50 design, left as is): with several workers, another worker can claim a redirect target between `_redirected`'s `add` and `claim_url`, and then fetches it directly. The outcome is still correct (the alias stays `skipped/redirected` and the target keeps its own content), at the cost of one extra request. The redirect-target test pins `CRAWL_CONCURRENCY=1` for this reason.
+  - The report is per run and replaced on a resume. Counts come from the page table, so they cover every run.
+  - **Step 77**:
+    - On a job failure, call `jobs.fail(...)`, then `pages.close_out_job(job_id, detail)`, then optionally `build_report(...)` + `set_report` (only while the run still holds the job; `fail` releases it, so build and store the report *before* `fail`, or add a system-level setter then).
+    - `CrawlSummary.report` is also what the completion webhook can carry.
+  - **Step 85**: `GET /jobs/{id}` serves `job.report` as the failure summary. **Step 86** lists every page by status and reason.
+- Next: Step 54: Crawl engine E2E

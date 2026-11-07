@@ -95,6 +95,8 @@ class PageReason(StrEnum):
     EXTRACTION_FAILED = "extraction_failed"
     DOCUMENT_UNREADABLE = "document_unreadable"  # encrypted, no text layer
     INTERNAL_ERROR = "internal_error"  # a bug while processing the page (logged)
+    SERVICE_UNAVAILABLE = "service_unavailable"  # Redis etc. kept failing on this page
+    JOB_FAILED = "job_failed"  # the job failed before this page finished (Step 53)
     WORKER_LOST = "worker_lost"  # claimed the maximum number of times, never reported back
 
 

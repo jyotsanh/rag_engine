@@ -326,3 +326,62 @@ class TestPageRepositoryEngineSupport_S50:
             DeferredLink(url="mailto:x@acme.example", reason=PageReason.OUT_OF_SCOPE)
         with pytest.raises(ValidationError):
             DeferredLink(url="https://a.example/", reason=PageReason.NOFOLLOW, detail="x" * 101)
+
+
+class TestPageAccounting_S53:
+    """S53 — Error accounting reads: reason breakdown with samples, closing out a failed job."""
+
+    async def test_reason_breakdown_groups_by_status_and_reason(self, repo: PageRepository) -> None:
+        pages = [await repo.insert(_page(n)) for n in range(10)]
+        for page in pages[:7]:  # 7 x 404, recorded in discovery order
+            await repo.record_outcome(
+                page.id,
+                PageOutcome(status=PageStatus.FAILED, reason=PageReason.HTTP_CLIENT_ERROR,
+                            reason_detail="http_404", http_status=404),
+            )  # fmt: skip
+        await repo.record_outcome(
+            pages[7].id, PageOutcome(status=PageStatus.SKIPPED, reason=PageReason.MAX_DEPTH)
+        )
+        await repo.record_outcome(pages[8].id, _success())
+        await repo.insert(_page(50, job_id=_OTHER_JOB))  # another job: ignored
+
+        breakdown = await repo.reason_breakdown(_JOB)
+        few = await repo.reason_breakdown(_JOB, samples=2)
+
+        assert [(r.status, r.reason, r.count) for r in breakdown] == [
+            (PageStatus.FAILED, PageReason.HTTP_CLIENT_ERROR, 7),
+            (PageStatus.SKIPPED, PageReason.MAX_DEPTH, 1),
+        ]
+        samples = breakdown[0].samples
+        assert [s.url for s in samples] == [p.url for p in pages[:5]]  # first found, 5 max
+        assert (samples[0].detail, samples[0].http_status) == ("http_404", 404)
+        assert breakdown[1].samples[0].http_status is None
+        assert len(few[0].samples) == 2
+        assert await repo.reason_breakdown(_OTHER_JOB) == []
+
+    async def test_close_out_job_gives_unfinished_pages_a_reason(
+        self, repo: PageRepository
+    ) -> None:
+        queued, held, done = [await repo.insert(_page(n)) for n in range(3)]
+        await repo.collection.update_one(
+            {"_id": held.id}, {"$set": {"status": "in_progress", "claimed_by": "run-1"}}
+        )
+        await repo.record_outcome(done.id, _success())
+        other = await repo.insert(_page(9, job_id=_OTHER_JOB))
+
+        counts = await repo.close_out_job(_JOB, "worker crashed: " + "x" * 600)
+
+        assert counts == (1, 1)
+        rows = {p.id: p for p in await repo.find({})}
+        assert (rows[queued.id].status, rows[queued.id].reason) == (
+            PageStatus.SKIPPED,
+            PageReason.JOB_FAILED,
+        )
+        assert (rows[held.id].status, rows[held.id].reason) == (
+            PageStatus.FAILED,
+            PageReason.JOB_FAILED,
+        )
+        assert len(rows[held.id].reason_detail or "") == 500
+        assert rows[done.id].status is PageStatus.SUCCEEDED
+        assert rows[other.id].status is PageStatus.QUEUED
+        assert await repo.close_out_job(_JOB, "again") == (0, 0)

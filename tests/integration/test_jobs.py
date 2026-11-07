@@ -7,7 +7,19 @@ from datetime import datetime, timedelta
 import pytest
 
 from rag_engine.config import Settings
-from rag_engine.domain import CrawlJob, JobCounters, JobError, JobStatus, utc_now
+from rag_engine.domain import (
+    CrawlJob,
+    CrawlReport,
+    CrawlStopReason,
+    JobCounters,
+    JobError,
+    JobStatus,
+    PageReason,
+    PageSample,
+    PageStatus,
+    ReasonCount,
+    utc_now,
+)
 from rag_engine.infrastructure import MongoConnection
 from rag_engine.repositories import (
     InvalidJobTransitionError,
@@ -373,3 +385,51 @@ class TestJobRepository_S49:
         assert (await repo.get_for_tenant(_TENANT, mine[1].id)).id == mine[1].id
         with pytest.raises(JobNotFoundError):
             await repo.get_for_tenant(_TENANT, theirs.id)
+
+
+class TestJobReport_S53:
+    """S53 — Job accounting writes: the stored crawl report and counter reconciliation."""
+
+    async def test_report_round_trips_and_is_replaced(self, repo: JobRepository) -> None:
+        job = await _running(repo)
+        first = CrawlReport(
+            seed_url="https://acme.example/",
+            stop_reason=CrawlStopReason.MAX_PAGES,
+            stop_detail="budget",
+            pages={PageStatus.SUCCEEDED: 3, PageStatus.FAILED: 2},
+            failures=[
+                ReasonCount(status=PageStatus.FAILED, reason=PageReason.TIMEOUT, count=2,
+                            samples=[PageSample(url="https://acme.example/slow", detail="t")])
+            ],
+        )  # fmt: skip
+
+        stored = await repo.set_report(job.id, "run-1", first)
+        await repo.set_report(job.id, "run-1", CrawlReport(seed_url="https://acme.example/b"))
+        reloaded = await repo.get_or_raise(job.id)
+
+        assert stored.report == first
+        assert reloaded.report is not None
+        assert reloaded.report.seed_url == "https://acme.example/b"
+        assert reloaded.report.failures == []
+
+    async def test_report_is_guarded_by_the_run(self, repo: JobRepository) -> None:
+        job = await _running(repo)
+
+        with pytest.raises(JobRunSupersededError):
+            await repo.set_report(job.id, "run-2", CrawlReport())
+
+    async def test_reconcile_overwrites_only_the_named_counters(self, repo: JobRepository) -> None:
+        job = await _running(repo)
+        await repo.increment(job.id, "run-1", failed=9, skipped=1, embedded=4, fetched=3)
+
+        counters = await repo.reconcile_counters(job.id, "run-1", failed=2, skipped=5)
+        unchanged = await repo.reconcile_counters(job.id, "run-1")
+
+        assert counters == JobCounters(failed=2, skipped=5, embedded=4, fetched=3)
+        assert unchanged == counters
+        with pytest.raises(ValueError, match="unknown"):
+            await repo.reconcile_counters(job.id, "run-1", nope=1)
+        with pytest.raises(ValueError, match=">= 0"):
+            await repo.reconcile_counters(job.id, "run-1", failed=-1)
+        with pytest.raises(JobRunSupersededError):
+            await repo.reconcile_counters(job.id, "run-2", failed=0)

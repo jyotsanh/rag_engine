@@ -9,10 +9,11 @@ import contextlib
 import time
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 
 import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from rag_engine.config import JsRenderMode, Settings
 from rag_engine.crawling import (
@@ -33,7 +34,19 @@ from rag_engine.crawling import (
     rate_limit_host,
     request_cancel,
 )
-from rag_engine.crawling.fetchers import AutoFetcher, FetchResult, HttpFetcher, HttpStatusError
+from rag_engine.crawling.fetchers import (
+    AutoFetcher,
+    FetchResult,
+    FetchTimeoutError,
+    HttpFetcher,
+    HttpStatusError,
+    NetworkFetchError,
+    RedirectLoopFetchError,
+    SsrfFetchError,
+    TooLargeError,
+    TooManyRedirectsFetchError,
+    UnsupportedContentTypeError,
+)
 from rag_engine.domain import (
     ContentHashClaim,
     ContentKind,
@@ -1099,3 +1112,197 @@ class TestCrawlCancellation_S52:
         assert time.monotonic() - started < 5
         assert summary.stop is None
         assert signal.polls == 1  # the start check only
+
+
+# ---- error accounting (Step 53) ---- #
+
+
+def _pdf(url: str, body: bytes) -> FetchResult:
+    return replace(
+        _page(url, ""),
+        mime_type="application/pdf",
+        content_kind=ContentKind.PDF,
+        body=body,
+        text=None,
+        encoding=None,
+        bytes_downloaded=len(body),
+        headers={"content-type": "application/pdf"},
+    )
+
+
+@dataclass
+class _FlakyRedisLimiter(_Limiter):
+    """Raises a Redis connection error for `broken` URLs (`times` per URL, -1 = always)."""
+
+    broken: dict[str, int] = field(default_factory=dict)
+
+    async def acquire(
+        self, url: str, *, crawl_delay: float | None = None, max_wait: float | None = None
+    ) -> Reservation:
+        left = self.broken.get(url, 0)
+        if left:
+            self.broken[url] = left - 1 if left > 0 else left
+            raise RedisConnectionError("Error 111 connecting to redis:6379")
+        return await super().acquire(url, crawl_delay=crawl_delay, max_wait=max_wait)
+
+
+class _DownRobots:
+    async def rules_for(self, url: str) -> RobotsRules:
+        raise RedisConnectionError("Error 111 connecting to redis:6379")
+
+
+# (path, response, expected status, expected reason)
+_FAILURES: list[tuple[str, Callable[[str], FetchResult | Exception], PageStatus, PageReason]] = [
+    ("/gone", lambda u: HttpStatusError(url=u, status_code=404),
+     PageStatus.FAILED, PageReason.HTTP_CLIENT_ERROR),
+    ("/broken", lambda u: HttpStatusError(url=u, status_code=500),
+     PageStatus.FAILED, PageReason.HTTP_SERVER_ERROR),
+    ("/throttled", lambda u: HttpStatusError(url=u, status_code=429),
+     PageStatus.FAILED, PageReason.RATE_LIMITED),
+    ("/slow", lambda u: FetchTimeoutError("read timeout", url=u),
+     PageStatus.FAILED, PageReason.TIMEOUT),
+    ("/down", lambda u: NetworkFetchError("connection reset", url=u),
+     PageStatus.FAILED, PageReason.NETWORK_ERROR),
+    ("/internal", lambda u: SsrfFetchError("private address", url=u),
+     PageStatus.FAILED, PageReason.SSRF_BLOCKED),
+    ("/huge", lambda u: TooLargeError("over 20 MB", url=u),
+     PageStatus.FAILED, PageReason.TOO_LARGE),
+    ("/loop", lambda u: RedirectLoopFetchError("a -> b -> a", url=u),
+     PageStatus.FAILED, PageReason.REDIRECT_LOOP),
+    ("/hops", lambda u: TooManyRedirectsFetchError("6 hops", url=u),
+     PageStatus.FAILED, PageReason.TOO_MANY_REDIRECTS),
+    ("/video", lambda u: UnsupportedContentTypeError("video", url=u, content_type="video/mp4"),
+     PageStatus.SKIPPED, PageReason.UNSUPPORTED_CONTENT_TYPE),
+    ("/blank", lambda u: _page(u, _html("")),
+     PageStatus.SKIPPED, PageReason.EMPTY_CONTENT),
+    ("/shell", lambda u: replace(_page(u, _html("")), render_note="render_failed: crashed"),
+     PageStatus.FAILED, PageReason.RENDER_FAILED),
+    ("/corrupt.pdf", lambda u: _pdf(u, b"%PDF-1.7 this is not really a pdf"),
+     PageStatus.FAILED, PageReason.EXTRACTION_FAILED),
+    ("/bug", lambda u: _page(u, _html(f"<p>BOOM {_TEXT}</p>")),
+     PageStatus.FAILED, PageReason.INTERNAL_ERROR),
+    ("/redis", lambda u: _page(u, _html(f"<p>Never reached. {_TEXT}</p>")),
+     PageStatus.FAILED, PageReason.SERVICE_UNAVAILABLE),
+]  # fmt: skip
+
+
+class TestEngineErrorAccounting_S53:
+    """S53 — Error accounting: every failure is a classified page row; the job's report."""
+
+    async def test_every_failure_kind_ends_as_a_classified_page_row(
+        self, env: _Env, override_settings: OverrideSettings
+    ) -> None:
+        override_settings(CRAWL_MAX_RETRIES=1)  # 2 attempts for retryable failures
+        links = "".join(f"<a href='{path}'>x</a>" for path, *_ in _FAILURES)
+        responses: dict[str, FetchResult | Exception] = {
+            f"{_SITE}/": _page(f"{_SITE}/", _html(f"<p>{_TEXT}</p>{links}")),
+            **{f"{_SITE}{path}": respond(f"{_SITE}{path}") for path, respond, *_ in _FAILURES},
+        }
+        limiter = _FlakyRedisLimiter(broken={f"{_SITE}/redis": -1})
+        policy = RetryPolicy(max_attempts=2, base_delay=0.01, max_delay=0.02, max_retry_after=5)
+        job = await env.job(f"{_SITE}/")
+
+        summary = await env.engine(
+            job,
+            _ScriptedFetcher(responses),
+            limiter=limiter,
+            policy=policy,
+            cleaner=_ExplodingCleaner(config=env.config),
+        ).run()
+
+        outcomes = await env.outcomes(job)
+        for path, _, status, reason in _FAILURES:
+            page = outcomes[f"{_SITE}{path}"]
+            assert _status(page) == (status, reason), (path, page.reason_detail)
+            assert page.reason_detail, path
+        assert outcomes[f"{_SITE}/redis"].attempts == 2
+        assert "gave up after 2 attempts" in (outcomes[f"{_SITE}/redis"].reason_detail or "")
+        assert outcomes[f"{_SITE}/gone"].http_status == 404
+        # the report: failures and skips by reason, consistent with the page table
+        report = summary.report
+        assert report is not None and report.unfinished == 0
+        expected_failures = Counter(r for _, _, s, r in _FAILURES if s is PageStatus.FAILED)
+        assert {row.reason: row.count for row in report.failures} == expected_failures
+        assert {row.reason: row.count for row in report.skips} == {
+            PageReason.UNSUPPORTED_CONTENT_TYPE: 1,
+            PageReason.EMPTY_CONTENT: 1,
+        }
+        gone = next(r for r in report.failures if r.reason is PageReason.HTTP_CLIENT_ERROR)
+        assert [(s.url, s.http_status) for s in gone.samples] == [(f"{_SITE}/gone", 404)]
+        assert report.failed == len(expected_failures) == summary.pages[PageStatus.FAILED]
+        stored = (await env.jobs.get_or_raise(job.id)).report
+        assert stored == report
+        counters = (await env.jobs.get_or_raise(job.id)).counters
+        assert (counters.failed, counters.skipped) == (len(expected_failures), 2)
+
+    async def test_a_redis_blip_is_retried_and_the_page_recovers(
+        self, env: _Env, override_settings: OverrideSettings
+    ) -> None:
+        override_settings(CRAWL_MAX_RETRIES=2)
+        limiter = _FlakyRedisLimiter(broken={f"{_SITE}/p0": 1})
+        policy = RetryPolicy(max_attempts=3, base_delay=0.01, max_delay=0.02, max_retry_after=5)
+        job = await env.job(f"{_SITE}/")
+
+        await env.engine(job, _ScriptedFetcher(_site_of(2)), limiter=limiter, policy=policy).run()
+
+        page = (await env.outcomes(job))[f"{_SITE}/p0"]
+        assert (_status(page), page.attempts) == ((PageStatus.SUCCEEDED, None), 2)
+
+    async def test_a_failing_redirect_target_never_stays_in_progress(
+        self, env: _Env, override_settings: OverrideSettings
+    ) -> None:
+        # one worker: nobody else can claim /new before the redirect handler does
+        override_settings(CRAWL_CONCURRENCY=1)
+        old, new = f"{_SITE}/old", f"{_SITE}/new"
+        responses = {
+            f"{_SITE}/": _page(f"{_SITE}/", _html(f"<p>{_TEXT}</p><a href='/old'>o</a>")),
+            old: _page(old, _html(f"<p>BOOM {_TEXT}</p>"), final_url=new, chain=(old,)),
+        }
+        job = await env.job(f"{_SITE}/")
+        started = time.monotonic()
+
+        summary = await env.engine(
+            job, _ScriptedFetcher(responses), cleaner=_ExplodingCleaner(config=env.config)
+        ).run()
+
+        outcomes = await env.outcomes(job)
+        assert time.monotonic() - started < 5  # not waiting for a 10-minute lease
+        assert _status(outcomes[new]) == (PageStatus.FAILED, PageReason.INTERNAL_ERROR)
+        assert _status(outcomes[old]) == (PageStatus.SKIPPED, PageReason.REDIRECTED)
+        assert summary.report is not None and summary.report.unfinished == 0
+
+    async def test_counters_are_reconciled_with_the_page_table(self, env: _Env) -> None:
+        job = await env.job(f"{_SITE}/")
+        # a page a crashed run claimed on every attempt: recover() fails it as worker_lost,
+        # which never passes through the engine's counter updates
+        await env.pages.insert(
+            Page(tenant_id=_TENANT, kb_id=_KB, source_id=_SOURCE, job_id=job.id,
+                 url=f"{_SITE}/cursed", url_hash=normalize_and_hash(f"{_SITE}/cursed")[1],
+                 status=PageStatus.IN_PROGRESS, claimed_by="run-0", attempts=99)
+        )  # fmt: skip
+        await env.jobs.increment(job.id, "run-1", skipped=5)  # a counter that drifted up
+
+        summary = await env.engine(job, _ScriptedFetcher(_site_of(2))).run()
+
+        cursed = (await env.outcomes(job))[f"{_SITE}/cursed"]
+        counters = (await env.jobs.get_or_raise(job.id)).counters
+        assert _status(cursed) == (PageStatus.FAILED, PageReason.WORKER_LOST)
+        assert (counters.failed, counters.skipped) == (1, 0)
+        assert summary.report is not None and summary.report.abandoned_pages == 1
+
+    async def test_a_robots_store_outage_fails_pages_without_stopping_the_crawl(
+        self, env: _Env, override_settings: OverrideSettings
+    ) -> None:
+        override_settings(CRAWL_MAX_RETRIES=1)
+        policy = RetryPolicy(max_attempts=2, base_delay=0.01, max_delay=0.02, max_retry_after=5)
+        job = await env.job(f"{_SITE}/")
+        fetcher = _ScriptedFetcher(_site_of(2))
+
+        summary = await env.engine(job, fetcher, robots=_DownRobots(), policy=policy).run()
+
+        seed = (await env.outcomes(job))[f"{_SITE}/"]
+        assert _status(seed) == (PageStatus.FAILED, PageReason.SERVICE_UNAVAILABLE)
+        assert fetcher.calls == []  # never fetched without a robots verdict
+        report = summary.report
+        assert report is not None and report.robots_status is None
+        assert (report.robots_detail or "").startswith("robots.txt verdict unavailable")

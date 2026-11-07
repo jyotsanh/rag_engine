@@ -7,6 +7,7 @@ from pymongo import IndexModel
 from rag_engine.config import settings
 from rag_engine.domain.base import MongoDocument
 from rag_engine.domain.enums import JobStatus
+from rag_engine.domain.report import CrawlReport
 from rag_engine.domain.types import (
     HttpUrlStr,
     KnowledgeBaseId,
@@ -94,6 +95,7 @@ class CrawlJob(MongoDocument):
     counters: JobCounters = Field(default_factory=JobCounters)
     usage: EmbeddingUsage = Field(default_factory=EmbeddingUsage)
     error: JobError | None = None
+    report: CrawlReport | None = None  # written at the end of each crawl run (Step 53)
     attempts: NonNegativeInt = 0  # times a worker started it (crash recovery requeues, Step 80)
     run_id: str | None = Field(default=None, max_length=100)  # the worker run holding the job
     cancel_requested_at: datetime | None = None

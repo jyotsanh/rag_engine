@@ -20,6 +20,7 @@ from .enums import (
 from .job import CrawlConfig, CrawlJob, EmbeddingUsage, JobCounters, JobError
 from .knowledge_base import KnowledgeBase
 from .page import MAX_DEFERRED_LINKS, DeferredLink, Page
+from .report import REPORT_SAMPLES_PER_REASON, CrawlReport, PageSample, ReasonCount
 from .source import Source, SourceStats
 from .tenant import TENANT_NAME_COLLATION, Tenant, TenantQuotas
 
@@ -28,6 +29,7 @@ __all__ = [
     "CLAIM_TTL_SECONDS",
     "JOB_TRANSITIONS",
     "MAX_DEFERRED_LINKS",
+    "REPORT_SAMPLES_PER_REASON",
     "TENANT_NAME_COLLATION",
     "TERMINAL_JOB_STATUSES",
     "ApiKey",
@@ -36,6 +38,7 @@ __all__ = [
     "ContentKind",
     "CrawlConfig",
     "CrawlJob",
+    "CrawlReport",
     "CrawlStopReason",
     "DeferredLink",
     "DiscoveredVia",
@@ -48,7 +51,9 @@ __all__ = [
     "MongoDocument",
     "Page",
     "PageReason",
+    "PageSample",
     "PageStatus",
+    "ReasonCount",
     "RenderedWith",
     "ResourceStatus",
     "Source",

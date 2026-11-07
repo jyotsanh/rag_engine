@@ -30,7 +30,12 @@ a redirect → extract → clean → links → dedupe → enqueue outlinks → p
   was itself skipped as `canonical_elsewhere` is ignored, so one of them keeps the content.
 - Outlinks and canonical targets are enqueued **before** the outcome is written, so the
   frontier never looks drained while a page's links are still being added.
-- An unexpected exception fails only that page (`internal_error`, logged).
+- An unexpected exception fails only that page (`internal_error`, logged). A Redis outage
+  (robots cache, rate limiter) is not a bug of the page: it is retried with backoff like a
+  fetch, then fails as `service_unavailable` (Step 53). A redirect target processed with
+  its alias's content is guarded the same way, so it can't stay in progress.
+- An HTML page that is empty only because its browser render failed is recorded
+  `failed/render_failed` (the real cause), not `skipped/empty_content`.
 
 **End**: when nothing is ready, delayed or in flight and sitemap discovery has finished.
 Links that were never crawled (out of scope, too deep, nofollow) are then recorded as
@@ -64,6 +69,13 @@ during a poll is logged and polling continues.
   top of the fetchers' own timeouts); over it the fetch fails as a retryable `timeout`.
   Extraction has its own deadline (`EXTRACTION_TIMEOUT_SECONDS`).
 
+**Accounting** (Step 53). Every page ends as a row with a classified reason; at the end of
+a run the outcome counters (`failed`, `skipped`, `duplicates`) are recounted from the page
+table (pages the frontier failed as `worker_lost` never passed through `_finish`, and a
+crash can fall between an outcome and its `$inc`), and the run's `CrawlReport` (pages by
+status, failures and skips by reason with sample URLs, stop reason, robots/sitemap) is
+stored on the job and returned in `CrawlSummary.report`.
+
 Counters (Step 49): `discovered` = queued pages created; `fetched` once per successful
 fetch (`bytes_downloaded` with it); `failed`/`skipped`/`duplicates` once per recorded
 outcome. A run that lost the job (`JobRunSupersededError`) or the database stops the whole
@@ -81,6 +93,7 @@ from typing import Protocol
 from urllib.parse import urlsplit
 
 from loguru import logger
+from redis.exceptions import RedisError
 
 from rag_engine.config import Settings, settings
 from rag_engine.crawling.cancellation import CancelSignal
@@ -100,6 +113,7 @@ from rag_engine.crawling.frontier import (
 )
 from rag_engine.crawling.links import LinkExtractor, PageLinks
 from rag_engine.crawling.rate_limit import RateLimitWaitExceededError, Reservation
+from rag_engine.crawling.report import build_report
 from rag_engine.crawling.retry import RetryPolicy
 from rag_engine.crawling.robots import RobotsRules, RobotsStatus
 from rag_engine.crawling.scope import CrawlScope
@@ -109,6 +123,7 @@ from rag_engine.domain import (
     MAX_DEFERRED_LINKS,
     ContentKind,
     CrawlJob,
+    CrawlReport,
     CrawlStopReason,
     DeferredLink,
     DiscoveredVia,
@@ -202,6 +217,7 @@ class CrawlSummary:
     skipped_links: int  # never-crawled links recorded as skipped pages
     skipped_links_dropped: int  # this run: non-http(s) links, or over the per-page cap
     stop: CrawlStop | None = None  # a cap stopped the crawl (None: the frontier drained)
+    report: CrawlReport | None = None  # also stored on the job (Step 53)
 
 
 class CrawlEngine:
@@ -294,7 +310,7 @@ class CrawlEngine:
             await self._count(discovered=1)
         await self._check_stops_at_start()
         anchored = await self._anchor(seed_url)
-        rules = await self._robots.rules_for(anchored)
+        robots_status, robots_detail = await self._seed_robots(anchored)
         log.info("crawling {} (scope host {})", anchored, self._scope.seed_host)
 
         sitemap: list[SitemapReport | None] = [None]
@@ -317,18 +333,37 @@ class CrawlEngine:
 
         await self._skip_rest()
         skipped = await self._flush_deferred()
+        pages = await self._pages.count_by_status(self._job.id)
+        await self._reconcile_counters(pages)
+        report = await build_report(
+            self._pages,
+            self._job.id,
+            page_counts=pages,
+            seed_url=anchored,
+            stop_reason=self._stop.reason if self._stop else None,
+            stop_detail=self._stop.detail if self._stop else None,
+            robots_status=str(robots_status) if robots_status else None,
+            robots_detail=robots_detail,
+            sitemap=sitemap[0],
+            sitemap_error=sitemap_error[0],
+            skipped_links=skipped,
+            skipped_links_dropped=self._deferred_dropped,
+            recovered=recovered,
+        )
+        await self._jobs.set_report(self._job.id, self._run_id, report)
         summary = CrawlSummary(
             seed_url=anchored,
-            pages=await self._pages.count_by_status(self._job.id),
+            pages=pages,
             reasons=await self._pages.count_by_reason(self._job.id),
             recovered=recovered,
-            robots_status=rules.status,
-            robots_detail=rules.detail,
+            robots_status=robots_status,
+            robots_detail=robots_detail,
             sitemap=sitemap[0],
             sitemap_error=sitemap_error[0],
             skipped_links=skipped,
             skipped_links_dropped=self._deferred_dropped,
             stop=self._stop,
+            report=report,
         )
         log.info(
             "crawl finished ({}): {}",
@@ -336,6 +371,27 @@ class CrawlEngine:
             {str(k): v for k, v in summary.pages.items()},
         )
         return summary
+
+    async def _seed_robots(self, url: str) -> tuple[RobotsStatus | None, str | None]:
+        """The seed origin's robots.txt verdict for the report (a Redis outage isn't fatal)."""
+        try:
+            rules = await self._robots.rules_for(url)
+        except (RedisError, RedisUnavailableError) as exc:
+            return None, f"robots.txt verdict unavailable: {type(exc).__name__}: {exc}"[:500]
+        return rules.status, rules.detail
+
+    async def _reconcile_counters(self, pages: dict[PageStatus, int]) -> None:
+        """Outcome counters := the page table (see the module docstring)."""
+        actual = {counter: pages.get(status, 0) for status, counter in _STATUS_COUNTER.items()}
+        counters = (await self._jobs.get_or_raise(self._job.id)).counters
+        drift = {
+            name: (getattr(counters, name), value)
+            for name, value in actual.items()
+            if getattr(counters, name) != value
+        }
+        if drift:
+            logger.bind(job_id=self._job.id).info("counters reconciled (was, now): {}", drift)
+            await self._jobs.reconcile_counters(self._job.id, self._run_id, **actual)
 
     async def _anchor(self, seed_url: str) -> str:
         """Crawl the seed alone first; returns the URL the crawl is anchored on."""
@@ -539,10 +595,16 @@ class CrawlEngine:
     # ---- one page ---- #
 
     async def _process(self, page: Page) -> None:
+        await self._guarded(page, lambda: self._crawl(page))
+
+    async def _guarded(self, page: Page, work: Callable[[], Awaitable[None]]) -> None:
+        """Run one page's work; whatever goes wrong ends as a classified page outcome."""
         try:
-            await self._crawl(page)
+            await work()
         except JobRunSupersededError, DatabaseUnavailableError:
             raise
+        except (RedisError, RedisUnavailableError) as exc:
+            await self._service_failed(page, exc)
         except Exception as exc:
             logger.bind(job_id=self._job.id, url=page.url).exception("page processing failed")
             await self._finish(
@@ -553,6 +615,24 @@ class CrawlEngine:
                     reason_detail=f"{type(exc).__name__}: {exc}",
                 ),
             )
+
+    async def _service_failed(self, page: Page, exc: Exception) -> None:
+        """A shared service (Redis) failed mid-page: retry later, then `service_unavailable`."""
+        detail = f"{type(exc).__name__}: {exc}"[:400]
+        logger.bind(job_id=self._job.id, url=page.url).warning("service failed: {}", detail)
+        attempts = max(page.attempts, 1)
+        if attempts < self._frontier.max_attempts:
+            if await self._frontier.retry_later(page.id, self._policy.backoff(attempts)):
+                self._notify()
+            return
+        await self._finish(
+            page,
+            PageOutcome(
+                status=PageStatus.FAILED,
+                reason=PageReason.SERVICE_UNAVAILABLE,
+                reason_detail=f"{detail} (gave up after {attempts} attempts)",
+            ),
+        )
 
     async def _gate(self, page: Page) -> tuple[PageOutcome | None, RobotsRules]:
         """Scope and robots.txt: a skip outcome, or None when the page may be crawled."""
@@ -656,11 +736,7 @@ class CrawlEngine:
         target = await self._frontier.claim_url(final)
         fetched = target is None  # count the fetch once: on the target when it uses it
         if target is not None:
-            skip, _ = await self._gate(target)
-            if skip is not None:
-                await self._finish(target, skip, fetched=True)
-            else:
-                await self._content(target, result)
+            await self._guarded(target, lambda: self._redirect_target(target, result))
         await self._finish(
             page,
             PageOutcome(
@@ -676,6 +752,13 @@ class CrawlEngine:
             discovered=int(created),
         )
 
+    async def _redirect_target(self, target: Page, result: FetchResult) -> None:
+        skip, _ = await self._gate(target)
+        if skip is not None:
+            await self._finish(target, skip, fetched=True)
+        else:
+            await self._content(target, result)
+
     async def _content(self, page: Page, result: FetchResult) -> None:
         started = time.perf_counter()
         fetched = _fetched(result)
@@ -683,9 +766,13 @@ class CrawlEngine:
             document = await self._registry.extract(ExtractionInput.from_fetch(result))
             cleaned = self._cleaner.clean(document.markdown)
         except ExtractionError as exc:
-            outcome = replace(
-                fetched, status=exc.page_status, reason=exc.reason, reason_detail=exc.detail
-            )
+            status, reason, detail = exc.page_status, exc.reason, exc.detail
+            note = result.render_note or ""
+            if reason is PageReason.EMPTY_CONTENT and note.startswith("render_failed"):
+                # an empty JS shell whose render failed: the render is what went wrong
+                status, reason = PageStatus.FAILED, PageReason.RENDER_FAILED
+                detail = f"{note}; the HTTP response has no content"
+            outcome = replace(fetched, status=status, reason=reason, reason_detail=detail)
             await self._finish(page, outcome, fetched=True)
             return
         described = _described(fetched, document, int((time.perf_counter() - started) * 1000))

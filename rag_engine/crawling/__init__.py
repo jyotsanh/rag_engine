@@ -47,6 +47,7 @@ from .rate_limit import (
     Reservation,
     rate_limit_host,
 )
+from .report import build_report
 from .retry import (
     Classification,
     FailureKind,
@@ -158,6 +159,7 @@ __all__ = [
     "SitemapSource",
     "SkippedEntry",
     "UrlNormalizationError",
+    "build_report",
     "call_with_retries",
     "canonical_from_link_header",
     "classify",

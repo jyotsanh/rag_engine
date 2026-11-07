@@ -9,7 +9,8 @@ page cannot leave a stale `reason` or Markdown behind, and it is validated again
 Markdown above `PAGE_MAX_MARKDOWN_BYTES` is cut at the last block boundary that fits
 (`markdown_truncated=True`): MongoDB rejects documents over 16 MB.
 
-Reads used by the pipeline: counts by status / reason (job summary, Step 53), succeeded
+Reads used by the pipeline: counts by status / reason and the per-reason breakdown with
+sample URLs (the job's crawl report, Step 53), succeeded
 pages in discovery order (ingest, Step 40's keeper order) and tenant-scoped pagination
 for the API.
 """
@@ -25,13 +26,17 @@ from pymongo.errors import BulkWriteError, PyMongoError
 
 from rag_engine.config import Settings, settings
 from rag_engine.domain import (
+    REPORT_SAMPLES_PER_REASON,
     ContentKind,
     DeferredLink,
     MongoDocument,
     Page,
     PageReason,
+    PageSample,
     PageStatus,
+    ReasonCount,
     RenderedWith,
+    utc_now,
 )
 from rag_engine.infrastructure.exceptions import DatabaseUnavailableError
 from rag_engine.infrastructure.mongo import MongoDatabase
@@ -173,6 +178,73 @@ class PageRepository(BaseRepository[Page]):
             ]
         )
         return Counter({PageReason(row["_id"]): row["n"] async for row in await rows})
+
+    async def reason_breakdown(
+        self, job_id: str, *, samples: int = REPORT_SAMPLES_PER_REASON
+    ) -> list[ReasonCount]:
+        """Pages per (status, reason), largest first, each with its first `samples` pages."""
+        pipeline = [
+            {"$match": {"job_id": job_id, "reason": {"$ne": None}}},
+            {
+                "$group": {
+                    "_id": {"status": "$status", "reason": "$reason"},
+                    "count": {"$sum": 1},
+                    "samples": {
+                        "$topN": {
+                            "n": samples,
+                            "sortBy": {"_id": 1},
+                            "output": {
+                                "url": "$url",
+                                "detail": "$reason_detail",
+                                "http_status": "$http_status",
+                            },
+                        }
+                    },
+                }
+            },
+            {"$sort": {"count": -1, "_id.status": 1, "_id.reason": 1}},
+        ]
+        try:
+            cursor = await self.collection.aggregate(pipeline)
+            rows = [row async for row in cursor]
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+        return [
+            ReasonCount(
+                status=PageStatus(row["_id"]["status"]),
+                reason=PageReason(row["_id"]["reason"]),
+                count=row["count"],
+                samples=[PageSample.model_validate(sample) for sample in row["samples"]],
+            )
+            for row in rows
+        ]
+
+    async def close_out_job(self, job_id: str, detail: str) -> tuple[int, int]:
+        """A failed job's unfinished pages get a reason: `(skipped, failed)` counts.
+
+        Queued pages were never tried (`skipped/job_failed`); pages still in progress were
+        cut off mid-crawl (`failed/job_failed`). Finished pages keep their outcome.
+        """
+        now = utc_now()
+        changes = {
+            "reason": PageReason.JOB_FAILED.value,
+            "reason_detail": detail[:500],
+            "retry_at": None,
+            "lease_expires_at": None,
+            "updated_at": now,
+        }
+        try:
+            queued = await self.collection.update_many(
+                {"job_id": job_id, "status": PageStatus.QUEUED.value},
+                {"$set": {"status": PageStatus.SKIPPED.value, **changes}},
+            )
+            in_progress = await self.collection.update_many(
+                {"job_id": job_id, "status": PageStatus.IN_PROGRESS.value},
+                {"$set": {"status": PageStatus.FAILED.value, **changes}},
+            )
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+        return queued.modified_count, in_progress.modified_count
 
     async def iter_succeeded(self, job_id: str, *, batch_size: int = 100) -> AsyncIterator[Page]:
         """Succeeded pages in discovery order (`_id` is time-ordered), streamed in batches."""
