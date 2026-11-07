@@ -146,6 +146,12 @@ class Settings(BaseSettings):
     CRAWL_PER_DOMAIN_RPS: float = Field(default=2.0, gt=0, le=100)
     # ...after an initial burst of this many (1 = strictly spaced; robots crawl-delay forces 1)
     CRAWL_PER_DOMAIN_BURST: int = Field(default=1, ge=1, le=100)
+    # cross-page boilerplate (per crawl job): a Markdown unit on >= MIN_RATIO of the job's
+    # distinct pages (once at least MIN_PAGES are known) is template and gets stripped;
+    # units this long keep one copy on the first page that had them (still searchable once)
+    BOILERPLATE_MIN_PAGES: int = Field(default=5, ge=2)
+    BOILERPLATE_MIN_RATIO: float = Field(default=0.5, gt=0, le=1)
+    BOILERPLATE_KEEP_ONE_MIN_CHARS: int = Field(default=200, ge=0)
     # wall-clock cap per extracted document (a parser thread over the cap finishes unobserved)
     EXTRACTION_TIMEOUT_SECONDS: float = Field(default=120.0, gt=0)
     # robots.txt Crawl-delay is honoured up to this; a larger value would stall the job

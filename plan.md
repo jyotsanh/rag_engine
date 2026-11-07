@@ -1186,3 +1186,29 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Link-list sections lose their anchor text (`include_links=False`), which can leave empty headings (fixture home page). **Step 45**'s empty-section pruning removes those.
   - `PageLinks.noindex` (Step 32) is not consulted here. **Step 50** decides whether to index a `noindex` page; extraction stays a pure function of the HTML.
 - Next: Step 40: Cross-page boilerplate removal
+
+### Step 40: Cross-page boilerplate removal  (2026-11-07)
+- Status: ✅ done
+- Built: `rag_engine/extraction/boilerplate.py` (exported from `rag_engine.extraction`)
+  - `BoilerplateIndex(min_pages, min_ratio, keep_one_min_chars, config)`: one per crawl job, in memory.
+    - `add(page_key, markdown) -> bool`: counts each unit **once per page**. It returns False for a known key or **duplicate content**: twenty URLs serving one page count once, so duplicates can't make real content look like boilerplate.
+    - `strip(page_key, markdown) -> StrippedMarkdown{markdown, removed_units, removed_chars}`.
+    - `is_active()`, `pages`, `boilerplate_count()`.
+  - **Units**: a paragraph, a table, or **one list item**. Nav lists differ per page by an "active" item, but their other items repeat exactly. **Headings and code fences are never units**: a heading is structure (Step 45 prunes it if its section empties), and code repeated across docs pages is usually real content.
+  - `split_blocks(markdown) -> list[MarkdownBlock]`: blank-line blocks, with a fenced block (blank lines included, unterminated fences tolerated) as one block. It reassembles fences byte for byte.
+  - `normalize_unit`: NFKC, casefold, list markers and Markdown punctuation ignored, whitespace collapsed. Hashed to 8 bytes (blake2b), so memory is ~100 B per distinct unit.
+  - **Rule**: a unit is boilerplate when the index has ≥ `BOILERPLATE_MIN_PAGES` distinct pages and the unit is on ≥ `BOILERPLATE_MIN_RATIO` of them (and on ≥ 2). Inactive below `min_pages`: small sites are left alone.
+  - **Keep one copy**: a boilerplate unit with ≥ `BOILERPLATE_KEEP_ONE_MIN_CHARS` normalized chars (a shared warranty paragraph, not a nav link) stays on the **first page that added it**. The engine adds hub pages first. Shorter chrome (nav items, cookie banners) is removed everywhere, including the keeper page.
+  - A page made only of boilerplate becomes `""`. Step 45's min-content check turns it into an `empty_content` skip.
+- Settings: `BOILERPLATE_MIN_PAGES` (5, ≥2), `BOILERPLATE_MIN_RATIO` (0.5), `BOILERPLATE_KEEP_ONE_MIN_CHARS` (200). `.env.example` updated.
+- Tests: `TestBoilerplate_S40` (23, unit):
+  - Blocks and normalization: block splitting (heading, multi-line text, list with continuation, fence with an inner blank line, table); 4 normalization variants (emphasis/case/whitespace, list markers, ordered markers, full-width NFKC).
+  - Stripping: banner + 3 nav items stripped and the unique content and heading kept; inactive below min pages; a unit on 4/10 pages kept while one on 10/10 goes; nav with a varying active item; headings and shared code never stripped; fences reassembled byte for byte.
+  - Duplicates and keeper: 10 duplicate URLs count once; `add` idempotent per key; a long shared block keeps one copy on the first page only; keep-one can be disabled; pages added later are stripped; an all-boilerplate page → `""`.
+  - Configuration: 4 invalid threshold combinations; defaults from settings.
+  - **Fixture site**: all static pages through `HtmlExtractor` → index (19 distinct; dup-a/dup-b counted once) → **the cookie banner trafilatura kept on ≥ 5 pages is gone everywhere**, while Latin-1 text, the getting-started code block and the h3 survive.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1129 passed, 4 skipped (container) in 188 s.
+- Decisions/notes:
+  - **Where it runs**: frequency is a whole-job statistic, so stripping can't happen page by page during the crawl. **Step 50** stores each page's extracted Markdown as-is. The **finalize/ingest stage** (before Step 55's chunking) builds the index from the job's pages in crawl order, which picks the keeper, then strips each page. After a crash it is rebuilt from Mongo, so nothing is persisted. Step 46's dedupe hash stays on the unstripped Markdown (duplicates are duplicates either way).
+  - Recommended order at ingest: boilerplate strip (40) → text cleaning (45; prunes headings whose sections emptied, applies min content) → chunking (55+).
+- Next: Step 41: PDF extractor
