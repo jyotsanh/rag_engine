@@ -5,7 +5,13 @@ from pydantic import Field, model_validator
 from pymongo import IndexModel
 
 from rag_engine.domain.base import MongoDocument
-from rag_engine.domain.enums import ContentKind, PageReason, PageStatus, RenderedWith
+from rag_engine.domain.enums import (
+    ContentKind,
+    DiscoveredVia,
+    PageReason,
+    PageStatus,
+    RenderedWith,
+)
 from rag_engine.domain.types import (
     HttpUrlStr,
     JobId,
@@ -28,7 +34,10 @@ class Page(MongoDocument):
     indexes = (
         IndexModel([("job_id", 1), ("url_hash", 1)], unique=True, name="job_url_unique"),
         IndexModel([("job_id", 1), ("status", 1), ("_id", 1)], name="job_status"),
-    )
+        # frontier claim: next queued page of a job by priority, then discovery order (Step 48)
+        IndexModel([("job_id", 1), ("status", 1), ("priority", 1), ("_id", 1)],
+                   name="job_frontier"),
+    )  # fmt: skip
 
     tenant_id: TenantId
     kb_id: KnowledgeBaseId
@@ -38,6 +47,9 @@ class Page(MongoDocument):
     url_hash: Sha256Hex
     depth: NonNegativeInt = 0
     discovered_from: HttpUrlStr | None = None
+    discovered_via: DiscoveredVia = DiscoveredVia.LINK
+    # frontier order, lowest first: depth, then seed < sitemap < canonical < link (Step 48)
+    priority: NonNegativeInt = 0
     status: PageStatus = PageStatus.QUEUED
     reason: PageReason | None = None
     reason_detail: str | None = Field(default=None, max_length=500)
@@ -61,7 +73,10 @@ class Page(MongoDocument):
     bytes_downloaded: NonNegativeInt = 0
     fetch_ms: NonNegativeInt | None = None  # HTTP fetch + browser render
     extract_ms: NonNegativeInt | None = None
-    attempts: NonNegativeInt = 0
+    attempts: NonNegativeInt = 0  # claims so far (Step 48), i.e. fetch attempts started
+    retry_at: datetime | None = None  # queued for a retry; not claimable before this time
+    claimed_by: str | None = Field(default=None, max_length=100)  # crawl run holding the lease
+    lease_expires_at: datetime | None = None  # an in-progress page past this is reclaimable
     fetched_at: datetime | None = None
 
     @model_validator(mode="after")

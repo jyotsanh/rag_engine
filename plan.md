@@ -1437,3 +1437,36 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 48 (frontier)** claims `QUEUED` pages with `find_one_and_update` (sets `IN_PROGRESS`, increments `attempts`, sets a lease time) and needs a claim index plus priority fields (`discovered_via`, depth). Those belong to Step 48, together with the claim query they serve.
   - The engine (Step 50) builds `PageOutcome`s from `FetchResult` + `ExtractedDocument` + `DedupeDecision`. The repository stays free of crawling imports.
 - Next: Step 48: Frontier
+
+### Step 48: Frontier  (2026-11-07)
+- Status: ✅ done
+- Built:
+  - `rag_engine/crawling/frontier.py` (exported from `rag_engine.crawling`). `Frontier(pages, FrontierJob(tenant/kb/source/job ids), run_id=, config, clock)` is one job's queue of `Page` documents, bound to one run (a new `run_id` per attempt of the job):
+    - **Enqueue**: `add(url, depth=, via=, discovered_from=) -> created` and `add_many(entries) -> inserted`. URLs are normalized + hashed (Step 23). **Dedupe is the `(job_id, url_hash)` unique index** (Step 47's race-safe inserts). `add_many` skips invalid URLs and keeps the best entry for a URL listed twice in one batch.
+    - **Promotion**: a URL rediscovered at a better priority **while still queued** gets the new `priority/depth/discovered_via/discovered_from`, so `max_depth` sees its shortest known path. Claimed or finished pages are never touched.
+    - **Order**: `frontier_priority(via, depth) = depth * 10 + rank`, rank seed 0 < sitemap 1 < canonical 2 < link 3; ties in discovery order (`_id`). Sitemap entries (depth 0) and shallow pages go first; a canonical target is claimed before the links at its depth.
+    - **Claim**: one `find_one_and_update` on the new `job_frontier` index: `queued → in_progress`, `attempts += 1`, `claimed_by = run_id`, `lease_expires_at = now + CRAWL_FRONTIER_LEASE_SECONDS`. Pages with a future `retry_at` aren't claimable. Only when nothing is ready, pages whose **lease expired** (a dead crawler) are reclaimed.
+    - **Give back**: `retry_later(page_id, delay_seconds)` re-queues with a not-before time (Step 28's note: retries don't sleep inside a concurrency slot); `release(page_id)` re-queues and refunds the attempt (stopping early). Both only work for the run holding the page (False otherwise, e.g. after its lease was reclaimed).
+    - **Crash recovery**: `recover() -> RecoveryReport(requeued, abandoned)` re-queues every page held by another (dead) run, immediately, without waiting for the lease. A page that has used every attempt (`CRAWL_MAX_RETRIES + 1`) without reporting back fails as **`worker_lost`** (in `recover()` and on lease reclaim), so a page that crashes the worker every time can't loop forever.
+    - `stats() -> FrontierStats(ready, delayed, in_flight, next_retry_at)` with `drained` (nothing to claim or wait for).
+  - `Page` gained `discovered_via` (`DiscoveredVia`: seed/sitemap/canonical/link), `priority`, `retry_at`, `claimed_by`, `lease_expires_at`, and the index `job_frontier (job_id, status, priority, _id)`. `attempts` now means claims so far (= fetch attempts started, what `RetryPolicy.decide` takes).
+  - `PageReason.WORKER_LOST` (failed).
+  - `PageOutcome.changes()` also clears `lease_expires_at` and `retry_at`. `claimed_by` stays as an audit of the run that finished the page.
+- Settings: `CRAWL_FRONTIER_LEASE_SECONDS` (600; must be > `CRAWL_FETCH_TIMEOUT_SECONDS + CRAWL_RENDER_TIMEOUT_SECONDS`, validated). `.env.example` updated.
+- Also: `TestDomainModels_S13` count of `PageReason` 21 → 22; new `TestSettings_S3` invalid-limits case for the lease.
+- Tests:
+  - `TestFrontierOrder_S48` (6, unit): priority order (depth, then source) on a shuffled list; every source at depth n ranks before depth n+1; negative depth rejected; `Page` defaults; lease validator; outcome clears the lease but keeps `claimed_by`.
+  - `TestFrontier_S48` (20, integration, real MongoDB):
+    - Enqueue: normalized URL stored once with job ids and priority; `add_many` counts, in-batch best duplicate, invalid URL skipped; **20 concurrent adds of one URL → one page**; promotion (worse ignored, better applied); claimed/finished pages never promoted; jobs isolated.
+    - Claims: **seed → sitemap → canonical → link, by depth, then discovery order** on a shuffled insert order; the claim sets status/run/attempts/lease; **8 concurrent crawlers drain 40 pages with no page claimed twice**.
+    - Retries: not claimable before `retry_at`, claimable after (attempts 2), stats show it delayed; a retry doesn't block the queue; only the holder can give a page back; release refunds the attempt; negative delay rejected.
+    - Recovery: an expired lease is reclaimed only when nothing else is ready, and the dead run then can't give it back; a page crashing every crawler fails `worker_lost` after 3 attempts (valid `Page`); `recover()` re-queues a dead run's pages and leaves its own alone; `recover()` abandons an exhausted page; **crash mid-crawl → resume: finished pages not redone, in-flight pages redone, job drained, leases cleared**.
+    - `job_frontier` index exists.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1312 passed, 4 skipped (container) in 217 s.
+- Decisions/notes:
+  - **Step 50 (engine)** loop: `recover()` at start → seed `add(seed, depth=0, via=SEED)` + sitemap `add_many(..., via=SITEMAP, depth=0)` → workers `claim()` until `stats().drained` (sleep until `next_retry_at` when only delayed pages remain) → per page either `record_outcome` or, on a retryable failure, `retry_later(page.id, decision.delay_seconds)` with `policy.decide(error, page.attempts)`. Outlinks → `add_many(via=LINK, depth+1)`; `canonical_elsewhere` → `add(canonical_url, via=CANONICAL, depth=page.depth)`.
+  - **Zombie writes**: `record_outcome` doesn't check `claimed_by`, so a crawler that outlived its lease could still write an outcome for a page another run reclaimed. The lease validator makes this unlikely; Step 50 can guard by checking `claimed_by == run_id` in the outcome filter if it shows up.
+  - **Step 51 (caps)**: `max_pages` should count claims (or succeeded pages) and stop claiming; remaining queued pages become `skipped/max_pages` at finalize. **Step 52 (cancel)**: in-flight pages finish or `release()`; the rest become `skipped/job_cancelled`.
+  - **Step 80 (crash recovery task)** requeues the job with a new run id; the new run's `recover()` does the page side.
+  - Mutual canonicals (A → B, B → A both skipped, found in Step 46's review) are still open for Step 50.
+- Next: Step 49: CrawlJob repository + state machine

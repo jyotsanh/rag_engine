@@ -81,6 +81,8 @@ class PageOutcome:
         values["reason_detail"] = (self.reason_detail or "")[:500] or None
         markdown, truncated = truncate_markdown(self.markdown, max_markdown_bytes)
         values["markdown"], values["markdown_truncated"] = markdown, truncated
+        # the page is done: drop its frontier lease/retry time (`claimed_by` stays as an audit)
+        values["lease_expires_at"] = values["retry_at"] = None
         return values
 
 

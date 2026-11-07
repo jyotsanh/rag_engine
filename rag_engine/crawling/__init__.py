@@ -6,6 +6,14 @@ from .dedupe import (
     content_hash,
 )
 from .fetchers import RawFetcher
+from .frontier import (
+    Frontier,
+    FrontierEntry,
+    FrontierJob,
+    FrontierStats,
+    RecoveryReport,
+    frontier_priority,
+)
 from .js_shell import (
     JsShellDetector,
     JsShellThresholds,
@@ -92,6 +100,10 @@ __all__ = [
     "DedupeOutcome",
     "DomainRateLimiter",
     "FailureKind",
+    "Frontier",
+    "FrontierEntry",
+    "FrontierJob",
+    "FrontierStats",
     "JsShellDetector",
     "JsShellThresholds",
     "JsShellVerdict",
@@ -103,6 +115,7 @@ __all__ = [
     "ParsedSitemap",
     "RateLimitWaitExceededError",
     "RawFetcher",
+    "RecoveryReport",
     "RedisRobotsStore",
     "RejectedLink",
     "Reservation",
@@ -127,6 +140,7 @@ __all__ = [
     "canonical_from_link_header",
     "classify",
     "content_hash",
+    "frontier_priority",
     "inflate",
     "normalize_and_hash",
     "normalize_url",

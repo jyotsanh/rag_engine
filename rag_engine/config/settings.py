@@ -189,6 +189,9 @@ class Settings(BaseSettings):
     CRAWL_RESPECT_NOFOLLOW: bool = True
     # skip pages whose rel=canonical points to another in-scope URL (that URL is crawled)
     CRAWL_RESPECT_CANONICAL: bool = True
+    # a claimed frontier page whose crawler hasn't reported back within this is reclaimed
+    # (a crashed worker); must outlast one fetch + render, with room for extraction
+    CRAWL_FRONTIER_LEASE_SECONDS: int = Field(default=10 * 60, gt=0)
     # link candidates considered per page; link farms beyond this are cut (and flagged)
     CRAWL_MAX_LINKS_PER_PAGE: int = Field(default=5_000, gt=0, le=100_000)
     # re-render HTML in headless Chromium: auto (JS-shell detector) / always / never
@@ -236,6 +239,12 @@ class Settings(BaseSettings):
         if self.ROBOTS_UNREACHABLE_CACHE_TTL_SECONDS > self.ROBOTS_CACHE_TTL_SECONDS:
             raise ValueError(
                 "ROBOTS_UNREACHABLE_CACHE_TTL_SECONDS must be <= ROBOTS_CACHE_TTL_SECONDS"
+            )
+        page_seconds = self.CRAWL_FETCH_TIMEOUT_SECONDS + self.CRAWL_RENDER_TIMEOUT_SECONDS
+        if page_seconds >= self.CRAWL_FRONTIER_LEASE_SECONDS:
+            raise ValueError(
+                "CRAWL_FRONTIER_LEASE_SECONDS must be > "
+                "CRAWL_FETCH_TIMEOUT_SECONDS + CRAWL_RENDER_TIMEOUT_SECONDS"
             )
         if self.CRAWL_MAX_PAGE_BYTES > self.CRAWL_MAX_TOTAL_BYTES:
             raise ValueError("CRAWL_MAX_PAGE_BYTES must be <= CRAWL_MAX_TOTAL_BYTES")

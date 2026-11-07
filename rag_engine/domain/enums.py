@@ -69,6 +69,7 @@ class PageReason(StrEnum):
     RENDER_FAILED = "render_failed"
     EXTRACTION_FAILED = "extraction_failed"
     DOCUMENT_UNREADABLE = "document_unreadable"  # encrypted, no text layer
+    WORKER_LOST = "worker_lost"  # claimed the maximum number of times, never reported back
 
 
 class ContentKind(StrEnum):
@@ -81,6 +82,15 @@ class ContentKind(StrEnum):
     XLSX = "xlsx"
 
 
+class DiscoveredVia(StrEnum):
+    """How a URL entered the frontier; ties at one depth are broken in this order (Step 48)."""
+
+    SEED = "seed"  # the job's start URL
+    SITEMAP = "sitemap"  # robots.txt / sitemap.xml entry (depth 0)
+    CANONICAL = "canonical"  # rel=canonical target of a page skipped as canonical_elsewhere
+    LINK = "link"  # outlink of a fetched page (depth + 1)
+
+
 class RenderedWith(StrEnum):
     HTTP = "http"  # plain HTTP fetch
     BROWSER = "browser"  # re-rendered in headless Chromium
@@ -90,6 +100,7 @@ __all__ = [
     "ACTIVE_JOB_STATUSES",
     "TERMINAL_JOB_STATUSES",
     "ContentKind",
+    "DiscoveredVia",
     "EmbeddingModelName",
     "JobStatus",
     "PageReason",
