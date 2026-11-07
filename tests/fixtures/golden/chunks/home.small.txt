@@ -1,0 +1,11 @@
+# https://acme.example/index.html
+# title: 'Acme Widgets'
+# budget: target=60 max=160 overlap=20 context=100
+# chunks: 1
+
+=== chunk 0 | Acme Widgets | location - | 37 tokens ===
+--- context ---
+Acme Widgets
+--- text ---
+Acme Widgets builds modular widget assemblies for industrial automation. This site documents the
+Widget Controller platform, its REST API, and operational guides for running widgets in production.

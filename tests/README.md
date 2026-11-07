@@ -30,6 +30,14 @@ uv run pytest -q --run-container -m container            # builds + runs the wor
 uv run pytest -q --run-live -m live                      # real OpenAI / public sites
 ```
 
+Golden (snapshot) tests compare output with files under `tests/fixtures/golden/`
+(`tests/support/golden.py`). When a change is intended, rewrite them and review the diff:
+
+```bash
+uv run pytest -q tests/unit/test_chunking_golden.py --update-golden
+git diff tests/fixtures/golden/
+```
+
 Every test has a 120 s timeout (`pytest-timeout`), so a hang fails the stuck test by name.
 
 ## Fixtures

@@ -1,0 +1,25 @@
+# https://acme.example/docs/api/reference.html
+# title: 'REST API reference'
+# budget: target=60 max=160 overlap=20 context=100
+# chunks: 3
+
+=== chunk 0 | REST API reference | location - | 18 tokens ===
+--- context ---
+REST API reference
+--- text ---
+All endpoints live under `/v2` and require a bearer token.
+
+=== chunk 1 | REST API reference > List widgets | location - | 25 tokens ===
+--- context ---
+REST API reference
+List widgets
+--- text ---
+`GET /v2/widgets` returns every registered widget with its status and firmware version.
+
+=== chunk 2 | REST API reference > Calibrate a widget | location - | 47 tokens ===
+--- context ---
+REST API reference
+Calibrate a widget
+--- text ---
+`POST /v2/widgets/{serial}/calibrate` starts the calibration routine. Calibration takes about
+ninety seconds and the widget reports **CALIBRATING** until it finishes.

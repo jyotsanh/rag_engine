@@ -4,6 +4,7 @@
 - Auto-marks tests by directory (`tests/unit` → `unit`, `tests/integration` → `integration`).
 - Auto-marks `tests/browser` → `browser` and `tests/container` → `container`.
 - Skips `live` tests unless `--run-live`, `container` tests unless `--run-container`.
+- `--update-golden` rewrites golden snapshots (`tests/support/golden.py`) instead of comparing.
 - Provides `override_settings` for validated, auto-restored settings changes.
 """
 
@@ -52,6 +53,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store_true",
         default=False,
         help="run tests marked `container` (builds the Docker images; minutes)",
+    )
+    parser.addoption(
+        "--update-golden",
+        action="store_true",
+        default=False,
+        help="rewrite golden snapshot files instead of comparing against them",
     )
 
 

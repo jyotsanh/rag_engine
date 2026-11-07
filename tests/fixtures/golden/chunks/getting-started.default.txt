@@ -1,0 +1,43 @@
+# https://acme.example/docs/getting-started.html
+# title: 'Getting started'
+# budget: target=400 max=800 overlap=60 context=100
+# chunks: 4
+
+=== chunk 0 | Getting started | location - | 18 tokens ===
+--- context ---
+Getting started
+--- text ---
+This guide walks you through installing the Widget Controller and registering your first widget.
+
+=== chunk 1 | Getting started > Install the controller | location - | 71 tokens ===
+--- context ---
+Getting started
+Install the controller
+--- text ---
+Download the controller package for your platform and run the installer. The controller listens on
+port 7070 by default and stores its state in `/var/lib/widgetd`.
+
+```bash
+curl -fsSL https://acme.example/install.sh | sh
+widgetd --config /etc/widgetd/config.toml
+```
+
+=== chunk 2 | Getting started > Register a widget | location - | 51 tokens ===
+--- context ---
+Getting started
+Register a widget
+--- text ---
+Each widget has a serial number printed on its housing. Register it with the controller using the CLI:
+
+```bash
+widgetctl register --serial WX-2048-ALPHA --name "Line 3 sorter"
+```
+
+=== chunk 3 | Getting started > Register a widget > Verify the registration | location - | 38 tokens ===
+--- context ---
+Getting started
+Register a widget > Verify the registration
+--- text ---
+Run `widgetctl list`. A healthy widget reports the status **ONLINE** within thirty seconds.
+
+Next, read the configuration reference.

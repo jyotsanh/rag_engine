@@ -1,0 +1,31 @@
+# https://acme.example/files/roadmap.pptx
+# title: 'Product Roadmap 2026'
+# budget: target=400 max=800 overlap=60 context=100
+# chunks: 3
+
+=== chunk 0 | Product Roadmap 2026 | location 1 | 34 tokens ===
+--- context ---
+Product Roadmap 2026
+--- text ---
+- Widget Controller v3 ships in Q2 with fleet-wide OTA updates.
+
+> Speaker notes: emphasise product roadmap 2026.
+
+=== chunk 1 | Q3: Open Widget Protocol 2.0 | location 2 | 43 tokens ===
+--- context ---
+Product Roadmap 2026
+Q3: Open Widget Protocol 2.0
+--- text ---
+- Adds encrypted telemetry and frame compression.
+
+> Speaker notes: emphasise q3: open widget protocol 2.0.
+
+=== chunk 2 | Release dates | location 3 | 48 tokens ===
+--- context ---
+Product Roadmap 2026
+Release dates
+--- text ---
+| Release | Date |
+|---|---|
+| v3.0 | 2026-05-01 |
+| v3.1 | 2026-08-15 |

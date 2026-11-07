@@ -1,0 +1,34 @@
+# https://acme.example/docs/configuration.html
+# title: 'Configuration reference'
+# budget: target=60 max=160 overlap=20 context=100
+# chunks: 3
+
+=== chunk 0 | Configuration reference | location - | 19 tokens ===
+--- context ---
+Configuration reference
+--- text ---
+The controller reads `config.toml` at startup. Unknown keys are rejected.
+
+=== chunk 1 | Configuration reference > Settings | location - | 84 tokens ===
+--- context ---
+Configuration reference
+Settings
+--- text ---
+| Key | Type | Default | Description |
+|---|---|---|---|
+| listen_port | integer | 7070 | TCP port for the control API |
+| heartbeat_seconds | integer | 15 | Interval between widget heartbeats |
+| max_widgets | integer | 256 | Upper bound on registered widgets |
+| log_format | string | json | Either json or text |
+
+=== chunk 2 | Configuration reference > Example | location - | 35 tokens ===
+--- context ---
+Configuration reference
+Example
+--- text ---
+```toml
+listen_port = 7070
+heartbeat_seconds = 10
+max_widgets = 512
+log_format = "json"
+```

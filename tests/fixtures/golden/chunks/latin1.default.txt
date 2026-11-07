@@ -1,0 +1,10 @@
+# https://acme.example/latin1.html
+# title: 'Café menu'
+# budget: target=400 max=800 overlap=60 context=100
+# chunks: 1
+
+=== chunk 0 | Café menu | location - | 31 tokens ===
+--- context ---
+Café menu
+--- text ---
+Crème brûlée, café au lait, and pâtisserie are served daily in the Springfield office café.

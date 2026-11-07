@@ -1,0 +1,23 @@
+# https://acme.example/files/pricing.xlsx
+# title: None
+# budget: target=60 max=160 overlap=20 context=100
+# chunks: 2
+
+=== chunk 0 | Prices | location 1 | 62 tokens ===
+--- context ---
+Prices
+--- text ---
+| SKU | Description | Unit price (USD) |
+|---|---|---|
+| WX-2048 | Modular sorter | 1899 |
+| WX-4096 | High-throughput sorter | 3499 |
+| SNS-T1 | Torque sensor pack | 249 |
+
+=== chunk 1 | Discounts | location 2 | 31 tokens ===
+--- context ---
+Discounts
+--- text ---
+| Quantity | Discount |
+|---|---|
+| 10+ | 5% |
+| 50+ | 12% |

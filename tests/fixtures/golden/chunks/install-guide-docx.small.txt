@@ -1,0 +1,28 @@
+# https://acme.example/files/install-guide.docx
+# title: 'Installation Guide'
+# budget: target=60 max=160 overlap=20 context=100
+# chunks: 3
+
+=== chunk 0 | Installation Guide | location - | 16 tokens ===
+--- context ---
+Installation Guide
+--- text ---
+This guide covers mounting and wiring the WX-2048 widget.
+
+=== chunk 1 | Installation Guide > Mounting | location - | 30 tokens ===
+--- context ---
+Installation Guide
+Mounting
+--- text ---
+- Use four M6 bolts torqued to 9 Nm.
+- Leave 50 mm clearance for airflow.
+
+=== chunk 2 | Installation Guide > Wiring | location - | 31 tokens ===
+--- context ---
+Installation Guide
+Wiring
+--- text ---
+| Pin | Signal |
+|---|---|
+| 1 | +24 V |
+| 3 | GND |

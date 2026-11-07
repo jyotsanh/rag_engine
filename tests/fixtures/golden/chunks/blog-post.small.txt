@@ -1,0 +1,12 @@
+# https://acme.example/blog/post-1.html
+# title: 'How we cut widget boot time by 70 percent'
+# budget: target=60 max=160 overlap=20 context=100
+# chunks: 1
+
+=== chunk 0 | How we cut widget boot time by 70 percent | location - | 69 tokens ===
+--- context ---
+How we cut widget boot time by 70 percent
+--- text ---
+Widget firmware used to verify every flash block on boot. We switched to a Merkle tree over the firmware image so the bootloader verifies only the root hash and lazily checks blocks on first read.
+
+Boot time dropped from eleven seconds to just over three seconds on the WX-2048 hardware.

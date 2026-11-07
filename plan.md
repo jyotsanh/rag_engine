@@ -1850,3 +1850,22 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 76**: per succeeded page, `chunker.chunk_documents(ChunkInput.from_page(page, markdown=stripped))` → `save_page_chunks` → embed → upsert, then `jobs.increment(chunked=n)`.
   - **Step 81** (KB delete): iterate the KB's sources and call `delete_source`; a `kb_id` index isn't needed for that.
 - Next: Step 60: Chunking golden tests
+
+### Step 60: Chunking golden tests  (2026-11-07)
+- Status: ✅ done
+- Built:
+  - `tests/unit/test_chunking_golden.py` → `TestChunkingGolden_S60`. **Snapshots of every fixture document type through the real ingest pipeline.** The fixture site is treated as one crawl job:
+    1. every HTML page and document is extracted and cleaned (what the engine stores);
+    2. the **job-level `BoilerplateIndex`** (Step 40) is built over all of them, hub page first;
+    3. each golden document is stripped, cleaned again (Step 45) and chunked with `StructureChunker`.
+  - Documents: 6 HTML pages (home, getting-started, configuration, API reference, blog post, Latin-1), the PDF, DOCX, PPTX and XLSX. Each is chunked at **two budgets**: the default settings, and a small one (60/160/20) that forces splitting. 20 golden files.
+  - Golden format `tests/fixtures/golden/chunks/<doc>.<budget>.txt`: a header (URL, title, budget, chunk count), then per chunk `=== chunk N | heading path | location | tokens ===`, the embed **context** and the **text**, so diffs read like a review.
+  - `tests/support/golden.py`: `assert_golden(path, actual, update=)` fails with a unified diff, or says the file is missing. The new root option `--update-golden` rewrites the files (root conftest plus `tests/README.md`).
+- Tests (24): the 20 snapshots, each also asserting the contract (dense ordinals, 0 < tokens ≤ cap, embed_text = context + text, no markers); determinism; **site chrome never reaches a chunk** (the boilerplate index is active and the cookie banner is gone); the helper's diff/missing behaviour; every fixture type covered.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1571 passed, 4 skipped (container) in 218 s.
+- Review of the snapshots (the point of the step):
+  - **Found**: per-page extraction keeps the cookie banner on the home page (trafilatura dropped it elsewhere). My first harness chunked pages on their own and indexed "We use cookies…" as the home page's first chunk. The fix was in the test: the real pipeline runs the cross-page strip before chunking, and the harness now does too. It also confirms that **Step 76 must run the strip** (index over the job's pages, then `strip()` → clean → chunk); chunking stored page Markdown directly would index site chrome.
+  - Everything else looked right: whole paragraphs, code and tables; tables a little over the target kept whole (pricing: 62 tokens at target 60); paragraph + code in one chunk at the default budget and separate at the small one; h1s that repeat the title are deduped from the context; PDF/PPTX/XLSX chunks carry their page/slide/sheet; Latin-1 decoded correctly.
+  - **Small sections stay small** (FAQ-like sections, slides), and I'm not adding section merging. The chunks are precise and carry exact locations, and the cost (more, shorter vectors) is small. Revisit only if Step 100's retrieval evaluation shows a problem.
+- **Phase G (Chunking, 55–60) is complete.**
+- Next: Step 61: Embedder framework

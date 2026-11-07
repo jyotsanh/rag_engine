@@ -1,0 +1,17 @@
+# https://acme.example/files/widget-spec.pdf
+# title: 'Widget Specification'
+# budget: target=400 max=800 overlap=60 context=100
+# chunks: 2
+
+=== chunk 0 | Widget Specification | location 1 | 48 tokens ===
+--- context ---
+Widget Specification
+--- text ---
+The WX-2048 widget is a modular sorter rated for 1200 items per minute. Operating temperature: -10 to 55 degrees Celsius. Power draw: 48 W nominal, 65 W peak during calibration.
+
+=== chunk 1 | Electrical Interface | location 2 | 49 tokens ===
+--- context ---
+Widget Specification
+Electrical Interface
+--- text ---
+The widget connects over a 24 V DC bus with an M12 A-coded connector. Pin 1 carries power, pin 3 is ground, pins 2 and 4 carry RS-485 data.
