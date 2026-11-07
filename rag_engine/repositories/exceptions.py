@@ -44,3 +44,8 @@ class KnowledgeBaseNameTakenError(ConflictError):
 class SourceNotFoundError(DocumentNotFoundError):
     code = "source_not_found"
     default_message = "Source not found"
+
+
+class PageNotFoundError(DocumentNotFoundError):
+    code = "page_not_found"
+    default_message = "Page not found"

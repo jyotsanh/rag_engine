@@ -6,6 +6,7 @@ from .boilerplate import (
     normalize_unit,
     split_blocks,
 )
+from .cleaning import CleanedText, TextCleaner, normalize_characters
 from .docx import DocxExtractor
 from .exceptions import (
     DocumentTooLargeError,
@@ -25,6 +26,7 @@ from .xlsx import XlsxExtractor, sheet_marker
 __all__ = [
     "BaseExtractor",
     "BoilerplateIndex",
+    "CleanedText",
     "DocumentTooLargeError",
     "DocumentUnreadableError",
     "DocxExtractor",
@@ -41,10 +43,12 @@ __all__ = [
     "PptxExtractor",
     "Sniffed",
     "StrippedMarkdown",
+    "TextCleaner",
     "UnsupportedContentError",
     "XlsxExtractor",
     "default_registry",
     "looks_like_text",
+    "normalize_characters",
     "normalize_unit",
     "page_marker",
     "sheet_marker",

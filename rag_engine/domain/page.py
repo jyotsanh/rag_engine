@@ -46,13 +46,21 @@ class Page(MongoDocument):
     content_type: str | None = Field(default=None, max_length=200)
     content_kind: ContentKind | None = None
     rendered_with: RenderedWith | None = None
+    js_signals: list[str] = Field(default_factory=list)  # JS-shell detector (Step 36)
+    render_note: str | None = Field(default=None, max_length=500)  # why a render wasn't used
+    extractor: str | None = Field(default=None, max_length=50)
     title: str | None = Field(default=None, max_length=1000)
+    description: str | None = Field(default=None, max_length=2000)
+    lang: str | None = Field(default=None, max_length=10)
+    doc_metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
     markdown: str | None = None
+    markdown_truncated: bool = False  # cut at PAGE_MAX_MARKDOWN_BYTES (Mongo's 16 MB limit)
     content_hash: Sha256Hex | None = None
     canonical_url: HttpUrlStr | None = None
     duplicate_of: PageId | None = None
     bytes_downloaded: NonNegativeInt = 0
-    fetch_ms: NonNegativeInt | None = None
+    fetch_ms: NonNegativeInt | None = None  # HTTP fetch + browser render
+    extract_ms: NonNegativeInt | None = None
     attempts: NonNegativeInt = 0
     fetched_at: datetime | None = None
 

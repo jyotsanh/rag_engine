@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 
 from rag_engine.crawling import CachedRobots
+from rag_engine.domain import ContentHashClaim
 from rag_engine.infrastructure import HealthCheck
 
 
@@ -45,3 +46,20 @@ class InMemoryRobotsStore:
     async def save_last_good(self, origin: str, entry: CachedRobots, ttl: float) -> None:
         self.last_good[origin] = entry
         self.ttls[("last_good", origin)] = ttl
+
+
+class InMemoryContentClaimStore:
+    """Satisfies `ContentClaimStore`. No await between lookup and insert: atomic on one loop."""
+
+    def __init__(self) -> None:
+        self.claims: dict[tuple[str, str], ContentHashClaim] = {}
+
+    async def claim(
+        self, job_id: str, content_hash: str, page_id: str, url: str
+    ) -> ContentHashClaim:
+        key = (job_id, content_hash)
+        if key not in self.claims:
+            self.claims[key] = ContentHashClaim(
+                job_id=job_id, content_hash=content_hash, page_id=page_id, url=url
+            )
+        return self.claims[key]

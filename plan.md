@@ -1346,3 +1346,94 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
 - Decisions/notes:
   - **Extraction phase (38–44) complete.** Location markers in Markdown are `<!-- page N -->` (PDF), `<!-- slide N -->` (PPTX) and `<!-- sheet N -->` (XLSX). **Step 56** must parse all three as location metadata, not content.
 - Next: Step 45: Text cleaning
+
+### Step 45: Text cleaning  (2026-11-07)
+- Status: ✅ done
+- Built: `rag_engine/extraction/cleaning.py` (exported from `rag_engine.extraction`)
+  - `TextCleaner(min_content_chars=, config).clean(markdown) -> CleanedText{markdown, content_chars, pruned_headings}`, or `EmptyContentError(detail="below_min_content")` (skipped, `empty_content`). **Idempotent**: it runs twice per page (see notes).
+  - `normalize_characters(line, code=False)`:
+    - **NFKC** outside code (ligatures, full-width forms, NBSP/thin/ideographic spaces → space).
+    - **Invisible characters removed**: ZWSP, word joiner, BOM, soft hyphen, U+180E, LRM/RLM and bidi embeddings/overrides/isolates (also the "Trojan source" trick). **ZWJ/ZWNJ kept**: they carry meaning in Persian, Indic scripts and emoji sequences.
+    - **Control characters removed everywhere** (C0 except tab/newline, DEL, C1). Inside code only controls go; tabs, NBSP and ligatures stay.
+  - Lines: CRLF/CR → LF; outside fences, inner whitespace runs → one space while **leading indentation is kept** (list nesting, tabs → 4 spaces), trailing whitespace stripped. **Code fences untouched** (blank lines, tabs, spacing), including an unterminated fence through to the end.
+  - Structure:
+    - Empty list items and all-blank table body rows dropped (separator rows like `|---|:---:|` kept).
+    - **Empty sections pruned**: a heading goes when no content follows before the next heading of the same or a higher level. A parent whose subsections have content stays. Page markers don't end a section (a heading at the bottom of a PDF page with its text on the next is kept).
+    - **Location markers** (`<!-- page|slide|sheet N -->`, other standalone comments) are kept only if a kept block follows before the next marker. This runs as a second pass after headings, so a kept heading never appears to move to the previous page.
+    - Blocks are rejoined with one blank line (via Step 40's `split_blocks`).
+  - **Min content**: letters/digits in content blocks (headings and markers excluded) < `CLEAN_MIN_CONTENT_CHARS` → `EmptyContentError`.
+- Settings: `CLEAN_MIN_CONTENT_CHARS` (**20**). It's deliberately low, aimed at "Loading…" shells and empty listings rather than quality. The fixture's `/flaky` page ("All widget lines operational.", ~25 chars), which Step 54 expects to succeed, must pass. `.env.example` updated.
+- Tests: `TestTextCleaning_S45` (27, unit):
+  - Characters: 7 normalization cases (ligature, full-width, compatibility spaces, zero-width, soft hyphen, bidi, controls); ZWNJ (Persian) and ZWJ (emoji) kept; code keeps NBSP/ligature/tab but loses controls.
+  - Whitespace and code: collapse outside code with list indentation kept and CRLF handled; code block byte-identical; an unterminated fence protects the rest.
+  - Structure: empty list items and blank table rows; pruning hierarchy (4 headings pruned, parent kept); a heading with only code kept; blank-page markers pruned; **a heading continued on the next page keeps its page marker**.
+  - Min content: 5 below-threshold inputs → `empty_content` skip; headings and markers don't count; threshold from settings.
+  - Idempotence and fixtures: idempotent on messy input; **every fixture document (all HTML pages except the SPA shell, plus PDF, DOCX, PPTX, XLSX) extracts, cleans, and is unchanged by a second clean**; **ingest order on the whole fixture site** (Step 40 boilerplate strip → clean) removes the cookie banner and the home page's empty link-list headings while the content stays.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1233 passed, 4 skipped (container) in 147 s.
+  - One earlier full run (load average ~39 from other processes, 401 s) failed `TestJsShellDetector_S33::test_every_static_fixture_page_but_the_spa_is_not_a_shell`. It passed alone right after, and the run meant to capture its error was cut off by a machine reboot. It has passed in the full suite since. The cause is **unconfirmed** (most likely load-related); watch for a repeat.
+- Decisions/notes:
+  - **Where it runs** (twice, which is why it's idempotent):
+    1. **During the crawl** (Step 50: extract → **clean** → dedupe), so empty pages are skipped early and Step 46 hashes clean text.
+    2. **At ingest** after Step 40's boilerplate strip, which can empty sections or whole pages.
+  - Indented (4-space, unfenced) code blocks get inner whitespace collapsed. All our extractors emit fenced code, so this only matters for hand-written Markdown.
+- Next: Step 46: Content dedupe
+
+### Step 46: Content dedupe  (2026-11-07)
+- Status: ✅ done
+- Built:
+  - `rag_engine/crawling/dedupe.py` (exported from `rag_engine.crawling`):
+    - `content_hash(markdown)`: sha256 hex of the **cleaned** Markdown (Step 45), surrounding whitespace ignored. This is `Page.content_hash`.
+    - `ContentDeduper(job_id, scope, store, config).check(page_id=, url=, markdown=, depth=, canonical_url=, aliases=) -> DedupeDecision{outcome, content_hash, canonical_url, duplicate_of, duplicate_of_url}`, with `page_status`/`reason` properties that map straight onto `Page`:
+      1. **canonical_elsewhere** → `skipped`/`canonical_elsewhere`. The page's normalized canonical (Step 32) is **in scope** (`scope.check` at the page's depth) and is not the page itself. **"Itself" = final URL + `aliases`** (requested URL, redirect chain), so "A redirects to B, B's canonical is A" never skips the only copy. Its hash is **not claimed**, so the canonical target claims it when fetched (the engine enqueues `canonical_url`). Out-of-scope, unparseable or self canonicals are ignored, so content is kept.
+      2. **duplicate** → status `duplicate`, `duplicate_of` = the original page id (plus its URL): another page of this job already claimed the hash.
+      3. **unique** → `succeeded`: this page owns the hash and is the one to chunk/embed. Re-checking the owner (a resumed job) is unique again (idempotent).
+    - `ContentClaimStore` protocol (one `claim()` method), satisfied by the repository below and by `tests/support/fakes.py::InMemoryContentClaimStore`.
+  - `rag_engine/domain/content_claim.py` → `ContentHashClaim` (collection `content_hash_claims`, prefix `chc`, fields `job_id/content_hash/page_id/url`). **Unique index `(job_id, content_hash)`** makes "first page wins" atomic across concurrent fetches and crash-safe on resume. A **TTL index** on `created_at` (`CLAIM_TTL_SECONDS` = 30 days) is the safety net for jobs that never finalize. It is registered, so startup's `ensure_indexes` creates both.
+  - `rag_engine/repositories/content_claims.py` → `ContentClaimRepository.claim(job_id, hash, page_id, url) -> owner claim` (find, else insert; on a duplicate-key race read the winner; retry once if it vanished) and `release_job(job_id)` (finalize cleanup).
+- Settings: `CRAWL_RESPECT_CANONICAL` (true). With false, the canonical is still recorded on the decision but never skips. `.env.example` updated.
+- Tests:
+  - `TestContentDedupe_S46` (18, unit, in-memory store):
+    - Hashing.
+    - Duplicates: first unique/second duplicate with status mapping; owner re-check idempotent; jobs isolated; **20 concurrent checks → exactly one original**.
+    - Canonical: canonical elsewhere skips **without claiming** (the target is then unique); 6 non-elsewhere canonicals (self, self with tracking/case/port/fragment, redirect alias, out of scope, invalid, none); a canonical outside the path prefix is ignored; respect disabled.
+    - Every outcome produces a **valid `Page` record** (model validators pass).
+    - **Fixture site**: real extraction → cleaning → `LinkExtractor` canonical → dedupe gives exactly `SITE_PAGES`/`EXPECTED_PAGE_OUTCOME` for `dup-b.html` (duplicate of dup-a) and `canonical-variant.html` (`canonical_elsewhere`), and getting-started is unique.
+  - `TestContentClaims_S46` (6, integration, real MongoDB): first claim wins; **25 concurrent claims → one owner, one document**; owner re-claim returns the same document; jobs isolated and released separately; unique + TTL indexes exist; `ContentDeduper` on the repository (10 concurrent pages → 1 unique, 9 duplicates).
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1257 passed, 4 skipped (container) in 148 s.
+- Decisions/notes:
+  - **Step 50 (engine)** per page: extract → clean (45) → `deduper.check(...)` with `aliases=(requested_url, *redirect_chain)` → persist the page with `status/reason/duplicate_of/content_hash/canonical_url`. On `canonical_elsewhere`, enqueue `decision.canonical_url` (frontier dedupes it). Only `unique` pages keep their Markdown for chunking.
+  - **Finalize (Step 49 state machine / maintenance)** calls `ContentClaimRepository.release_job(job_id)`.
+  - First claim wins. With hub/shallow-first crawl order (Step 48), originals tend to be the better-linked URLs. Only exact duplicates of cleaned Markdown are caught; near-duplicates (e.g. a differing "last updated" line) are a known gap.
+- Next: Step 47: Page repository
+
+### Step 47: Page repository  (2026-11-07)
+- Status: ✅ done
+- Built:
+  - `Page` model (`domain/page.py`) gained the fields earlier steps deferred here:
+    - `js_signals` and `render_note` (Step 36)
+    - `extractor`, `description`, `lang`, `doc_metadata` (scalar dict) from `ExtractedDocument`
+    - `markdown_truncated`, and the `extract_ms` timing (`fetch_ms` covers fetch + render)
+    - Existing: the `(job_id, url_hash)` unique index `job_url_unique` and the `(job_id, status, _id)` index `job_status`.
+  - `rag_engine/repositories/pages.py`:
+    - `PageOutcome` (frozen dataclass, kw-only): every outcome field. `changes()` writes **all** of them, so unset fields are **cleared**. Re-recording a retried page can't leave a stale `reason`, and a skip after a success drops the old Markdown. `reason_detail` is capped at 500.
+    - `truncate_markdown(md, max_bytes)`: cuts at the last `\n\n` block boundary within the UTF-8 byte cap, never splitting a multi-byte character, and flags it.
+    - `PageRepository(db, config)`:
+      - **Discovery**: `add_discovered(page) -> (page, created)` is race-safe; a repeat returns the existing page. `add_many_discovered(pages) -> inserted` is an unordered bulk insert where duplicate-key errors (known or repeated-in-batch URLs) count as "already there" and any other write error raises `DatabaseUnavailableError`.
+      - `get_by_url_hash(job_id, url_hash)`.
+      - **Outcomes**: `record_outcome(page_id, PageOutcome) -> Page` goes through `BaseRepository.update`, so the merged document is **validated by the `Page` consistency rules first** (`AppValidationError`, page untouched). Markdown over `PAGE_MAX_MARKDOWN_BYTES` is truncated and flagged.
+      - **Reads**: `count_by_status(job_id)` and `count_by_reason(job_id)` (aggregations, for Step 53's summary); `iter_succeeded(job_id, batch_size)` streams succeeded pages in **discovery order** (time-ordered `_id`; Step 40's keeper order at ingest); `list_for_job(tenant_id, job_id, status=, reason=, limit, cursor)` is keyset-paginated oldest first and **tenant-scoped** (API).
+      - `delete_job(job_id)`.
+  - `PageNotFoundError` (`page_not_found`).
+- Settings: `PAGE_MAX_MARKDOWN_BYTES` (4 MiB, ≤ 12 MiB; MongoDB's 16 MB document limit). `.env.example` updated.
+- Also: `tests/unit/test_dedupe.py` builds its `Page` with explicit kwargs. ty rejected the `**{...}` unpack once `Page` gained a dict-typed field.
+- Tests:
+  - `TestPageOutcome_S47` (9, unit): every field written and cleared; `reason_detail` cap; oversized Markdown truncated on a paragraph and flagged; 6 truncation cases (none, short, exactly at the cap, block boundary at 10 vs 9 bytes, no boundary, multi-byte safety).
+  - `TestPageRepository_S47` (19, integration, real MongoDB):
+    - Discovery: idempotent `add_discovered`; same URL in another job is new; bulk insert skips known and in-batch repeats; **20 concurrent discoveries of one URL → one page**.
+    - Outcomes: success round-trips every field; **retry success clears the earlier failure**; skip clears earlier content; duplicate outcome; 4 inconsistent outcomes rejected with the page untouched; oversized Markdown stored truncated.
+    - Reads: counts by status and reason (other job excluded); `iter_succeeded` in discovery order across batches; `list_for_job` pagination, status/reason filters and **tenant isolation**; `delete_job`; indexes.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1285 passed, 4 skipped (container) in 150 s.
+- Decisions/notes:
+  - **Step 48 (frontier)** claims `QUEUED` pages with `find_one_and_update` (sets `IN_PROGRESS`, increments `attempts`, sets a lease time) and needs a claim index plus priority fields (`discovered_via`, depth). Those belong to Step 48, together with the claim query they serve.
+  - The engine (Step 50) builds `PageOutcome`s from `FetchResult` + `ExtractedDocument` + `DedupeDecision`. The repository stays free of crawling imports.
+- Next: Step 48: Frontier

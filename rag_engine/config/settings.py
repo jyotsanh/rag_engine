@@ -163,6 +163,12 @@ class Settings(BaseSettings):
     XLSX_MAX_SHEETS: int = Field(default=50, gt=0)
     XLSX_MAX_ROWS: int = Field(default=2_000, gt=0)
     XLSX_MAX_COLS: int = Field(default=50, gt=0)
+    # cleaned pages with fewer letters/digits than this (headings and markers excluded) are
+    # skipped as empty_content; catches "Loading…" shells and empty listings, not quality
+    CLEAN_MIN_CONTENT_CHARS: int = Field(default=20, ge=0)
+    # stored Markdown per page; larger documents are cut at a block boundary and flagged
+    # (MongoDB documents max out at 16 MB, and the page row carries more than Markdown)
+    PAGE_MAX_MARKDOWN_BYTES: int = Field(default=4 * 1024 * 1024, gt=0, le=12 * 1024 * 1024)
     # wall-clock cap per extracted document (a parser thread over the cap finishes unobserved)
     EXTRACTION_TIMEOUT_SECONDS: float = Field(default=120.0, gt=0)
     # robots.txt Crawl-delay is honoured up to this; a larger value would stall the job
@@ -181,6 +187,8 @@ class Settings(BaseSettings):
     CRAWL_RETRY_AFTER_MAX_SECONDS: float = Field(default=120.0, ge=0)
     # skip links marked rel="nofollow" (and every link on meta/X-Robots-Tag nofollow pages)
     CRAWL_RESPECT_NOFOLLOW: bool = True
+    # skip pages whose rel=canonical points to another in-scope URL (that URL is crawled)
+    CRAWL_RESPECT_CANONICAL: bool = True
     # link candidates considered per page; link farms beyond this are cut (and flagged)
     CRAWL_MAX_LINKS_PER_PAGE: int = Field(default=5_000, gt=0, le=100_000)
     # re-render HTML in headless Chromium: auto (JS-shell detector) / always / never

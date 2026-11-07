@@ -1,3 +1,10 @@
+from .dedupe import (
+    ContentClaimStore,
+    ContentDeduper,
+    DedupeDecision,
+    DedupeOutcome,
+    content_hash,
+)
 from .fetchers import RawFetcher
 from .js_shell import (
     JsShellDetector,
@@ -78,7 +85,11 @@ __all__ = [
     "TRACKING_PREFIXES",
     "CachedRobots",
     "Classification",
+    "ContentClaimStore",
+    "ContentDeduper",
     "CrawlScope",
+    "DedupeDecision",
+    "DedupeOutcome",
     "DomainRateLimiter",
     "FailureKind",
     "JsShellDetector",
@@ -115,6 +126,7 @@ __all__ = [
     "call_with_retries",
     "canonical_from_link_header",
     "classify",
+    "content_hash",
     "inflate",
     "normalize_and_hash",
     "normalize_url",

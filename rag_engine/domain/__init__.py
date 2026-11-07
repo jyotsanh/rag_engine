@@ -1,6 +1,7 @@
 from .api_key import ApiKey
 from .base import MongoDocument, new_id, registered_documents, utc_now
 from .chunk import Chunk
+from .content_claim import CLAIM_TTL_SECONDS, ContentHashClaim
 from .enums import (
     ACTIVE_JOB_STATUSES,
     TERMINAL_JOB_STATUSES,
@@ -21,10 +22,12 @@ from .tenant import TENANT_NAME_COLLATION, Tenant, TenantQuotas
 
 __all__ = [
     "ACTIVE_JOB_STATUSES",
+    "CLAIM_TTL_SECONDS",
     "TENANT_NAME_COLLATION",
     "TERMINAL_JOB_STATUSES",
     "ApiKey",
     "Chunk",
+    "ContentHashClaim",
     "ContentKind",
     "CrawlConfig",
     "CrawlJob",
