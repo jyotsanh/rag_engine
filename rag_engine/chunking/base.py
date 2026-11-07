@@ -5,7 +5,8 @@ heading path). Everything every strategy must get right lives in the final `chun
 
 - blank lines around a piece are trimmed (indentation is kept: code) and empty pieces dropped;
 - ordinals are dense, in document order, from 0;
-- `embed_text` comes from one hook (`embed_text`, finalized by Step 58);
+- `embed_text` = bounded context (page title + heading path, Step 58) + the text, from one
+  hook (`embed_text`); `text` stays clean for display;
 - `token_count` is counted on `embed_text`, the string the embedder receives, with the
   model's tokenizer (`Tokenizer`, tiktoken in Step 57), so embedding batches can be packed
   by token budget (Step 62) without recounting;
@@ -24,11 +25,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import ClassVar, Protocol
 
+from rag_engine.chunking.context import build_context, compose_embed_text
 from rag_engine.chunking.exceptions import ChunkTooLargeError, TokenizerError
 from rag_engine.config import Settings, settings
 from rag_engine.domain import Chunk, ContentKind, Page, PageStatus
 
 MAX_HEADING_DEPTH = 12  # `Chunk.heading_path` limit
+DEFAULT_CONTEXT_TOKENS = 100  # mirrors the CHUNK_CONTEXT_MAX_TOKENS default
 
 
 class Tokenizer(Protocol):
@@ -45,12 +48,24 @@ class ChunkingConfig:
     target_tokens: int  # the splitter's aim for a chunk's text (Step 57)
     max_tokens: int  # hard cap on a chunk's embedded text
     overlap_tokens: int  # carried over between consecutive prose chunks (Step 57)
+    # cap on the embed-text context (title + heading path, Step 58); None: the default,
+    # min(DEFAULT_CONTEXT_TOKENS, max_tokens - target_tokens)
+    context_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if not 0 < self.target_tokens <= self.max_tokens:
             raise ValueError("need 0 < target_tokens <= max_tokens")
         if not 0 <= self.overlap_tokens < self.target_tokens:
             raise ValueError("need 0 <= overlap_tokens < target_tokens")
+        room = self.max_tokens - self.target_tokens
+        if self.context_tokens is None:
+            object.__setattr__(self, "context_tokens", min(DEFAULT_CONTEXT_TOKENS, room))
+        elif not 0 <= self.context_tokens <= room:
+            raise ValueError("need 0 <= context_tokens <= max_tokens - target_tokens")
+
+    @property
+    def context_budget(self) -> int:
+        return self.context_tokens or 0
 
     @classmethod
     def from_settings(cls, config: Settings = settings) -> ChunkingConfig:
@@ -58,6 +73,7 @@ class ChunkingConfig:
             target_tokens=config.CHUNK_TARGET_TOKENS,
             max_tokens=config.CHUNK_MAX_TOKENS,
             overlap_tokens=config.CHUNK_OVERLAP_TOKENS,
+            context_tokens=config.CHUNK_CONTEXT_MAX_TOKENS,
         )
 
 
@@ -161,9 +177,18 @@ class BaseChunker(ABC):
     def split(self, source: ChunkInput) -> Iterable[ChunkPiece]:
         """Cut the page into pieces, in document order. Empty pieces are dropped later."""
 
+    def context(self, source: ChunkInput, heading_path: tuple[str, ...]) -> str:
+        """The bounded title + heading-path lines put in front of a chunk's text."""
+        return build_context(
+            source.title,
+            heading_path,
+            tokenizer=self.tokenizer,
+            max_tokens=self.config.context_budget,
+        )
+
     def embed_text(self, source: ChunkInput, piece: ChunkPiece, text: str) -> str:
-        """The string the embedder receives for a piece (Step 58 adds the context)."""
-        return text
+        """The string the embedder receives for a piece: context + blank line + text."""
+        return compose_embed_text(self.context(source, piece.heading_path), text)
 
     def chunk(self, source: ChunkInput) -> list[ChunkDraft]:
         drafts: list[ChunkDraft] = []

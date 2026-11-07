@@ -131,6 +131,9 @@ class Settings(BaseSettings):
     CHUNK_MAX_TOKENS: int = Field(default=800, gt=0, le=8000)
     # tokens of the previous chunk repeated at the start of the next (prose only, Step 57)
     CHUNK_OVERLAP_TOKENS: int = Field(default=60, ge=0)
+    # cap on the context put in front of each chunk's embedded text (page title + heading
+    # path, Step 58); 0 disables it. Must fit what the cap leaves above the target
+    CHUNK_CONTEXT_MAX_TOKENS: int = Field(default=100, ge=0)
 
     # ---- reranker ---- #
     ACTIVE_RERANKER: RerankerType = RerankerType.CROSS_ENCODER
@@ -277,6 +280,10 @@ class Settings(BaseSettings):
             raise ValueError("CHUNK_TARGET_TOKENS must be <= CHUNK_MAX_TOKENS")
         if self.CHUNK_OVERLAP_TOKENS >= self.CHUNK_TARGET_TOKENS:
             raise ValueError("CHUNK_OVERLAP_TOKENS must be < CHUNK_TARGET_TOKENS")
+        if self.CHUNK_CONTEXT_MAX_TOKENS > self.CHUNK_MAX_TOKENS - self.CHUNK_TARGET_TOKENS:
+            raise ValueError(
+                "CHUNK_CONTEXT_MAX_TOKENS must be <= CHUNK_MAX_TOKENS - CHUNK_TARGET_TOKENS"
+            )
         if self.CRAWL_CANCEL_FLAG_TTL_SECONDS < self.CRAWL_MAX_JOB_SECONDS:
             raise ValueError("CRAWL_CANCEL_FLAG_TTL_SECONDS must be >= CRAWL_MAX_JOB_SECONDS")
         if self.CRAWL_MAX_PAGE_BYTES > self.CRAWL_MAX_TOTAL_BYTES:

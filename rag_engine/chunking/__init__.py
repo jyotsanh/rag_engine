@@ -8,6 +8,7 @@ from .base import (
     Tokenizer,
     content_hash,
 )
+from .context import build_context, compose_embed_text
 from .exceptions import (
     ChunkerRegistrationError,
     ChunkingError,
@@ -47,6 +48,8 @@ __all__ = [
     "Tokenizer",
     "TokenizerError",
     "UnknownChunkerError",
+    "build_context",
+    "compose_embed_text",
     "content_hash",
     "get_chunker",
     "parse_markdown",

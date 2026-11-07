@@ -1799,3 +1799,30 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 95**: bake the tiktoken cache (`TIKTOKEN_CACHE_DIR`) into the images.
   - **Step 76**: chunk with `get_chunker(tokenizer_for(kb.embedding_model))`.
 - Next: Step 58: Contextual embed text
+
+### Step 58: Contextual embed text  (2026-11-07)
+- Status: ✅ done
+- Built: `rag_engine/chunking/context.py` (`build_context`, `compose_embed_text`, exported), wired into **`BaseChunker`**, so every strategy gets it.
+  - `BaseChunker.context(source, heading_path)` builds the context. The default `embed_text` hook returns `context + "\n\n" + text`, or just the text when there's no context. **`text` stays clean** for display.
+    ```
+    Install guide | Acme Widgets      <- page title
+    Getting started > Linux           <- heading path, outermost first (" > ")
+
+    Run the installer.                <- chunk text
+    ```
+  - **Title repeats are dropped**: a leading heading equal to the title, or to one whole part of it, is not repeated. The comparison is case/space-insensitive, and parts are split on `|`, `:`, `·` or a *spaced* hyphen/en/em dash, so a hyphen inside "WX-2048" never splits.
+  - **Bounded** by `ChunkingConfig.context_tokens`. Over budget, it collapses the middle of a deep path to `first > … > last`, then shortens the title to word boundaries with "…", then shortens the headings, then falls back to the title alone, else nothing. A budget of 0 disables the context.
+  - `ChunkingConfig.context_tokens` defaults to `min(100, max - target)`, and the validator requires ≤ max − target. So the context can never squeeze the chunk text below the target, and Step 57's reservation always leaves room for a full target-sized chunk.
+- Settings: `CHUNK_CONTEXT_MAX_TOKENS` (100, ≥ 0, ≤ `CHUNK_MAX_TOKENS − CHUNK_TARGET_TOKENS`). `.env.example` updated.
+- Tests: `TestContextualEmbedText_S58` (26, unit, real tiktoken):
+  - Format; missing title, path or blank headings; 8 title-repeat cases (including the WX-2048 hyphen and a partial-phrase non-match).
+  - Budget: a deep path collapses its middle first, a long title is shortened with "…", long headings are shortened, budget 0 is off, and **200 random title/path/budget combinations always fit**.
+  - In the chunker: exact embed vs display text with the h1 dedupe; `token_count` == tokens of embed_text; the same text in different sections gets different hashes; no title or headings → embed_text == text; long headings and title never break the cap; the stored `Chunk` keeps both texts.
+  - Config default/derived/explicit/validation; settings validation.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1538 passed, 4 skipped (container) in 212 s. The Step 55/57 tests needed no changes.
+- Decisions/notes:
+  - `content_hash` covers the context too, so identical text under different headings is embedded and cached separately (Step 64), which is correct because the vectors differ.
+  - No location ("page 3") goes into the context: the embedder gains little from it. It stays in `Chunk.page_number` for citations.
+  - **Step 59**: persist with `draft.to_document(source)`; both texts are already on the draft.
+  - **Step 60** (golden tests): snapshot `embed_text` as well as `text`, so changes to the context format show up.
+- Next: Step 59: Chunk persistence
