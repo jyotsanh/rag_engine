@@ -1763,3 +1763,39 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 57**: when splitting, re-emit `header` (+ `footer`) around each slice of `parts`. For an unclosed fence, close it with the opening fence's backticks/tildes.
   - **Step 58**: `heading_path` is plain text ready for the embed-text prefix. `heading_markdown` is available if `text` should show the heading line.
 - Next: Step 57: Token-aware splitter
+
+### Step 57: Token-aware splitter  (2026-11-07)
+- Status: ✅ done
+- Built:
+  - `rag_engine/chunking/tokenizer.py`:
+    - `TiktokenTokenizer(encoding)` implements `Tokenizer` and adds `encode`/`decode`. Special-token text on a page (`<|endoftext|>`) is counted as plain text, the way the embeddings API counts it.
+    - `tokenizer_for(model)` returns **one shared instance per encoding**, from `EmbeddingModelSpec.tokenizer_encoding` (`cl100k_base` for both 3-series models). An unknown model raises `UnsupportedEmbeddingModelError`.
+  - `rag_engine/chunking/structure_chunker.py`: **`StructureChunker`**, registered as `ChunkerType.STRUCTURE`, so `get_chunker(tokenizer)` now works with the default settings. `sentences()` is exported. Per section of the Step 56 parse:
+    1. **Units**:
+       - A block that fits is one unit, so paragraphs, tables, code and lists stay whole.
+       - A prose block over the target is cut **sentences → lines → words → characters**, recursively, until each piece fits the cap. Characters are cut by a binary search on the token count, which handles e.g. a base64 blob.
+       - An **atomic** block is cut only when it's over the cap, and then along its parser `parts`: a table by rows with the header and separator repeated on every piece; fenced code by lines re-wrapped in the original fence (an unclosed fence gets a matching closing fence; an over-long line is cut inside the fence); indented code by lines; a list by top-level items (an item over the cap falls back to prose cutting).
+       - Pathological wrappers (a header or fence that leaves no room) fall back to prose cutting.
+    2. **Packing**: greedy up to `target_tokens`. An atomic block between the target and the cap becomes its own chunk. **Sections are never merged** (one heading path per chunk), and a heading-only section yields no chunk.
+    3. **Overlap**: only where a cut falls **inside a prose block**. The next chunk starts with the previous chunk's last whole sentences, up to `overlap_tokens`, and only if that doesn't push it over the cap. Block, paragraph and section boundaries are never overlapped, and neither is atomic content.
+    - **Budgets**: the target is measured on `text`. The cap reserves the room the `embed_text` context takes for the section (measured through the `embed_text` hook), so text + context ≤ `max_tokens` holds by construction. If the context alone is over the cap, it raises `ChunkingError`.
+    - `page_number` = the location of a chunk's first own (non-overlap) unit, else the section's. Heading lines aren't repeated in `text`.
+    - `sentences()` handles common abbreviations (e.g., i.e., etc., Fig., Mr., months, …), initials, decimals, closing quotes/brackets, ellipses and the CJK full stops. Its regexes use `\u` escapes (ruff RUF001).
+- Deps: **`tiktoken` 0.14.0** (runtime; nothing else in the lock). The first use downloads the encoding (~4 s) into `TIKTOKEN_CACHE_DIR` (default: the system temp dir).
+- Tests: `TestTokenAwareSplitter_S57` (24, unit, real tiktoken):
+  - Tokenizer: counts match cl100k_base, round trip, shared instance, unknown model, special-token text.
+  - Structure is the default chunker; the sentence cases.
+  - Sections and packing: small sections one chunk each with no headings in the text; paragraphs packed ≤ target, whole, in order, no duplication; long prose split at sentences with whole-sentence overlap ≤ budget and nothing lost; no overlap across blocks or sections; overlap off.
+  - Atomic blocks: a table between target and cap stays whole; an oversized table repeats its header with every row exactly once; oversized code stays fenced with indentation intact; an unclosed `~~~~` gets closed; a list splits between items.
+  - Last resorts: unpunctuated lines split by line; a 3000-char blob cut by characters and losslessly rejoined.
+  - Budgets and locations: a long context prefix is reserved under the cap; chunks carry their first block's page.
+  - 25 seeded random documents: ordinals dense, every chunk within 0 < tokens ≤ cap, every source word kept.
+  - The 4 fixture document types chunk within the default budget, with no markers leaking and page numbers exactly for PDF/PPTX/XLSX.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1512 passed, 4 skipped (container) in 207 s.
+- Decisions/notes:
+  - Overlap is limited to cuts inside a block on purpose: overlapping across a paragraph boundary duplicated whole short paragraphs into the next chunk, which costs embedding tokens and adds near-duplicate results for no lost context.
+  - Small sections stay small chunks (an FAQ entry, a slide): better precision and exact locations. Step 60's golden tests will show whether merging tiny sibling sections is worth adding.
+  - **Step 58**: override `embed_text` (title + heading path + text). The splitter already reserves its room. Keep the context bounded (e.g. cut long titles/paths) so `_limit` never goes below a useful size.
+  - **Step 95**: bake the tiktoken cache (`TIKTOKEN_CACHE_DIR`) into the images.
+  - **Step 76**: chunk with `get_chunker(tokenizer_for(kb.embedding_model))`.
+- Next: Step 58: Contextual embed text

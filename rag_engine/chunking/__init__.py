@@ -24,6 +24,8 @@ from .markdown_parser import (
     Section,
     parse_markdown,
 )
+from .structure_chunker import StructureChunker, sentences  # registers ChunkerType.STRUCTURE
+from .tokenizer import TiktokenTokenizer, tokenizer_for
 
 __all__ = [
     "MAX_HEADING_DEPTH",
@@ -40,6 +42,8 @@ __all__ = [
     "MarkdownParser",
     "ParsedDocument",
     "Section",
+    "StructureChunker",
+    "TiktokenTokenizer",
     "Tokenizer",
     "TokenizerError",
     "UnknownChunkerError",
@@ -48,4 +52,6 @@ __all__ = [
     "parse_markdown",
     "register_chunker",
     "registered_chunkers",
+    "sentences",
+    "tokenizer_for",
 ]
