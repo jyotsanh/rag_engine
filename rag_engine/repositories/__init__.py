@@ -6,6 +6,9 @@ from .exceptions import (
     DocumentNotFoundError,
     DuplicateDocumentError,
     InvalidCursorError,
+    InvalidJobTransitionError,
+    JobNotFoundError,
+    JobRunSupersededError,
     KnowledgeBaseNameTakenError,
     KnowledgeBaseNotFoundError,
     PageNotFoundError,
@@ -13,6 +16,7 @@ from .exceptions import (
     TenantNameTakenError,
     TenantNotFoundError,
 )
+from .jobs import JobRepository
 from .knowledge_bases import KnowledgeBaseRepository
 from .pages import PageOutcome, PageRepository, truncate_markdown
 from .pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, Page, SortOrder
@@ -31,6 +35,10 @@ __all__ = [
     "DuplicateDocumentError",
     "Filter",
     "InvalidCursorError",
+    "InvalidJobTransitionError",
+    "JobNotFoundError",
+    "JobRepository",
+    "JobRunSupersededError",
     "KnowledgeBaseNameTakenError",
     "KnowledgeBaseNotFoundError",
     "KnowledgeBaseRepository",

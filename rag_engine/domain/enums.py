@@ -29,9 +29,30 @@ class JobStatus(StrEnum):
     def is_terminal(self) -> bool:
         return self in TERMINAL_JOB_STATUSES
 
+    def can_become(self, target: JobStatus) -> bool:
+        return target in JOB_TRANSITIONS[self]
+
 
 TERMINAL_JOB_STATUSES = frozenset({JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED})
 ACTIVE_JOB_STATUSES = frozenset(set(JobStatus) - TERMINAL_JOB_STATUSES)
+
+# The job state machine (Step 49). Anything not listed is refused.
+JOB_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
+    # a worker picks it up; it can fail before starting (e.g. its source was deleted) or be
+    # cancelled outright, since nothing has been written yet
+    JobStatus.QUEUED: frozenset({JobStatus.RUNNING, JobStatus.FAILED, JobStatus.CANCELLED}),
+    # crawl done → finalize; failed; cancelled once in-flight pages drained (Step 52);
+    # back to queued when its worker died (stale heartbeat, Step 80): the frontier resumes
+    JobStatus.RUNNING: frozenset(
+        {JobStatus.FINALIZING, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.QUEUED}
+    ),
+    # swapping the active version (Step 78) is not cancellable: it either completes or fails
+    # (keeping the old version); a worker dying mid-swap requeues it to finalize again
+    JobStatus.FINALIZING: frozenset({JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.QUEUED}),
+    JobStatus.SUCCEEDED: frozenset(),
+    JobStatus.FAILED: frozenset(),
+    JobStatus.CANCELLED: frozenset(),
+}
 
 
 class PageStatus(StrEnum):
@@ -98,6 +119,7 @@ class RenderedWith(StrEnum):
 
 __all__ = [
     "ACTIVE_JOB_STATUSES",
+    "JOB_TRANSITIONS",
     "TERMINAL_JOB_STATUSES",
     "ContentKind",
     "DiscoveredVia",

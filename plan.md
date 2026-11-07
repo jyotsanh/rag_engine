@@ -1470,3 +1470,37 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 80 (crash recovery task)** requeues the job with a new run id; the new run's `recover()` does the page side.
   - Mutual canonicals (A → B, B → A both skipped, found in Step 46's review) are still open for Step 50.
 - Next: Step 49: CrawlJob repository + state machine
+
+### Step 49: CrawlJob repository + state machine  (2026-11-07)
+- Status: ✅ done
+- Built:
+  - **State machine** `JOB_TRANSITIONS` (`domain/enums.py`, plus `JobStatus.can_become()`):
+    - `queued → running | failed | cancelled`
+    - `running → finalizing | failed | cancelled | queued` (queued = its worker died, Step 80)
+    - `finalizing → succeeded | failed | queued`. **Not cancellable**: the version swap (Step 78) completes or fails, never half-cancels.
+    - Terminal statuses have no exits; success is reachable only through finalizing.
+  - `CrawlJob` gained `run_id` (the worker run holding it, also the frontier's `run_id` from Step 48). New invariant: a running/finalizing job has `run_id` and `started_at`.
+  - `rag_engine/repositories/jobs.py` → `JobRepository(db, clock=)`:
+    - **Transitions**: each one is a single conditional `find_one_and_update` on the allowed source statuses, so racing transitions can't both win. `start(job, run_id)` (pipeline update: `attempts + 1`, `started_at` kept from the first start, `heartbeat_at`, `run_id` set via `$literal`); `begin_finalizing`, `succeed`, `cancel` (worker, after draining); `fail(job, JobError, run_id=None)` (worker with its run, or system code without one: a job that never started, or Step 80 giving up); `requeue(job, stale_run_id=)` (Step 80). A pending cancel request makes `requeue` **cancel** a running job instead, since its worker is gone and there's nothing to drain.
+    - **Run ownership**: after `start`, everything (heartbeat, counters, usage, finalize, finish, cancel) is guarded on `run_id`. A run whose job was requeued to another run, finished or cancelled gets `JobRunSupersededError` (409 `job_run_superseded`) and must stop. A transition that's wrong for the current status raises `InvalidJobTransitionError` (409 `invalid_job_transition`, details `from`/`to`). `JobNotFoundError` (404 `job_not_found`).
+    - `request_cancel(tenant_id, job)` (API): queued → `cancelled` at once; running → `cancel_requested_at` flagged (first time kept) for the worker to see; already cancelled → no-op; finalizing/finished → `InvalidJobTransitionError`. Tenant-scoped.
+    - **Counters**: `increment(job, run, **deltas)` is one atomic `$inc` (names checked against `JobCounters`, deltas ≥ 0, all-zero is a read). It's allowed while running **and finalizing**, since ingest may still be embedding, and refused once finished. `set_counters(job, run, JobCounters)` overwrites them for reconciling. `add_usage(job, run, requests=, tokens=)` for embedding usage.
+    - `heartbeat(job, run)` sets `heartbeat_at` and returns the job, so the worker sees `cancel_requested_at`. `find_stale(heartbeat_before, limit)` lists held jobs with an old heartbeat (status+heartbeat index), for Step 80.
+    - Reads: `get_for_tenant`, `list_for_tenant(status=, source_id=, limit, cursor)` (newest first, keyset).
+- Tests:
+  - `TestJobStateMachine_S49` (43, unit): the table equals the documented edge set; `can_become` over all 36 pairs; terminal final / every active status can fail; finalizing not cancellable; success only via finalizing; held-job invariant; counter names.
+  - `TestJobRepository_S49` (26, integration, real MongoDB):
+    - Happy path queued → running → finalizing → succeeded with timestamps and attempts.
+    - Refused: double start, skipped steps, finished jobs final, unknown job; `run_id` validated and stored literally (`"$status"`); system fail from each active status.
+    - Run guard: another run is superseded on heartbeat, increment, finalize, cancel and fail; **10 concurrent starts → one winner**.
+    - Recovery: requeue cuts off the dead run, the restart keeps the first `started_at` with attempts 2, no double requeue; requeue from finalizing; requeue with a pending cancel → cancelled; `find_stale` and a heartbeat clearing it.
+    - Cancel: queued cancelled immediately and idempotent; running flagged, seen via heartbeat, worker cancels; finalizing/succeeded refused; tenant-scoped.
+    - Counters: **100 concurrent increments exact**; validation; frozen once finished; counting while finalizing; `set_counters` and usage; heartbeat time.
+    - Tenant-scoped list/get with status/source filters and pagination.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1381 passed, 4 skipped (container) in 237 s.
+- Decisions/notes:
+  - **Step 46's "finalize releases content claims"** moves to **Step 78 (finalization)**, which drives the terminal transitions: on any terminal status call `ContentClaimRepository.release_job(job_id)`. The job repository stays free of other collections.
+  - **Step 50/77 (worker)**: `run_id = new_id("run")` per attempt → `jobs.start(job, run_id)` → `Frontier(..., run_id=run_id).recover()` → crawl, with `heartbeat()` on an interval (stop on `cancel_requested_at` or `JobRunSupersededError`) → `begin_finalizing` → Step 78 → `succeed`. Exceptions → `fail(job, JobError(code, message), run_id=run_id)`. Heartbeat interval and stale threshold settings belong to Steps 77/80.
+  - Counter semantics for Step 50: `discovered` += `frontier.add_many(...)` new count; `fetched/failed/skipped/duplicates` once per recorded page outcome. A crash between `record_outcome` and `increment` loses a count, so the resumed run (and Step 53's summary) should `set_counters` from `PageRepository.count_by_status`.
+  - Step 79 adds the one-active-job-per-source partial unique index and the tenant concurrency check.
+- Next: Step 50: Crawl engine core

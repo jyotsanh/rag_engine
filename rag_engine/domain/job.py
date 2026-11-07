@@ -18,6 +18,7 @@ from rag_engine.domain.types import (
 )
 
 MAX_PATTERNS = 50
+_HELD = frozenset({JobStatus.RUNNING, JobStatus.FINALIZING})  # a worker run owns the job
 
 
 class CrawlConfig(BaseModel):
@@ -48,6 +49,10 @@ class CrawlConfig(BaseModel):
 
 class JobCounters(BaseModel):
     """Updated with atomic `$inc` while the job runs (Step 49)."""
+
+    @classmethod
+    def names(cls) -> frozenset[str]:
+        return frozenset(cls.model_fields)
 
     discovered: NonNegativeInt = 0
     fetched: NonNegativeInt = 0
@@ -88,7 +93,8 @@ class CrawlJob(MongoDocument):
     counters: JobCounters = Field(default_factory=JobCounters)
     usage: EmbeddingUsage = Field(default_factory=EmbeddingUsage)
     error: JobError | None = None
-    attempts: NonNegativeInt = 0
+    attempts: NonNegativeInt = 0  # times a worker started it (crash recovery requeues, Step 80)
+    run_id: str | None = Field(default=None, max_length=100)  # the worker run holding the job
     cancel_requested_at: datetime | None = None
     started_at: datetime | None = None
     heartbeat_at: datetime | None = None
@@ -106,4 +112,6 @@ class CrawlJob(MongoDocument):
             raise ValueError("a finished job must have finished_at")
         if not self.status.is_terminal and self.finished_at is not None:
             raise ValueError("finished_at is only set on terminal jobs")
+        if self.status in _HELD and (self.run_id is None or self.started_at is None):
+            raise ValueError(f"a {self.status} job needs run_id and started_at")
         return self

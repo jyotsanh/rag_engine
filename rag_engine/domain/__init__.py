@@ -4,6 +4,7 @@ from .chunk import Chunk
 from .content_claim import CLAIM_TTL_SECONDS, ContentHashClaim
 from .enums import (
     ACTIVE_JOB_STATUSES,
+    JOB_TRANSITIONS,
     TERMINAL_JOB_STATUSES,
     ContentKind,
     DiscoveredVia,
@@ -24,6 +25,7 @@ from .tenant import TENANT_NAME_COLLATION, Tenant, TenantQuotas
 __all__ = [
     "ACTIVE_JOB_STATUSES",
     "CLAIM_TTL_SECONDS",
+    "JOB_TRANSITIONS",
     "TENANT_NAME_COLLATION",
     "TERMINAL_JOB_STATUSES",
     "ApiKey",

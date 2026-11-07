@@ -49,3 +49,20 @@ class SourceNotFoundError(DocumentNotFoundError):
 class PageNotFoundError(DocumentNotFoundError):
     code = "page_not_found"
     default_message = "Page not found"
+
+
+class JobNotFoundError(DocumentNotFoundError):
+    code = "job_not_found"
+    default_message = "Crawl job not found"
+
+
+class InvalidJobTransitionError(ConflictError):
+    code = "invalid_job_transition"
+    default_message = "The crawl job cannot change to that status from its current one"
+
+
+class JobRunSupersededError(ConflictError):
+    """The job is no longer held by this worker run (requeued, finished or cancelled)."""
+
+    code = "job_run_superseded"
+    default_message = "The crawl job is no longer held by this run"
