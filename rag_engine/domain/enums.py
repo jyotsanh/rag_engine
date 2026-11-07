@@ -99,21 +99,37 @@ class PageReason(StrEnum):
 
 
 class CrawlStopReason(StrEnum):
-    """Why a crawl stopped before its frontier drained (Step 51; cancellation is Step 52)."""
+    """Why a crawl stopped before its frontier drained (caps: Step 51, cancel: Step 52)."""
 
     MAX_PAGES = "max_pages"  # soft: no new pages, but pages already counted still finish
     MAX_TOTAL_BYTES = "max_total_bytes"  # hard: nothing more is fetched
     MAX_DURATION = "max_duration"  # hard: nothing more is fetched
+    CANCELLED = "cancelled"  # hard, and it outranks the caps: the job ends `cancelled`
 
     @property
     def page_reason(self) -> PageReason:
         """What the pages left in the frontier are recorded as."""
-        return PageReason(self.value)
+        return _STOP_PAGE_REASON[self]
 
     @property
     def is_hard(self) -> bool:
         """A hard stop fetches nothing more; a soft one only stops taking new pages."""
         return self is not CrawlStopReason.MAX_PAGES
+
+    @property
+    def rank(self) -> int:
+        """A stop only replaces one of a lower rank: soft < hard cap < cancelled."""
+        if self is CrawlStopReason.CANCELLED:
+            return 2
+        return 1 if self.is_hard else 0
+
+
+_STOP_PAGE_REASON = {
+    CrawlStopReason.MAX_PAGES: PageReason.MAX_PAGES,
+    CrawlStopReason.MAX_TOTAL_BYTES: PageReason.MAX_TOTAL_BYTES,
+    CrawlStopReason.MAX_DURATION: PageReason.MAX_DURATION,
+    CrawlStopReason.CANCELLED: PageReason.JOB_CANCELLED,
+}
 
 
 class ContentKind(StrEnum):

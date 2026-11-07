@@ -20,15 +20,18 @@ from rag_engine.crawling import (
     CrawlEngine,
     DomainRateLimiter,
     RateLimitWaitExceededError,
+    RedisCancelFlags,
     Reservation,
     RetryPolicy,
     RobotsCache,
     RobotsRules,
     RobotsStatus,
     SitemapDiscoverer,
+    finish_cancelled,
     normalize_and_hash,
     origin_of,
     rate_limit_host,
+    request_cancel,
 )
 from rag_engine.crawling.fetchers import AutoFetcher, FetchResult, HttpFetcher, HttpStatusError
 from rag_engine.domain import (
@@ -39,13 +42,14 @@ from rag_engine.domain import (
     CrawlStopReason,
     DiscoveredVia,
     JobCounters,
+    JobStatus,
     Page,
     PageReason,
     PageStatus,
     utc_now,
 )
 from rag_engine.extraction import CleanedText, TextCleaner
-from rag_engine.infrastructure import MongoConnection, RedisConnection
+from rag_engine.infrastructure import MongoConnection, RedisConnection, RedisUnavailableError
 from rag_engine.repositories import (
     ContentClaimRepository,
     JobRepository,
@@ -928,3 +932,170 @@ class TestCrawlCaps_S51:
         assert fetcher.calls.count(hang) == 2 and stuck_host not in fetcher.calls
         assert _status(outcomes[f"{_SITE}/fine"]) == (PageStatus.SUCCEEDED, None)
         assert summary.stop is None
+
+
+# ---- cancellation (Step 52) ---- #
+
+
+@pytest.fixture
+async def flags(env: _Env, integration_settings: Settings) -> AsyncIterator[RedisCancelFlags]:
+    redis = RedisConnection(integration_settings)
+    await redis.connect()
+    yield RedisCancelFlags(redis.client, redis.keys, env.config)
+    await redis.close()
+
+
+@dataclass
+class _Signal:
+    """`CancelSignal` that turns on when `on` is set; `errors` polls fail first."""
+
+    on: bool = False
+    errors: int = 0
+    polls: int = 0
+
+    async def is_cancelled(self, job_id: str) -> bool:
+        self.polls += 1
+        if self.errors:
+            self.errors -= 1
+            raise RedisUnavailableError(details={"reason": "ConnectionError"})
+        return self.on
+
+
+class TestCrawlCancellation_S52:
+    """S52 — Cancellation: the Redis flag is polled, in-flight pages drain, job cancelled."""
+
+    async def test_cancel_flag_drains_in_flight_pages_and_skips_the_rest(
+        self, env: _Env, flags: RedisCancelFlags, override_settings: OverrideSettings
+    ) -> None:
+        override_settings(CRAWL_CANCEL_POLL_SECONDS=0.05)
+        job = await env.job(f"{_SITE}/")
+        slow = f"{_SITE}/p3"
+        responses = _site_of(20)
+        responses[slow] = _page(
+            slow, _html(f"<p>Slow page. {_TEXT}</p><a href='/found-late'>l</a>")
+        )
+
+        async def cancel_via_api(url: str) -> None:
+            if url == slow:
+                await request_cancel(env.jobs, flags, _TENANT, job.id)
+                await asyncio.sleep(0.3)  # still fetching when the poller sees the flag
+            else:
+                await asyncio.sleep(0.05)
+
+        fetcher = _ScriptedFetcher(responses, on_fetch=cancel_via_api)
+
+        summary = await env.engine(job, fetcher, cancel=flags).run()
+        cancelled = await finish_cancelled(env.jobs, flags, job.id, "run-1")
+
+        outcomes = await env.outcomes(job)
+        assert summary.stop is not None and summary.stop.reason is CrawlStopReason.CANCELLED
+        assert 1 < len(fetcher.calls) < 21
+        # drained: every page whose fetch started was finished normally
+        assert all(_status(outcomes[url]) == (PageStatus.SUCCEEDED, None) for url in fetcher.calls)
+        assert outcomes[slow].markdown is not None
+        late = outcomes[f"{_SITE}/found-late"]  # a link of the in-flight page
+        assert _status(late) == (PageStatus.SKIPPED, PageReason.JOB_CANCELLED)
+        rest = [p for url, p in outcomes.items() if url not in fetcher.calls]
+        assert rest and {_status(p) for p in rest} == {
+            (PageStatus.SKIPPED, PageReason.JOB_CANCELLED)
+        }
+        assert not {PageStatus.QUEUED, PageStatus.IN_PROGRESS} & set(summary.pages)
+        assert cancelled.status is JobStatus.CANCELLED
+        assert cancelled.counters.skipped == len(rest)
+        assert await flags.is_cancelled(job.id) is False  # cleared
+
+    async def test_a_cancel_requested_before_the_run_stops_without_fetching(
+        self, env: _Env
+    ) -> None:
+        job = await env.job(f"{_SITE}/")
+        job = await env.jobs.request_cancel(_TENANT, job.id)  # Mongo only: no Redis flag
+        fetcher = _ScriptedFetcher(_site_of(3))
+        signal = _Signal()
+
+        summary = await env.engine(job, fetcher, cancel=signal).run()
+
+        seed = (await env.outcomes(job))[f"{_SITE}/"]
+        assert fetcher.calls == []
+        assert summary.stop is not None and summary.stop.reason is CrawlStopReason.CANCELLED
+        assert "before this run started" in summary.stop.detail
+        assert (_status(seed), seed.attempts) == ((PageStatus.SKIPPED, PageReason.JOB_CANCELLED), 0)
+
+    async def test_cancel_outranks_a_cap_and_wakes_idle_workers(
+        self, env: _Env, override_settings: OverrideSettings
+    ) -> None:
+        override_settings(CRAWL_CANCEL_POLL_SECONDS=0.05)
+        flaky = f"{_SITE}/flaky"
+        responses: dict[str, FetchResult | Exception] = {
+            f"{_SITE}/": _page(f"{_SITE}/", _html(f"<p>{_TEXT}</p><a href='/flaky'>f</a>")),
+            flaky: HttpStatusError(url=flaky, status_code=503),
+        }
+        signal = _Signal()
+
+        async def cancel_soon(url: str) -> None:
+            if url == flaky:
+                asyncio.get_running_loop().call_later(0.2, setattr, signal, "on", True)
+
+        fetcher = _ScriptedFetcher(responses, on_fetch=cancel_soon)
+        # the budget is spent (soft stop) and the flaky page waits 30 s for its retry
+        policy = RetryPolicy(max_attempts=3, base_delay=30, max_delay=30, max_retry_after=5)
+        job = await env.job(f"{_SITE}/", max_pages=2)
+        started = time.monotonic()
+
+        summary = await env.engine(job, fetcher, cancel=signal, policy=policy).run()
+
+        assert time.monotonic() - started < 3
+        assert summary.stop is not None and summary.stop.reason is CrawlStopReason.CANCELLED
+        outcomes = await env.outcomes(job)
+        assert _status(outcomes[flaky]) == (PageStatus.SKIPPED, PageReason.JOB_CANCELLED)
+
+    async def test_the_engine_can_be_cancelled_directly(self, env: _Env) -> None:
+        job = await env.job(f"{_SITE}/")
+        engines: list[CrawlEngine] = []
+        results: list[bool] = []
+
+        async def heartbeat_saw_cancel(url: str) -> None:
+            if url.endswith("/p1"):
+                results.extend([engines[0].cancel(), engines[0].cancel()])
+
+        fetcher = _ScriptedFetcher(_site_of(10), on_fetch=heartbeat_saw_cancel)
+        engines.append(env.engine(job, fetcher))
+
+        summary = await engines[0].run()
+
+        assert results == [True, False]  # the second call changes nothing
+        assert summary.stop is not None and summary.stop.reason is CrawlStopReason.CANCELLED
+        assert summary.reasons[PageReason.JOB_CANCELLED] >= 1
+        assert len(fetcher.calls) < 11
+
+    async def test_a_redis_outage_during_polls_is_tolerated(
+        self, env: _Env, override_settings: OverrideSettings
+    ) -> None:
+        override_settings(CRAWL_CANCEL_POLL_SECONDS=0.02)
+        signal = _Signal(errors=3)
+
+        async def slow(url: str) -> None:
+            if url.endswith("/p0"):
+                signal.on = True  # Redis back, flag set
+            await asyncio.sleep(0.1)
+
+        fetcher = _ScriptedFetcher(_site_of(10), on_fetch=slow)
+        job = await env.job(f"{_SITE}/")
+
+        summary = await env.engine(job, fetcher, cancel=signal).run()
+
+        assert signal.errors == 0 and signal.polls > 3
+        assert summary.stop is not None and summary.stop.reason is CrawlStopReason.CANCELLED
+
+    async def test_the_poller_never_delays_the_end_of_a_crawl(
+        self, env: _Env, override_settings: OverrideSettings
+    ) -> None:
+        override_settings(CRAWL_CANCEL_POLL_SECONDS=30)
+        signal = _Signal()
+        job = await env.job(f"{_SITE}/")
+        started = time.monotonic()
+
+        summary = await env.engine(job, _ScriptedFetcher(_site_of(2)), cancel=signal).run()
+
+        assert time.monotonic() - started < 5
+        assert summary.stop is None
+        assert signal.polls == 1  # the start check only

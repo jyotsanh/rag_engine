@@ -1,3 +1,4 @@
+from .cancellation import CancelSignal, RedisCancelFlags, finish_cancelled, request_cancel
 from .dedupe import (
     ContentClaimStore,
     ContentDeduper,
@@ -103,6 +104,7 @@ __all__ = [
     "TRACKING_PARAMS",
     "TRACKING_PREFIXES",
     "CachedRobots",
+    "CancelSignal",
     "Classification",
     "ContentClaimStore",
     "ContentDeduper",
@@ -132,6 +134,7 @@ __all__ = [
     "RateLimiter",
     "RawFetcher",
     "RecoveryReport",
+    "RedisCancelFlags",
     "RedisRobotsStore",
     "RejectedLink",
     "Reservation",
@@ -159,6 +162,7 @@ __all__ = [
     "canonical_from_link_header",
     "classify",
     "content_hash",
+    "finish_cancelled",
     "frontier_priority",
     "inflate",
     "normalize_and_hash",
@@ -170,6 +174,7 @@ __all__ = [
     "rate_limit_host",
     "registrable_domain",
     "render_politeness",
+    "request_cancel",
     "robots_token",
     "url_hash",
 ]

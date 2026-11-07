@@ -1590,3 +1590,49 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - When a stop cancels sitemap discovery before it reported, `summary.sitemap_error = "stopped early: <reason>"`.
   - **Step 52 (cancel)**: add `CrawlStopReason.CANCELLED` (hard, `page_reason` → `job_cancelled`) and call `engine._stop_crawl(...)` from the cancel poll (expose it publicly then). `_skip_rest` then records the queue as `skipped/job_cancelled`. In-flight pages drain exactly as with the other hard stops.
 - Next: Step 52: Cancellation
+
+### Step 52: Cancellation  (2026-11-07)
+- Status: ✅ done
+- Built: `rag_engine/crawling/cancellation.py` (exported from `rag_engine.crawling`), plus a cancel poll in `CrawlEngine`.
+  - **MongoDB stays the source of truth** (`cancel_requested_at`, Step 49). The Redis flag `job_cancel:<job_id>` (`RedisNamespace.JOB_CANCEL`) only lets the engine notice quickly and cheaply.
+  - `RedisCancelFlags(redis, keys, config)`: `request` (SET with `CRAWL_CANCEL_FLAG_TTL_SECONDS`), `is_cancelled` (EXISTS), `clear` (DEL), `key()`. Redis/OS errors raise `RedisUnavailableError`.
+  - `CancelSignal` protocol (`is_cancelled(job_id)`), so tests can script the signal.
+  - `request_cancel(jobs, flags, tenant_id, job_id)` (the API helper, for Step 87): calls `jobs.request_cancel` first, so a queued job is cancelled immediately with no flag. A running job is stamped in Mongo, then flagged in Redis. It's idempotent, and finalizing/finished jobs are refused. **A Redis outage doesn't fail the request**: it logs a warning and the worker's heartbeat picks up `cancel_requested_at` instead.
+  - `finish_cancelled(jobs, flags, job_id, run_id)` (the worker helper, for Step 77): `jobs.cancel` (running → `cancelled`), then clears the flag best-effort (it expires anyway).
+  - **Engine**:
+    - New `cancel: CancelSignal | None` collaborator.
+    - A poller task runs alongside the workers and checks the signal every `CRAWL_CANCEL_POLL_SECONDS`. `run()` waits on the workers and then cancels the poller, so polling never delays the end of a crawl.
+    - Public `engine.cancel(detail=...)` (True the first time) is for the heartbeat path in Step 77.
+    - A job whose cancel was requested before the run started (`job.cancel_requested_at`, or the flag) stops without fetching.
+    - A Redis outage during polls is logged once per outage and polling continues.
+  - **Stop semantics**: `CrawlStopReason.CANCELLED` is hard, and `page_reason` now comes from a mapping (→ `job_cancelled`). The new `rank` orders soft (0) < hard cap (1) < cancelled (2), and a stop replaces only a lower-ranked one: a cancel wins over any cap, so the job ends `cancelled`. The drain reuses Step 51's hard-stop path:
+    - Idle workers wake, in-flight pages finish normally (bounded by the page deadline), and their outlinks get queued.
+    - `_skip_rest` records everything still queued, pending retries included, as `skipped/job_cancelled` with the stop detail.
+    - Sitemap discovery is cancelled (`sitemap_error = "stopped early: cancelled"`).
+- Settings:
+  - `CRAWL_CANCEL_POLL_SECONDS` (1.0, in (0, 60]).
+  - `CRAWL_CANCEL_FLAG_TTL_SECONDS` (86400; the validator requires ≥ `CRAWL_MAX_JOB_SECONDS`).
+  - `.env.example` updated.
+- Tests:
+  - `TestCrawlCancellation_S52` (6, integration):
+    - Full flow with real Redis: the API helper fires during a slow fetch.
+      - Every page whose fetch had started finishes `succeeded`, including the slow one with its Markdown.
+      - The slow page's late link and all unfetched pages become `job_cancelled`; nothing is left queued or in progress.
+      - `finish_cancelled` leaves the job `cancelled`, the skipped counter matches, and the flag is cleared.
+    - A cancel requested before the run (Mongo only) gives zero fetches.
+    - A cancel outranks a spent page budget and wakes workers waiting on a 30 s retry (run < 3 s).
+    - `engine.cancel()` returns True, then False.
+    - 3 failed polls are tolerated and the cancel still lands.
+    - With a 30 s poll interval the crawl still ends at once (one poll: the start check).
+  - `TestCancelFlags_S52` (5, integration: Redis + Mongo): flag round trip with TTL and the namespaced key; running job → Mongo + flag (first `cancel_requested_at` kept); queued job → cancelled with no flag; finalizing and other tenants refused with no flag; `finish_cancelled` ends the job and clears the flag.
+  - `TestCancellation_S52` (5, unit): stop ranking and page reasons; settings validators; typed flag errors; `request_cancel` and `finish_cancelled` survive a Redis outage.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1433 passed, 4 skipped (container) in 230 s. The engine and cancellation integration tests passed 3 runs in a row (~40 s).
+- Decisions/notes:
+  - The engine still makes no job transitions. **Step 77 (worker)**:
+    - Build `RedisCancelFlags` and pass it as `cancel=`.
+    - On every heartbeat, if `job.cancel_requested_at` is set, call `engine.cancel()` (this covers a lost or expired flag).
+    - After `run()`: if `summary.stop.reason is CANCELLED`, or the job has `cancel_requested_at` (a cancel that arrived just as the frontier drained), call `finish_cancelled`. Otherwise call `begin_finalizing`.
+  - **Step 78**: a cancelled job deletes its new version's points; the old version stays active.
+  - **Step 87**: `DELETE /jobs/{id}` → `request_cancel(...)`. It's already idempotent and tenant-scoped, and maps `InvalidJobTransitionError` to 409 and `JobNotFoundError` to 404.
+  - Step 80's `requeue` already cancels (instead of requeuing) a dead run's job when a cancel is pending, so the flag can be left to expire there.
+- Next: Step 53: Engine error accounting

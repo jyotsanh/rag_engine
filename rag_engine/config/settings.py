@@ -195,6 +195,10 @@ class Settings(BaseSettings):
     # a claimed frontier page whose crawler hasn't reported back within this is reclaimed
     # (a crashed worker); must outlast the page deadline plus extraction
     CRAWL_FRONTIER_LEASE_SECONDS: int = Field(default=10 * 60, gt=0)
+    # a running crawl checks its job's Redis cancel flag this often (Step 52)
+    CRAWL_CANCEL_POLL_SECONDS: float = Field(default=1.0, gt=0, le=60)
+    # cancel flags expire after this; must outlive any running job (>= CRAWL_MAX_JOB_SECONDS)
+    CRAWL_CANCEL_FLAG_TTL_SECONDS: int = Field(default=24 * 60 * 60, gt=0)
     # a crawler waits at most this for a host's rate-limit slot, then re-queues the page
     # for that time instead of holding a concurrency slot (slow hosts can't starve others)
     CRAWL_RATE_LIMIT_MAX_WAIT_SECONDS: float = Field(default=5.0, ge=0)
@@ -258,6 +262,8 @@ class Settings(BaseSettings):
                 "CRAWL_FRONTIER_LEASE_SECONDS must be > "
                 "CRAWL_PAGE_TIMEOUT_SECONDS + EXTRACTION_TIMEOUT_SECONDS"
             )
+        if self.CRAWL_CANCEL_FLAG_TTL_SECONDS < self.CRAWL_MAX_JOB_SECONDS:
+            raise ValueError("CRAWL_CANCEL_FLAG_TTL_SECONDS must be >= CRAWL_MAX_JOB_SECONDS")
         if self.CRAWL_MAX_PAGE_BYTES > self.CRAWL_MAX_TOTAL_BYTES:
             raise ValueError("CRAWL_MAX_PAGE_BYTES must be <= CRAWL_MAX_TOTAL_BYTES")
         if self.CELERY_TASK_SOFT_TIME_LIMIT_SECONDS >= self.CELERY_TASK_TIME_LIMIT_SECONDS:

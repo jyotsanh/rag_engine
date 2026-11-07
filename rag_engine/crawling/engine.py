@@ -2,7 +2,8 @@
 
 `CrawlEngine(job, run_id=..., ...).run()` crawls a job that a worker run has started
 (`JobRepository.start`, Step 49) and returns a `CrawlSummary`. Job status transitions,
-the heartbeat and cancellation (Step 52) belong to the caller; the caps are enforced here.
+the heartbeat and the final `cancelled` transition belong to the caller; caps and the
+cancel poll are enforced here.
 
 **Start**
 1. `frontier.recover()` re-queues pages an earlier (crashed) run held: a resumed job
@@ -51,6 +52,14 @@ makes "followed later" win. Each page keeps its held-back links on its own row
   retries included, is recorded `skipped/max_total_bytes` or `skipped/max_duration`. The
   byte cap is checked after each fetch, so it can be overshot by the pages in flight.
 - Each cap is re-checked when a run starts, so a resumed job stops at once if it was spent.
+
+**Cancellation** (Step 52). While workers run, a poller checks the job's cancel signal (the
+Redis flag, `RedisCancelFlags`) every `CRAWL_CANCEL_POLL_SECONDS`; `cancel()` does the same
+for a caller that learned it otherwise (the heartbeat's `cancel_requested_at`). It is a hard
+stop that outranks the caps: in-flight pages drain, the rest becomes `skipped/job_cancelled`,
+and `summary.stop.reason is CANCELLED` tells the caller to `finish_cancelled(...)`. A job
+whose cancel was requested before this run started stops without fetching. A Redis outage
+during a poll is logged and polling continues.
 - **Per page**, `CRAWL_PAGE_TIMEOUT_SECONDS` bounds the rate-limit wait + fetch + render (on
   top of the fetchers' own timeouts); over it the fetch fails as a retryable `timeout`.
   Extraction has its own deadline (`EXTRACTION_TIMEOUT_SECONDS`).
@@ -74,6 +83,7 @@ from urllib.parse import urlsplit
 from loguru import logger
 
 from rag_engine.config import Settings, settings
+from rag_engine.crawling.cancellation import CancelSignal
 from rag_engine.crawling.dedupe import ContentClaimStore, ContentDeduper, DedupeOutcome
 from rag_engine.crawling.fetchers import (
     FetchError,
@@ -116,7 +126,7 @@ from rag_engine.extraction import (
     TextCleaner,
     default_registry,
 )
-from rag_engine.infrastructure.exceptions import DatabaseUnavailableError
+from rag_engine.infrastructure.exceptions import DatabaseUnavailableError, RedisUnavailableError
 from rag_engine.repositories import (
     JobRepository,
     JobRunSupersededError,
@@ -207,6 +217,7 @@ class CrawlEngine:
         robots: RobotsSource,
         limiter: RateLimiter,
         sitemaps: SitemapSource | None = None,
+        cancel: CancelSignal | None = None,
         registry: ExtractorRegistry | None = None,
         cleaner: TextCleaner | None = None,
         links: LinkExtractor | None = None,
@@ -224,6 +235,9 @@ class CrawlEngine:
         self._robots = robots
         self._limiter = limiter
         self._sitemaps = sitemaps
+        self._cancel = cancel
+        self._cancel_poll = config.CRAWL_CANCEL_POLL_SECONDS
+        self._cancel_poll_failing = False
         self._registry = registry or default_registry(config)
         self._cleaner = cleaner or TextCleaner(config=config)
         self._links = links or LinkExtractor(config)
@@ -278,7 +292,7 @@ class CrawlEngine:
         created = await self._frontier.add(seed_url, depth=0, via=DiscoveredVia.SEED)
         if created:
             await self._count(discovered=1)
-        await self._check_caps_at_start()
+        await self._check_stops_at_start()
         anchored = await self._anchor(seed_url)
         rules = await self._robots.rules_for(anchored)
         log.info("crawling {} (scope host {})", anchored, self._scope.seed_host)
@@ -293,8 +307,10 @@ class CrawlEngine:
                     )
                 else:
                     self._sitemap_done = True
-                for _ in range(self._concurrency):
-                    group.create_task(self._worker())
+                workers = [group.create_task(self._worker()) for _ in range(self._concurrency)]
+                poller = group.create_task(self._poll_cancel())
+                await asyncio.wait(workers)
+                poller.cancel()  # the crawl is over; a worker's error is raised by the group
             self._sitemap_task = None
         if self._stop is not None and self._sitemaps is not None and sitemap[0] is None:
             sitemap_error[0] = sitemap_error[0] or f"stopped early: {self._stop.reason}"
@@ -377,7 +393,7 @@ class CrawlEngine:
 
     async def _worker(self) -> None:
         while not self._done:
-            if self._out_of_time():
+            if self._fetching_stopped():
                 return  # a hard stop: the pages left are recorded by _skip_rest
             page = await self._frontier.claim()
             if page is not None:
@@ -416,7 +432,7 @@ class CrawlEngine:
     def _seconds_left(self) -> float:
         return (self._deadline - utc_now()).total_seconds()
 
-    def _out_of_time(self) -> bool:
+    def _fetching_stopped(self) -> bool:
         """True once nothing more may be fetched (a hard stop, or the job's time is up)."""
         if not self._hard_stopped and self._seconds_left() <= 0:
             self._stop_crawl(
@@ -425,9 +441,13 @@ class CrawlEngine:
             )
         return self._hard_stopped
 
+    def cancel(self, detail: str = "the job was cancelled") -> bool:
+        """Stop the crawl as cancelled (in-flight pages drain). True if this call did it."""
+        return self._stop_crawl(CrawlStopReason.CANCELLED, detail)
+
     def _stop_crawl(self, reason: CrawlStopReason, detail: str) -> bool:
-        """Record why the crawl stops; True if this call stopped it (or made it hard)."""
-        if self._stop is not None and (self._stop.reason.is_hard or not reason.is_hard):
+        """Record why the crawl stops; True if this call stopped it (or outranked the stop)."""
+        if self._stop is not None and reason.rank <= self._stop.reason.rank:
             return False
         self._stop = CrawlStop(reason, detail)
         logger.bind(job_id=self._job.id).info("crawl stopping: {} ({})", reason, detail)
@@ -436,13 +456,38 @@ class CrawlEngine:
         self._notify()
         return True
 
-    async def _check_caps_at_start(self) -> None:
-        """A resumed job whose budget is already spent stops right away."""
+    async def _check_stops_at_start(self) -> None:
+        """A job cancelled meanwhile, or resumed with a spent budget, stops right away."""
+        if self._job.cancel_requested_at is not None:
+            self.cancel("the job's cancel was requested before this run started")
+        await self._check_cancel_flag()
         if self._charged >= self._max_pages:
             await self._page_budget_spent()
         if self._bytes >= self._max_bytes:
             self._stop_crawl(CrawlStopReason.MAX_TOTAL_BYTES, self._bytes_detail())
-        self._out_of_time()
+        self._fetching_stopped()
+
+    async def _poll_cancel(self) -> None:
+        """Runs beside the workers until the crawl ends or the cancel flag shows up."""
+        if self._cancel is None:
+            return
+        while not self._hard_stopped:
+            await asyncio.sleep(self._cancel_poll)
+            await self._check_cancel_flag()
+
+    async def _check_cancel_flag(self) -> None:
+        if self._cancel is None:
+            return
+        try:
+            cancelled = await self._cancel.is_cancelled(self._job.id)
+        except RedisUnavailableError as exc:
+            if not self._cancel_poll_failing:  # once per outage, not once per poll
+                logger.bind(job_id=self._job.id).warning("cancel flag unreadable: {}", exc)
+            self._cancel_poll_failing = True
+            return
+        self._cancel_poll_failing = False
+        if cancelled:
+            self.cancel()
 
     def _pages_detail(self) -> str:
         return f"the job's page budget ({self._max_pages} pages) was spent"
@@ -525,7 +570,7 @@ class CrawlEngine:
         return None, rules
 
     async def _crawl(self, page: Page) -> None:
-        if self._out_of_time():
+        if self._fetching_stopped():
             await self._frontier.release(page.id)  # recorded by _skip_rest
             return
         if not page.charged and self._charged >= self._max_pages:
@@ -553,7 +598,7 @@ class CrawlEngine:
         except TimeoutError:
             await self._fetch_failed(page, self._page_timeout_error(page, "the rate-limit wait"))
             return
-        if self._out_of_time():  # the time ran out while waiting for the host's slot
+        if self._fetching_stopped():  # the time ran out while waiting for the host's slot
             await self._frontier.release(page.id)
             return
         try:
