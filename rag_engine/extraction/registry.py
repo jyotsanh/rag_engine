@@ -27,13 +27,18 @@ from rag_engine.config import Settings, settings
 from rag_engine.crawling.fetchers.content import EXTENSION_KINDS, GENERIC_MIME_TYPES, MIME_KINDS
 from rag_engine.domain import ContentKind
 from rag_engine.extraction.base import BaseExtractor, ExtractedDocument, ExtractionInput
+from rag_engine.extraction.docx import DocxExtractor
 from rag_engine.extraction.exceptions import (
     DocumentUnreadableError,
     ExtractionError,
     ExtractorRegistrationError,
     UnsupportedContentError,
 )
+from rag_engine.extraction.html import HtmlExtractor
+from rag_engine.extraction.pdf import PdfExtractor
+from rag_engine.extraction.pptx import PptxExtractor
 from rag_engine.extraction.sniff import Sniffed, looks_like_text, sniff
+from rag_engine.extraction.xlsx import XlsxExtractor
 
 _OFFICE_KINDS = frozenset({ContentKind.DOCX, ContentKind.PPTX, ContentKind.XLSX})
 _BINARY_KINDS = _OFFICE_KINDS | {ContentKind.PDF}
@@ -121,3 +126,17 @@ class ExtractorRegistry:
             raise ExtractionError(
                 f"{extractor.name} failed: {exc}", detail=f"{type(exc).__name__}: {exc}"
             ) from exc
+
+
+def default_registry(config: Settings = settings) -> ExtractorRegistry:
+    """Every built-in extractor: HTML, PDF, DOCX, PPTX, XLSX."""
+    return ExtractorRegistry(
+        [
+            HtmlExtractor(),
+            PdfExtractor(config),
+            DocxExtractor(config),
+            PptxExtractor(config),
+            XlsxExtractor(config),
+        ],
+        config=config,
+    )

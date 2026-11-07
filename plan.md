@@ -1308,3 +1308,41 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 56** treats `<!-- slide N -->` like `<!-- page N -->` (a location marker, not content).
   - Pictures' alt text and SmartArt text are not extracted yet (rarely matter for docs sites). This is a known gap.
 - Next: Step 44: XLSX extractor
+
+### Step 44: XLSX extractor  (2026-11-07)
+- Status: ✅ done
+- Built:
+  - `rag_engine/extraction/xlsx.py` → `XlsxExtractor(config)` (`name="xlsx"`, `kind=XLSX`, exported). openpyxl `load_workbook(read_only=True, data_only=True)` streams rows; the workbook is always closed.
+    - **One section per visible sheet**: `<!-- sheet N -->` (`sheet_marker()`, like the page/slide markers) + `## <sheet name>` + a GFM table via the shared `render_table` (first row = header).
+    - **Values**: Excel's **cached results**, not formulas (a file without cached values shows those cells empty, never `=A2+B2`).
+      - integral floats → `1899`; other floats → up to 10 significant digits
+      - percent number formats → `12.5%`
+      - dates → ISO, with the time kept unless midnight; `time` → ISO
+      - booleans → `TRUE/FALSE`
+      - text whitespace collapsed, `|` escaped
+    - **Tidying**: entirely empty rows and **entirely empty columns** are dropped (data starting at C5 with an empty column D, or formatting far past the data, becomes a clean table). A **lone title row** above a wider header becomes a caption paragraph instead of a fake one-column header.
+    - Hidden and very-hidden sheets are skipped (`metadata.hidden_skipped`). Chart sheets have no cells. Empty sheets are omitted; no values anywhere → `EmptyContentError`.
+    - **Caps**:
+      - `XLSX_MAX_SHEETS` (50) visible sheets, `XLSX_MAX_ROWS` (2000) and `XLSX_MAX_COLS` (50) per sheet.
+      - One extra row/column is read, so a sheet **exactly** at the cap is not marked truncated.
+      - A truncated sheet gets an `*Truncated: showing the first R rows and C columns.*` line (so an answer can say the table was cut) and counts in `metadata.truncated_sheets`; `metadata.truncated` covers the sheet cap too.
+    - **Metadata**: `title`/`description` (subject, else description)/`lang` from workbook properties; `metadata {author (creator), created, modified, sheet_count, sheets_extracted, hidden_skipped, truncated_sheets, truncated}`.
+    - **No outlinks**: read-only mode doesn't load hyperlinks (known gap; links in spreadsheets rarely matter for crawling).
+    - The zip-bomb guard runs first. Corrupt → `ExtractionError("corrupt")`.
+  - **`default_registry(config)`** (in `registry.py`, exported): all five extractors (HTML, PDF, DOCX, PPTX, XLSX), as promised in Step 38. The crawl engine (Step 50) uses it.
+- Deps: `openpyxl` moved from the dev group to runtime (no version changes in the lock).
+- Settings: `XLSX_MAX_SHEETS` (50), `XLSX_MAX_ROWS` (2000), `XLSX_MAX_COLS` (50); `.env.example` updated.
+- Tests:
+  - `TestXlsxExtractor_S44` (17, unit; workbooks generated with openpyxl):
+    - Fixture `pricing.xlsx`: exact Markdown for both sheets.
+    - Values: a 12-value formatting matrix; formulas show cached values only.
+    - Table shape: sparse sheet trimmed (offset start, empty column, gap rows, far formatting); title row → caption; single-column sheet keeps its header.
+    - Sheets: hidden/very-hidden/empty/chart sheets; no-values workbook → `EmptyContentError`.
+    - Caps: row cap truncates with a note; exactly-at-cap not truncated; column cap; sheet cap.
+    - Metadata: workbook properties.
+    - Failures and integration: corrupt archive; zip-bomb guard; registry dispatch with an empty content type; fixture fetched over HTTP.
+  - `TestDefaultRegistry_S44` (6, unit): every `ContentKind` has an extractor, and all 5 fixture document types dispatch by bytes (labelled `application/octet-stream`) to the right extractor with non-empty Markdown.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1206 passed, 4 skipped (container) in 229 s.
+- Decisions/notes:
+  - **Extraction phase (38–44) complete.** Location markers in Markdown are `<!-- page N -->` (PDF), `<!-- slide N -->` (PPTX) and `<!-- sheet N -->` (XLSX). **Step 56** must parse all three as location metadata, not content.
+- Next: Step 45: Text cleaning

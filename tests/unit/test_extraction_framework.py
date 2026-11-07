@@ -22,6 +22,7 @@ from rag_engine.extraction import (
     ExtractorRegistry,
     Sniffed,
     UnsupportedContentError,
+    default_registry,
     looks_like_text,
     sniff,
 )
@@ -451,3 +452,29 @@ class TestExtractorFramework_S38:
         worker_thread = await BaseExtractor.run_sync(threading.get_ident)
 
         assert worker_thread != loop_thread
+
+
+class TestDefaultRegistry_S44:
+    """S44 — with the last extractor in place, `default_registry()` covers every kind."""
+
+    def test_every_content_kind_has_an_extractor(self) -> None:
+        assert default_registry().kinds == frozenset(ContentKind)
+
+    @pytest.mark.parametrize(
+        ("path", "extractor"),
+        [
+            ("docs/getting-started.html", "html"),
+            ("files/widget-spec.pdf", "pdf"),
+            ("files/install-guide.docx", "docx"),
+            ("files/roadmap.pptx", "pptx"),
+            ("files/pricing.xlsx", "xlsx"),
+        ],
+    )
+    async def test_fixture_documents_dispatch_by_bytes(self, path: str, extractor: str) -> None:
+        body = (SITE_ROOT / path).read_bytes()
+        source = _source(body, "application/octet-stream", f"https://acme.example/{path}")
+
+        document = await default_registry().extract(source)
+
+        assert document.extractor == extractor
+        assert document.markdown.strip()

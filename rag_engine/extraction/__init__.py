@@ -18,8 +18,9 @@ from .exceptions import (
 from .html import HtmlExtractor
 from .pdf import PdfExtractor, page_marker
 from .pptx import PptxExtractor, slide_marker
-from .registry import ExtractorRegistry
+from .registry import ExtractorRegistry, default_registry
 from .sniff import Sniffed, looks_like_text, sniff
+from .xlsx import XlsxExtractor, sheet_marker
 
 __all__ = [
     "BaseExtractor",
@@ -41,9 +42,12 @@ __all__ = [
     "Sniffed",
     "StrippedMarkdown",
     "UnsupportedContentError",
+    "XlsxExtractor",
+    "default_registry",
     "looks_like_text",
     "normalize_unit",
     "page_marker",
+    "sheet_marker",
     "slide_marker",
     "sniff",
     "split_blocks",
