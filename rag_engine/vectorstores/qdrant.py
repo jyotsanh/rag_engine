@@ -25,6 +25,13 @@ without ever duplicating a point, and re-ingesting a page overwrites its points.
 sparse vector is omitted when empty (a stopword-only chunk): it simply never matches a
 sparse query. Payloads are stored as plain JSON (`ChunkPayload`).
 
+**Deletes and counts** (Step 70) take a `VectorFilter`, translated by `to_qdrant_filter`:
+the tenant is always a `must` condition, every other non-empty field adds one
+(`MatchAny` over ids, `MatchPrefix` for `url_prefix`, on the indexed keyword fields), so
+deleting a version, a source, a KB or a whole tenant is one filtered call. Deletes are
+acknowledged (`wait=True`) and retried like upserts (deleting twice is harmless); counts
+are exact. Searches (Steps 71-72) use the same translation.
+
 Errors from either transport (HTTP or gRPC, `QDRANT_PREFER_GRPC`) are translated:
 unreachable/5xx/timeouts → `VectorStoreUnavailableError`, unknown collection →
 `CollectionNotFoundError`, anything else → `VectorStoreError`.
@@ -196,10 +203,19 @@ class QdrantVectorStore(BaseVectorStore):
             )
 
     async def _delete_by_filter(self, spec: CollectionSpec, filter_: VectorFilter) -> None:
-        raise NotImplementedError("Qdrant delete is Step 70")
+        selector = models.FilterSelector(filter=to_qdrant_filter(filter_))
+        await self._retrying(
+            lambda: self.client.delete(spec.name, points_selector=selector, wait=True), spec
+        )
 
     async def _count(self, spec: CollectionSpec, filter_: VectorFilter) -> int:
-        raise NotImplementedError("Qdrant count is Step 70")
+        result = await self._retrying(
+            lambda: self.client.count(
+                spec.name, count_filter=to_qdrant_filter(filter_), exact=True
+            ),
+            spec,
+        )
+        return result.count
 
     async def _search_dense(
         self,
@@ -286,3 +302,23 @@ def _point_struct(point: VectorPoint) -> models.PointStruct:
     return models.PointStruct(
         id=point.id, vector=vectors, payload=point.payload.model_dump(mode="json")
     )
+
+
+def to_qdrant_filter(filter_: VectorFilter) -> models.Filter:
+    """`VectorFilter` → Qdrant filter (all conditions must hold; the tenant always does)."""
+    must: list[models.Condition] = [
+        models.FieldCondition(key="tenant_id", match=models.MatchValue(value=filter_.tenant_id))
+    ]
+    for key, values in (
+        ("kb_id", filter_.kb_ids),
+        ("source_id", filter_.source_ids),
+        ("version", filter_.versions),
+        ("page_id", filter_.page_ids),
+    ):
+        if values:
+            must.append(models.FieldCondition(key=key, match=models.MatchAny(any=list(values))))
+    if filter_.url_prefix is not None:
+        must.append(
+            models.FieldCondition(key="url", match=models.MatchPrefix(prefix=filter_.url_prefix))
+        )
+    return models.Filter(must=must)

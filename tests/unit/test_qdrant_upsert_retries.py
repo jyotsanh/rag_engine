@@ -107,3 +107,50 @@ class TestQdrantUpsertRetries_S69:
     def test_retry_settings_are_validated(self, override_settings: OverrideSettings) -> None:
         with pytest.raises(ValueError):
             override_settings(QDRANT_RETRY_BASE_DELAY_SECONDS=10, QDRANT_RETRY_MAX_DELAY_SECONDS=8)
+
+
+class _ScriptedDeleteClient:
+    def __init__(self, *errors: Exception) -> None:
+        self.errors = list(errors)
+        self.calls = 0
+        self.selectors: list[object] = []
+
+    async def delete(self, collection_name: str, points_selector, wait: bool) -> None:
+        self.calls += 1
+        self.selectors.append(points_selector)
+        assert wait is True
+        if self.errors:
+            raise self.errors.pop(0)
+
+
+class TestQdrantFilterTranslation_S70:
+    """S70 — `VectorFilter` → Qdrant filter, and delete retries."""
+
+    def test_tenant_is_always_required_and_empty_fields_are_skipped(self) -> None:
+        from qdrant_client import models
+
+        from rag_engine.vectorstores import VectorFilter, to_qdrant_filter
+
+        only_tenant = to_qdrant_filter(VectorFilter("ten_1"))
+        full = to_qdrant_filter(
+            VectorFilter("ten_1", kb_ids=("kb_1",), source_ids=("s1", "s2"), versions=("v1",),
+                         page_ids=("p1",), url_prefix="https://a.example/docs/")
+        )  # fmt: skip
+
+        assert only_tenant == models.Filter(must=[models.FieldCondition(
+            key="tenant_id", match=models.MatchValue(value="ten_1"))])  # fmt: skip
+        assert isinstance(full.must, list) and len(full.must) == 6
+        keys = {c.key: c.match for c in full.must if isinstance(c, models.FieldCondition)}
+        assert keys["source_id"] == models.MatchAny(any=["s1", "s2"])
+        assert keys["url"] == models.MatchPrefix(prefix="https://a.example/docs/")
+
+    async def test_deletes_are_retried(self, override_settings: OverrideSettings) -> None:
+        from rag_engine.vectorstores import VectorFilter
+
+        config = override_settings(QDRANT_MAX_RETRIES=2)
+        client = _ScriptedDeleteClient(_response(503))
+        sleeps = _Sleeps()
+
+        await _store(client, sleeps, config).delete_by_filter(_SPEC, VectorFilter("ten_1"))  # ty: ignore[invalid-argument-type]
+
+        assert client.calls == 2 and len(sleeps.delays) == 1

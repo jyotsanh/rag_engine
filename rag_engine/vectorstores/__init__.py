@@ -19,7 +19,7 @@ from .models import (
     VectorPoint,
     point_id,
 )
-from .qdrant import PAYLOAD_INDEXES, QdrantVectorStore  # registers QDRANT
+from .qdrant import PAYLOAD_INDEXES, QdrantVectorStore, to_qdrant_filter  # registers QDRANT
 
 __all__ = [
     "DENSE_VECTOR",
@@ -42,4 +42,5 @@ __all__ = [
     "VectorStoreError",
     "VectorStoreUnavailableError",
     "point_id",
+    "to_qdrant_filter",
 ]

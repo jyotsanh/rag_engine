@@ -2113,3 +2113,22 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Batches go out sequentially, which keeps Qdrant's write load predictable; Step 76's pipeline overlaps embedding with upserting instead.
   - **Step 76** (re-chunked pages): when a page now has fewer chunks than before, delete its old points first with `delete_by_filter(VectorFilter(tenant, versions=(v,), page_ids=(page,)))` (Step 70), or the dropped ordinals' points would linger. This mirrors `ChunkRepository.save_page_chunks`.
 - Next: Step 70: Qdrant delete & count
+
+### Step 70: Qdrant delete & count  (2026-11-08)
+- Status: ✅ done
+- Built (in `rag_engine/vectorstores/qdrant.py`):
+  - **`to_qdrant_filter(VectorFilter)`** (exported; searches in Steps 71–72 reuse it): `tenant_id` is **always** a `must` `MatchValue`; each non-empty `kb_ids`/`source_ids`/`versions`/`page_ids` adds a `MatchAny`; `url_prefix` adds a `MatchPrefix` on the prefix-enabled `url` keyword index (Step 68). All conditions are AND-ed, and empty fields add nothing.
+  - **`_delete_by_filter`**: `client.delete(points_selector=FilterSelector(filter), wait=True)` through `_retrying`. Deleting twice is harmless, so retries are safe. One call deletes a job's version, a source, a KB or a whole tenant (or a re-chunked page's points: version + page_id).
+  - **`_count`**: `client.count(count_filter, exact=True)` through `_retrying` (an idempotent read).
+  - An unknown collection → `CollectionNotFoundError` for both.
+- Tests:
+  - `TestQdrantDeleteCount_S70` (8 × **HTTP and gRPC** = 16, integration). A **64-point grid** (2 tenants × 2 KBs × 2 sources × 2 versions × 4 pages, `/docs/` and `/blog/` URLs) checked **against the reference semantics** (`VectorFilter.matches`):
+    - Counts for 12 filters, including multi-field, page ids, URL prefixes that match all / one / no pages, and an unknown KB.
+    - Deletes by version (a failed job), source, KB, tenant and page (re-chunk): the deleted filter counts 0 immediately (`wait=True`), **every one of the 12 filters' remaining counts matches the reference**, and the other tenant keeps all 32 points.
+    - Deleting twice is harmless; an unknown collection → typed errors.
+  - `TestQdrantFilterTranslation_S70` (2, unit): the exact filter for tenant-only (empty fields skipped) and all fields (`MatchAny`, `MatchPrefix`); a delete retried after a 503.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1764 passed, 4 skipped (container) in 386 s.
+- Decisions/notes:
+  - `delete_by_filter` stays count-less (Qdrant's delete doesn't report one); callers that log "deleted N" call `count` first.
+  - **Step 78** (finalization): on failure/cancel, `delete_by_filter(VectorFilter(tenant, source_ids=(src,), versions=(job,)))`; after a successful flip, delete the old version the same way (enqueued as cleanup). **Step 81** (cascades): a source → `source_ids`; a KB → `kb_ids` (one call per collection the KB's space uses).
+- Next: Step 71: Qdrant dense search
