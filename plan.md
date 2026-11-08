@@ -2037,3 +2037,34 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 68**: create the collection's sparse vector `bm25` with `modifier=IDF`. **Step 76**: sparse-embed the same `embed_text` as the dense vectors (title and headings help keyword matches). Sparse is local CPU work, so it isn't metered.
   - **Phase H (Embeddings, 61–66) is complete.**
 - Next: Step 67: Vector store framework
+
+### Step 67: Vector store framework  (2026-11-08)
+- Status: ✅ done
+- Built: the `rag_engine/vectorstores/` package (all exported).
+  - **`models.py`**:
+    - `CollectionSpec(name, dimensions, sparse=True)`: `for_space(space)` gives **one collection per embedding space**, `chunks__<model>__<dims>` (names validated). KBs sharing a space share a collection, separated by payload filters.
+    - Named vectors `DENSE_VECTOR="dense"` (cosine) and `SPARSE_VECTOR="bm25"`.
+    - `ChunkPayload` (frozen): tenant/kb/source/version/chunk/page ids, url, ordinal, text, title, heading_path, page_number. Everything a hit needs to be shown and cited without Mongo. `from_chunk(chunk)`.
+    - `VectorPoint(id, dense, payload, sparse)` with `from_chunk(chunk, dense, sparse)`.
+    - **`point_id(version, chunk_id)`**: a deterministic UUID5 under a fixed namespace (stable across processes and releases). It was planned for Step 69 but belongs with the model.
+    - **`VectorFilter(tenant_id, kb_ids, source_ids, versions, page_ids, url_prefix)`**: **the tenant is mandatory**, so nothing crosses tenants; an empty tuple means no constraint. `matches(payload)` defines the reference semantics.
+    - `SearchHit(id, score, payload)`.
+  - **`base.py` → `BaseVectorStore`**: final public methods validate, then call `_`-prefixed implementations.
+    - Every method takes the `CollectionSpec`. Dense vectors must match its dimensions and be finite; a sparse vector is required **exactly** when the collection has one.
+    - Upserted ids must be unique, and `upsert([])` is a no-op returning 0.
+    - Bounds: `limit` 1..`MAX_SEARCH_LIMIT` (200), `score_threshold` in [-1, 1]; for hybrid, `prefetch_limit` (default 4 × limit) within limit..200.
+    - Methods: `ensure_collection` (idempotent; refuses a differing schema), `upsert`, `delete_by_filter`, `count`, `search_dense`, `search_hybrid` (dense + sparse candidates fused by RRF), `aclose`.
+  - **`dispatcher.py` → `VectorStoreDispatcher`**: `register(kind)` (subclass and `kind` checks, no second class per kind), `registered()`, `create(kind=None, *, config, **deps)` using `ACTIVE_VECTOR_STORE` (the Qdrant store will take the process's `AsyncQdrantClient`). Unregistered → `UnsupportedVectorStoreError`.
+  - **`exceptions.py`**: `VectorStoreError` (500) → `UnsupportedVectorStoreError`, `CollectionNotFoundError`, `CollectionMismatchError`, `InvalidVectorDataError`; `InvalidVectorQueryError` (422). Outages reuse `VectorStoreUnavailableError` (503, re-exported).
+- Test support: **`InMemoryVectorStore`** (`tests/support/fakes.py`), a reference backend with exact cosine, sparse dot product weighted by BM25-style IDF over the filtered points (like Qdrant's IDF modifier) and RRF (k=60). Later pipeline and search tests can run without Qdrant.
+- Tests: `TestVectorStoreFramework_S67` (14, unit):
+  - Models: collection naming and validation; point ids (UUID5, sensitive to version and chunk); points built from a stored `Chunk`; filters need a tenant, with a matching matrix (kb/source/version/page/url prefix).
+  - Base validation: dimensions, non-finite, duplicate ids, missing/unexpected sparse (nothing written), limit/threshold/prefetch bounds, hybrid on a dense-only collection.
+  - Reference semantics: idempotent/mismatched/missing collections; overwrite by id; counts by filter; delete-by-filter scoped to one tenant/version; cosine ranking with threshold and tenant isolation; **hybrid surfaces an exact-keyword match that dense search misses**.
+  - Close; dispatcher create/errors.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1702 passed, 4 skipped (container) in 266 s.
+- Decisions/notes:
+  - `delete_by_filter` returns nothing: Qdrant's delete doesn't report a count. Callers that need one call `count` first.
+  - **Step 68**: the Qdrant store registers `VectorStoreType.QDRANT` and creates collections with named `dense` (size = dims, cosine) plus sparse `bm25` with `modifier=IDF`, and payload indexes `tenant_id` (is_tenant), `kb_id`, `source_id`, `version`, `page_id`, `url`. A mismatch with an existing collection → `CollectionMismatchError`.
+  - **Step 71** must implement `url_prefix` (a keyword index can't prefix-match; options include a text index on url with a prefix tokenizer, or storing path segments). The in-memory reference uses `startswith`.
+- Next: Step 68: Qdrant collection management
