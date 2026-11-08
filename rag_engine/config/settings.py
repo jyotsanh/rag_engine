@@ -112,6 +112,13 @@ class Settings(BaseSettings):
     QDRANT_HTTPS: bool = False
     QDRANT_API_KEY: SecretStr | None = None
     QDRANT_TIMEOUT_SECONDS: int = Field(default=30, gt=0)
+    # points per upsert request (each acknowledged with wait=True)
+    QDRANT_UPSERT_BATCH_SIZE: int = Field(default=256, gt=0, le=10_000)
+    # retries of an unavailable Qdrant for idempotent writes (upserts by id, deletes by
+    # filter): jittered backoff, delay before retry n in [d/2, d], d = min(max, base·2^(n-1))
+    QDRANT_MAX_RETRIES: int = Field(default=3, ge=0)
+    QDRANT_RETRY_BASE_DELAY_SECONDS: float = Field(default=0.5, gt=0)
+    QDRANT_RETRY_MAX_DELAY_SECONDS: float = Field(default=8.0, gt=0)
 
     # ---- embeddings ---- #
     ACTIVE_EMBEDDING_PROVIDER: EmbeddingProvider = EmbeddingProvider.OPENAI
@@ -300,6 +307,10 @@ class Settings(BaseSettings):
             raise ValueError(
                 "CRAWL_FRONTIER_LEASE_SECONDS must be > "
                 "CRAWL_PAGE_TIMEOUT_SECONDS + EXTRACTION_TIMEOUT_SECONDS"
+            )
+        if self.QDRANT_RETRY_BASE_DELAY_SECONDS > self.QDRANT_RETRY_MAX_DELAY_SECONDS:
+            raise ValueError(
+                "QDRANT_RETRY_BASE_DELAY_SECONDS must be <= QDRANT_RETRY_MAX_DELAY_SECONDS"
             )
         if self.EMBEDDING_RETRY_BASE_DELAY_SECONDS > self.EMBEDDING_RETRY_MAX_DELAY_SECONDS:
             raise ValueError(

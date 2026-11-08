@@ -2092,3 +2092,24 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 69**: upsert batches with `wait=True` using `models.PointStruct(id, vector={"dense": ..., "bm25": SparseVector(indices, values)}, payload=payload.model_dump())`, retry "unavailable", and translate errors through `_call`.
   - **Step 74**: the startup bootstrap calls `ensure_collection` for every space in use (the KBs' spaces).
 - Next: Step 69: Qdrant upsert
+
+### Step 69: Qdrant upsert  (2026-11-08)
+- Status: ✅ done
+- Built: `QdrantVectorStore._upsert` (`rag_engine/vectorstores/qdrant.py`).
+  - **Batches** of `QDRANT_UPSERT_BATCH_SIZE` (256), sent in order, each **`wait=True`**, so points are searchable when `upsert` returns.
+  - **Deterministic ids** (`point_id(version, chunk_id)`, UUID5 from Step 67) make it idempotent: re-ingesting a page overwrites its points, and the same chunk id in two versions gives two points.
+  - Vectors are named: `dense` (Qdrant normalises cosine vectors on write) and `bm25` as `models.SparseVector`. **An empty sparse vector (a stopword-only chunk) is omitted**, so the point never matches a sparse query. Dense-only collections are supported. Payloads are stored as plain JSON (`ChunkPayload.model_dump(mode="json")`).
+  - **Retries** (`_retrying`, reusable for Step 70's deletes): `VectorStoreUnavailableError` is retried up to `QDRANT_MAX_RETRIES` (3) with jittered backoff (delay before retry n in [d/2, d], d = min(max, base·2^(n-1)); base 0.5 s, max 8 s). The final error carries `details["attempts"]`. Refusals (400 → `VectorStoreError`) and unknown collections (`CollectionNotFoundError`) are raised at once. Retrying is safe only because the writes are idempotent by id. `sleep` and `rng` are injectable.
+- Settings: `QDRANT_UPSERT_BATCH_SIZE` (256, ≤ 10k), `QDRANT_MAX_RETRIES` (3), `QDRANT_RETRY_BASE_DELAY_SECONDS` (0.5) and `QDRANT_RETRY_MAX_DELAY_SECONDS` (8; validator base ≤ max). `.env.example` updated.
+- Tests:
+  - `TestQdrantUpsert_S69` (8 × **HTTP and gRPC** = 16, integration, real Qdrant):
+    - The stored point is exact: deterministic id, payload equal to `ChunkPayload.from_chunk`, dense equal to the normalised input, sparse indices/values.
+    - Visible immediately (25 points, exact count with no polling); a re-upsert overwrites (3 stays 3, text revised); versions never collide.
+    - Batches of 4 → `[4, 4, 2]` with `wait=True` (spy on the client); an empty sparse vector is omitted; a dense-only collection; an unknown collection → `CollectionNotFoundError`.
+  - `TestQdrantUpsertRetries_S69` (4, unit, scripted client): 503 then a connection reset are retried, with delays in the expected ranges; retries exhaust after 4 calls with attempts=4; a 400 is never retried; the settings validator.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1746 passed, 4 skipped (container) in 293 s.
+- Decisions/notes:
+  - Pitfall worth remembering: `SparseVector` has `__len__`, so **an empty one is falsy**. Use `is None` checks, never `or` defaults (it caught a test helper here; the store code was already right).
+  - Batches go out sequentially, which keeps Qdrant's write load predictable; Step 76's pipeline overlaps embedding with upserting instead.
+  - **Step 76** (re-chunked pages): when a page now has fewer chunks than before, delete its old points first with `delete_by_filter(VectorFilter(tenant, versions=(v,), page_ids=(page,)))` (Step 70), or the dropped ordinals' points would linger. This mirrors `ChunkRepository.save_page_chunks`.
+- Next: Step 70: Qdrant delete & count

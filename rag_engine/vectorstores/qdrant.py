@@ -17,13 +17,22 @@ is retried briefly. An existing
 collection is checked against the spec (`CollectionMismatchError` on any difference), and
 missing payload indexes are added, so collections created by an older release catch up.
 
+**Upserts** (Step 69): points are written in batches of `QDRANT_UPSERT_BATCH_SIZE`, in
+order, each acknowledged (`wait=True`), so they are searchable when `upsert` returns.
+Point ids are deterministic (`point_id(version, chunk_id)`), which makes upserts
+idempotent: an unavailable Qdrant is retried (`QDRANT_MAX_RETRIES`, jittered backoff)
+without ever duplicating a point, and re-ingesting a page overwrites its points. A point's
+sparse vector is omitted when empty (a stopword-only chunk): it simply never matches a
+sparse query. Payloads are stored as plain JSON (`ChunkPayload`).
+
 Errors from either transport (HTTP or gRPC, `QDRANT_PREFER_GRPC`) are translated:
 unreachable/5xx/timeouts → `VectorStoreUnavailableError`, unknown collection →
 `CollectionNotFoundError`, anything else → `VectorStoreError`.
 """
 
 import asyncio
-from collections.abc import Awaitable
+import random
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import grpc
@@ -82,10 +91,20 @@ class _AlreadyExistsError(Exception):
 class QdrantVectorStore(BaseVectorStore):
     kind = VectorStoreType.QDRANT
 
-    def __init__(self, client: AsyncQdrantClient, *, config: Settings = settings) -> None:
+    def __init__(
+        self,
+        client: AsyncQdrantClient,
+        *,
+        config: Settings = settings,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        rng: random.Random | None = None,
+    ) -> None:
         """`client`: the process's `QdrantConnection.client` (its owner closes it)."""
         self.client = client
         self.config = config
+        self.batch_size = config.QDRANT_UPSERT_BATCH_SIZE
+        self._sleep = sleep
+        self._rng = rng or random.Random()
 
     # ---- collections (Step 68) ---- #
 
@@ -170,7 +189,11 @@ class QdrantVectorStore(BaseVectorStore):
     # ---- points: Steps 69-72 ---- #
 
     async def _upsert(self, spec: CollectionSpec, points: list[VectorPoint]) -> None:
-        raise NotImplementedError("Qdrant upsert is Step 69")
+        for start in range(0, len(points), self.batch_size):
+            batch = [_point_struct(p) for p in points[start : start + self.batch_size]]
+            await self._retrying(
+                lambda batch=batch: self.client.upsert(spec.name, points=batch, wait=True), spec
+            )
 
     async def _delete_by_filter(self, spec: CollectionSpec, filter_: VectorFilter) -> None:
         raise NotImplementedError("Qdrant delete is Step 70")
@@ -199,7 +222,24 @@ class QdrantVectorStore(BaseVectorStore):
     ) -> list[SearchHit]:
         raise NotImplementedError("Qdrant hybrid search is Step 72")
 
-    # ---- errors ---- #
+    # ---- retries and errors ---- #
+
+    async def _retrying[T](self, operation: Callable[[], Awaitable[T]], spec: CollectionSpec) -> T:
+        """Run an idempotent operation, retrying `VectorStoreUnavailableError` with backoff."""
+        retries = self.config.QDRANT_MAX_RETRIES
+        for attempt in range(retries + 1):
+            try:
+                return await self._call(operation(), spec)
+            except VectorStoreUnavailableError as exc:
+                if attempt == retries:
+                    exc.details["attempts"] = attempt + 1
+                    raise
+                ceiling = min(
+                    self.config.QDRANT_RETRY_MAX_DELAY_SECONDS,
+                    self.config.QDRANT_RETRY_BASE_DELAY_SECONDS * 2**attempt,
+                )
+                await self._sleep(ceiling / 2 + self._rng.uniform(0, ceiling / 2))
+        raise AssertionError("unreachable")
 
     async def _call[T](
         self, operation: Awaitable[T], spec: CollectionSpec, *, creating: bool = False
@@ -235,3 +275,14 @@ class QdrantVectorStore(BaseVectorStore):
             raise VectorStoreUnavailableError(
                 details={**details, "reason": type(exc).__name__}
             ) from exc
+
+
+def _point_struct(point: VectorPoint) -> models.PointStruct:
+    vectors: dict[str, Any] = {DENSE_VECTOR: list(point.dense)}
+    if point.sparse is not None and len(point.sparse):
+        vectors[SPARSE_VECTOR] = models.SparseVector(
+            indices=list(point.sparse.indices), values=list(point.sparse.values)
+        )
+    return models.PointStruct(
+        id=point.id, vector=vectors, payload=point.payload.model_dump(mode="json")
+    )
