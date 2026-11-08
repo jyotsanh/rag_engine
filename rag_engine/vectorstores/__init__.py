@@ -19,10 +19,12 @@ from .models import (
     VectorPoint,
     point_id,
 )
+from .qdrant import PAYLOAD_INDEXES, QdrantVectorStore  # registers QDRANT
 
 __all__ = [
     "DENSE_VECTOR",
     "MAX_SEARCH_LIMIT",
+    "PAYLOAD_INDEXES",
     "SPARSE_VECTOR",
     "BaseVectorStore",
     "ChunkPayload",
@@ -31,6 +33,7 @@ __all__ = [
     "CollectionSpec",
     "InvalidVectorDataError",
     "InvalidVectorQueryError",
+    "QdrantVectorStore",
     "SearchHit",
     "UnsupportedVectorStoreError",
     "VectorFilter",

@@ -2068,3 +2068,27 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 68**: the Qdrant store registers `VectorStoreType.QDRANT` and creates collections with named `dense` (size = dims, cosine) plus sparse `bm25` with `modifier=IDF`, and payload indexes `tenant_id` (is_tenant), `kb_id`, `source_id`, `version`, `page_id`, `url`. A mismatch with an existing collection → `CollectionMismatchError`.
   - **Step 71** must implement `url_prefix` (a keyword index can't prefix-match; options include a text index on url with a prefix tokenizer, or storing path segments). The in-memory reference uses `startswith`.
 - Next: Step 68: Qdrant collection management
+
+### Step 68: Qdrant collection management  (2026-11-08)
+- Status: ✅ done
+- Built: `rag_engine/vectorstores/qdrant.py` → **`QdrantVectorStore(client, *, config)`**, registered for `VectorStoreType.QDRANT` (`VectorStoreDispatcher.create(client=connection.client)`); `PAYLOAD_INDEXES` is exported.
+  - **`ensure_collection(spec)`** (one collection per embedding space, `chunks__<model>__<dims>`):
+    - Creates named **`dense`** (size = dims, **cosine**) plus sparse **`bm25`** with **`modifier=IDF`** (none for a dense-only spec).
+    - **Keyword payload indexes**: `tenant_id` with **`is_tenant=True`** (Qdrant co-locates and optimises per-tenant search), `kb_id`, `source_id`, `version`, `page_id`, and **`url` with `prefix=True`**. Qdrant 1.19's keyword prefix matching (`MatchPrefix`) resolves the `url_prefix` question raised in Step 67 for Step 71, with no extra field.
+    - **Idempotent and concurrency-safe**: a create that loses a race (HTTP 409 / gRPC ALREADY_EXISTS) counts as "exists". **Found by the concurrency test**: with HTTP, `get_collection` right after a concurrent create briefly answers **500 "0 of 0 read operations failed"** while the shards initialise. The schema read retries "unavailable" up to 5 times (0.1 → 0.8 s, ~1.5 s total). The test failed 3/3 before the fix and passed 5/5 after.
+    - **Verifies an existing collection** against the spec: named dense vector, size, cosine, sparse presence and IDF modifier, no unexpected sparse vector. Differences → `CollectionMismatchError` listing every problem.
+    - **Adds missing payload indexes** on every ensure, so collections created by an older release catch up.
+  - **Error translation** over both transports (`QDRANT_PREFER_GRPC`): 404 / NOT_FOUND → `CollectionNotFoundError`; 5xx/408/429 and gRPC UNAVAILABLE/DEADLINE_EXCEEDED/RESOURCE_EXHAUSTED/ABORTED/INTERNAL/UNKNOWN, plus connection/timeout/OS errors → `VectorStoreUnavailableError` (503); other refusals → `VectorStoreError`.
+  - The point operations are explicit placeholders (`NotImplementedError` naming the step): upsert (69), delete/count (70), dense (71) and hybrid search (72).
+- Tests:
+  - `TestQdrantCollections_S68` (11 cases × **HTTP and gRPC** = 22, integration, real Qdrant 1.19.2):
+    - The full schema (dense 256/cosine, bm25 IDF, 6 keyword indexes, `is_tenant`, url `prefix`); a second ensure is a no-op; **8 concurrent ensures** never error and one creates; a dense-only collection.
+    - 5 mismatches refused (size, distance, missing sparse, sparse without IDF, unnamed/other dense vector).
+    - An old collection without indexes gets them added; the dispatcher builds the store.
+  - `TestQdrantUnavailable_S68` (2): an unreachable Qdrant over HTTP and gRPC → `VectorStoreUnavailableError`.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1726 passed, 4 skipped (container) in 263 s.
+- Decisions/notes:
+  - Kept the default HNSW (`m=16`) rather than the per-tenant-only graph (`m=0, payload_m=16`). Every search filters by tenant, so the per-tenant graph would work, but it gives up any global search and needs tuning. `is_tenant` already gives the storage layout benefit. Revisit with Step 94 metrics if large shared collections get slow.
+  - **Step 69**: upsert batches with `wait=True` using `models.PointStruct(id, vector={"dense": ..., "bm25": SparseVector(indices, values)}, payload=payload.model_dump())`, retry "unavailable", and translate errors through `_call`.
+  - **Step 74**: the startup bootstrap calls `ensure_collection` for every space in use (the KBs' spaces).
+- Next: Step 69: Qdrant upsert
