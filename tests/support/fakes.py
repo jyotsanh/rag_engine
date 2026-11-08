@@ -3,9 +3,9 @@
 import hashlib
 import math
 import random
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 
-from rag_engine.config import EmbeddingProvider
+from rag_engine.config import EmbeddingModelName, EmbeddingProvider
 from rag_engine.crawling import CachedRobots
 from rag_engine.domain import ContentHashClaim
 from rag_engine.embeddings import (
@@ -15,7 +15,7 @@ from rag_engine.embeddings import (
     ProviderResult,
     Vector,
 )
-from rag_engine.infrastructure import HealthCheck
+from rag_engine.infrastructure import DatabaseUnavailableError, HealthCheck
 
 
 class NoopInfrastructure:
@@ -112,3 +112,27 @@ class FakeEmbedder(BaseEmbedder):
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class InMemoryEmbeddingCache:
+    """Satisfies `EmbeddingCacheStore`; `fail_reads`/`fail_writes` simulate a Mongo outage."""
+
+    def __init__(self) -> None:
+        self.vectors: dict[str, list[float]] = {}
+        self.reads: list[list[str]] = []
+        self.fail_reads = False
+        self.fail_writes = False
+
+    async def get_many(self, keys: Sequence[str], *, dimensions: int) -> dict[str, list[float]]:
+        self.reads.append(list(keys))
+        if self.fail_reads:
+            raise DatabaseUnavailableError(details={"reason": "ServerSelectionTimeoutError"})
+        return {k: v for k in keys if (v := self.vectors.get(k)) and len(v) == dimensions}
+
+    async def put_many(
+        self, vectors: Mapping[str, list[float]], *, model: EmbeddingModelName, dimensions: int
+    ) -> int:
+        if self.fail_writes:
+            raise DatabaseUnavailableError(details={"reason": "AutoReconnect"})
+        self.vectors.update(vectors)
+        return len(vectors)

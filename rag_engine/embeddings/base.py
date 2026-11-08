@@ -70,6 +70,7 @@ class EmbeddingBatch:
     vectors: list[Vector]
     space: EmbeddingSpace
     usage: EmbeddingUsageCounts = field(default_factory=EmbeddingUsageCounts)
+    cached: int = 0  # inputs served from the embedding cache (Step 64), not by the provider
 
     def __len__(self) -> int:
         return len(self.vectors)
@@ -80,6 +81,22 @@ class EmbeddingBatch:
         if len(self.vectors) != 1:
             raise ValueError(f"batch has {len(self.vectors)} vectors, not 1")
         return self.vectors[0]
+
+
+class Embedder(Protocol):
+    """What consumers (ingest, search) need: a `BaseEmbedder` or a `CachedEmbedder`."""
+
+    @property
+    def space(self) -> EmbeddingSpace: ...
+
+    @property
+    def dimensions(self) -> int: ...
+
+    async def embed_documents(self, texts: Sequence[str]) -> EmbeddingBatch: ...
+
+    async def embed_query(self, text: str) -> EmbeddingBatch: ...
+
+    async def aclose(self) -> None: ...
 
 
 class BaseEmbedder(ABC):

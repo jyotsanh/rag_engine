@@ -1955,3 +1955,31 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Retry budget: with the defaults, a batch can spend up to ~2 min in backoff (1 + 2 + 4 + … capped at 60 s, 6 retries) plus provider waits ≤ 300 s each. That fits the 2 h job cap. Step 76 should treat a surfaced `EmbeddingError` as **job-fatal** only when it's permanent (auth, request); a retryable one that ran out of retries can fail the job with `embedding_unavailable` so Step 80's requeue can try later.
   - **Step 64** (cache) wraps an embedder and only sends misses through it, so cached chunks cost no requests or retries.
 - Next: Step 64: Embedding cache
+
+### Step 64: Embedding cache  (2026-11-08)
+- Status: ✅ done
+- Built:
+  - **Domain** `rag_engine/domain/embedding_cache.py`:
+    - `EmbeddingCacheEntry` (collection `embedding_cache`), with **`_id` = `embedding_cache_key(model, dims, embed_text)` = sha256(`model|dims|embed_text`)**. Fields `model`, `dimensions`, `vector` and `last_used_at`.
+    - The vector is stored as **packed little-endian float32 bytes** (`pack_vector`/`unpack_vector`): 4 B per dimension (~6 KB at 1536 dims, about half the size of BSON doubles), at the model's own precision (Qdrant stores float32 too).
+    - TTL index `embedding_cache_ttl` on `last_used_at`, set to `EMBEDDING_CACHE_TTL_DAYS` (taken when indexes are created).
+  - **`EmbeddingCacheRepository`** (exported):
+    - `get_many(keys, *, dimensions)`: primary-key `$in` in slices of 1000, de-duplicated. It filters on dimensions, skips a corrupt entry whose length mismatches, and **refreshes `last_used_at` on hits** so only unused entries expire.
+    - `put_many(vectors, *, model, dimensions)`: unordered `ReplaceOne` upserts in slices (a concurrent writer of the same key wrote the same vector); a dimension mismatch is refused. Mongo errors raise `DatabaseUnavailableError`.
+  - **`CachedEmbedder(inner, store)`** (`rag_engine/embeddings/cache.py`, exported): a drop-in **`Embedder`** (new protocol in `base.py`: `space`, `dimensions`, `embed_documents`, `embed_query`, `aclose`; satisfied by `BaseEmbedder` and the wrapper).
+    - It keys all inputs, reads the hits, embeds only the **misses, each distinct text once**, stores them, and returns every vector in input order.
+    - `usage` counts only real provider calls; the new **`EmbeddingBatch.cached`** counts the inputs served from the cache.
+    - Queries pass through uncached (Step 92 caches queries).
+    - **It never fails an embedding**: an unreadable store means everything is a miss; an unwritable store still returns the vectors (both logged). It depends only on the `EmbeddingCacheStore` protocol, so `embeddings` doesn't import `repositories`.
+- Settings: `EMBEDDING_CACHE_ENABLED` (true; Step 76 decides whether to wrap) and `EMBEDDING_CACHE_TTL_DAYS` (90). `.env.example` updated.
+- Test support: `InMemoryEmbeddingCache` (`fail_reads`/`fail_writes`, records reads) in `tests/support/fakes.py`.
+- Tests:
+  - `TestEmbeddingCache_S64` (10, unit): a second identical run makes 0 provider calls (cached=3, zero usage); only misses are embedded, in order; a repeated text is embedded once; spaces never share vectors; unreadable → embed all; unwritable → vectors still returned; queries and empty batches bypass; drop-in (space, dims, closes inner); cache keys (determinism, sensitivity to model/dims/text, unknown model); float32 packing (24 KB/6 KB, close, idempotent).
+  - `TestEmbeddingCacheRepository_S64` (6, integration): round trip by key with repeated/missing keys; a dimension mismatch is a miss and a bad put is refused; a hit refreshes a 60-day-old `last_used_at`; 2500 keys across slices; the TTL index (90 days); **a re-crawl of 30 chunks with one edited sends only the edited chunk to the provider** (`CachedEmbedder` + Mongo).
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1665 passed, 4 skipped (container) in 271 s.
+- Decisions/notes:
+  - The key covers `embed_text` (title + heading path + text), so retitling a page or moving a section re-embeds it. That's correct, because its vector changes.
+  - Changing `EMBEDDING_CACHE_TTL_DAYS` later needs the TTL index updated (`collMod`) or dropped and recreated. Step 74's bootstrap or a migration note should handle it.
+  - Sizing: 1M cached chunks at 1536 dims is about 6 GB in Mongo. The TTL keeps it to what live sources still use.
+  - **Step 76**: `embedder = get_embedder(kb.space)`; if `EMBEDDING_CACHE_ENABLED`, wrap it in `CachedEmbedder(embedder, EmbeddingCacheRepository(db))`. Meter `batch.usage` (Step 65) and report `cached` as a metric.
+- Next: Step 65: Usage metering

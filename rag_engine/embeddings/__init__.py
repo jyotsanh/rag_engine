@@ -1,5 +1,6 @@
 from .base import (
     BaseEmbedder,
+    Embedder,
     EmbeddingBatch,
     EmbeddingUsageCounts,
     InputType,
@@ -7,6 +8,7 @@ from .base import (
     TokenCounter,
     Vector,
 )
+from .cache import CachedEmbedder, EmbeddingCacheStore
 from .dispatcher import get_embedder, register_embedder, registered_embedders
 from .exceptions import (
     EmbeddingAuthError,
@@ -48,8 +50,11 @@ __all__ = [
     "EMBEDDING_MODELS",
     "MIN_REDUCED_DIMENSIONS",
     "BaseEmbedder",
+    "CachedEmbedder",
+    "Embedder",
     "EmbeddingAuthError",
     "EmbeddingBatch",
+    "EmbeddingCacheStore",
     "EmbeddingError",
     "EmbeddingInputError",
     "EmbeddingModelSpec",

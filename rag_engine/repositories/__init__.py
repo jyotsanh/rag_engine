@@ -2,6 +2,7 @@ from .api_keys import LAST_USED_RESOLUTION, ApiKeyRepository
 from .base import BaseRepository, Filter
 from .chunks import ChunkRepository
 from .content_claims import ContentClaimRepository
+from .embedding_cache import EmbeddingCacheRepository
 from .exceptions import (
     ApiKeyNotFoundError,
     DocumentNotFoundError,
@@ -35,6 +36,7 @@ __all__ = [
     "ContentClaimRepository",
     "DocumentNotFoundError",
     "DuplicateDocumentError",
+    "EmbeddingCacheRepository",
     "Filter",
     "InvalidCursorError",
     "InvalidJobTransitionError",

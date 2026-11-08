@@ -130,6 +130,10 @@ class Settings(BaseSettings):
     EMBEDDING_RETRY_MAX_DELAY_SECONDS: float = Field(default=60.0, gt=0)
     # a provider asking to wait longer than this fails the request instead of stalling it
     EMBEDDING_RETRY_AFTER_MAX_SECONDS: float = Field(default=300.0, ge=0)
+    # reuse vectors of unchanged texts across jobs (Mongo `embedding_cache`, Step 64)
+    EMBEDDING_CACHE_ENABLED: bool = True
+    # evict cache entries unused for this long (TTL index; applies when indexes are created)
+    EMBEDDING_CACHE_TTL_DAYS: int = Field(default=90, ge=1)
     # tenant default when the admin does not pick one; a KB locks its model at creation
     DEFAULT_EMBEDDING_MODEL: EmbeddingModelName = EmbeddingModelName.TEXT_EMBEDDING_3_SMALL
 

@@ -2,6 +2,13 @@ from .api_key import ApiKey
 from .base import MongoDocument, new_id, registered_documents, utc_now
 from .chunk import Chunk, chunk_id
 from .content_claim import CLAIM_TTL_SECONDS, ContentHashClaim
+from .embedding_cache import (
+    EMBEDDING_CACHE_TTL_SECONDS,
+    EmbeddingCacheEntry,
+    embedding_cache_key,
+    pack_vector,
+    unpack_vector,
+)
 from .enums import (
     ACTIVE_JOB_STATUSES,
     JOB_TRANSITIONS,
@@ -27,6 +34,7 @@ from .tenant import TENANT_NAME_COLLATION, Tenant, TenantQuotas
 __all__ = [
     "ACTIVE_JOB_STATUSES",
     "CLAIM_TTL_SECONDS",
+    "EMBEDDING_CACHE_TTL_SECONDS",
     "JOB_TRANSITIONS",
     "MAX_DEFERRED_LINKS",
     "REPORT_SAMPLES_PER_REASON",
@@ -42,6 +50,7 @@ __all__ = [
     "CrawlStopReason",
     "DeferredLink",
     "DiscoveredVia",
+    "EmbeddingCacheEntry",
     "EmbeddingModelName",
     "EmbeddingUsage",
     "JobCounters",
@@ -62,7 +71,10 @@ __all__ = [
     "TenantQuotas",
     "TenantStatus",
     "chunk_id",
+    "embedding_cache_key",
     "new_id",
+    "pack_vector",
     "registered_documents",
+    "unpack_vector",
     "utc_now",
 ]
