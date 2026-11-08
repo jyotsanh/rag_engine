@@ -23,6 +23,7 @@ from .enums import (
     RenderedWith,
     ResourceStatus,
     TenantStatus,
+    UsagePurpose,
 )
 from .job import CrawlConfig, CrawlJob, EmbeddingUsage, JobCounters, JobError
 from .knowledge_base import KnowledgeBase
@@ -30,6 +31,7 @@ from .page import MAX_DEFERRED_LINKS, DeferredLink, Page
 from .report import REPORT_SAMPLES_PER_REASON, CrawlReport, PageSample, ReasonCount
 from .source import Source, SourceStats
 from .tenant import TENANT_NAME_COLLATION, Tenant, TenantQuotas
+from .usage import TenantUsage, tenant_usage_id, usage_period
 
 __all__ = [
     "ACTIVE_JOB_STATUSES",
@@ -70,11 +72,15 @@ __all__ = [
     "Tenant",
     "TenantQuotas",
     "TenantStatus",
+    "TenantUsage",
+    "UsagePurpose",
     "chunk_id",
     "embedding_cache_key",
     "new_id",
     "pack_vector",
     "registered_documents",
+    "tenant_usage_id",
     "unpack_vector",
+    "usage_period",
     "utc_now",
 ]

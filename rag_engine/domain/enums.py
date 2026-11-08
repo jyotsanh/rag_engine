@@ -134,6 +134,13 @@ _STOP_PAGE_REASON = {
 }
 
 
+class UsagePurpose(StrEnum):
+    """What embedding usage was for (Step 65)."""
+
+    INGEST = "ingest"  # chunks embedded by crawl jobs
+    QUERY = "query"  # search queries embedded by the API
+
+
 class ContentKind(StrEnum):
     """Extractor family chosen for a fetched resource (Step 38 registry keys on this)."""
 
@@ -172,4 +179,5 @@ __all__ = [
     "RenderedWith",
     "ResourceStatus",
     "TenantStatus",
+    "UsagePurpose",
 ]

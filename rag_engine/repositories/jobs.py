@@ -292,15 +292,21 @@ class JobRepository(BaseRepository[CrawlJob]):
         )
         return self._load(raw).counters
 
-    async def add_usage(self, job_id: str, run_id: str, *, requests: int, tokens: int) -> None:
-        """Embedding API usage (Step 76)."""
-        if requests < 0 or tokens < 0:
+    async def add_usage(
+        self, job_id: str, run_id: str, *, requests: int, tokens: int, cached: int = 0
+    ) -> None:
+        """Embedding usage of this run (Step 65): `$inc` on the job's `usage`."""
+        if requests < 0 or tokens < 0 or cached < 0:
             raise ValueError("usage increments must be >= 0")
         await self._held_update(
             job_id,
             run_id,
             {
-                "$inc": {"usage.requests": requests, "usage.tokens": tokens},
+                "$inc": {
+                    "usage.requests": requests,
+                    "usage.tokens": tokens,
+                    "usage.cached": cached,
+                },
                 "$set": {"updated_at": self._clock()},
             },
         )

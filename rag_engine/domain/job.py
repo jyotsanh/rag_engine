@@ -66,8 +66,12 @@ class JobCounters(BaseModel):
 
 
 class EmbeddingUsage(BaseModel):
+    """What a job's embedding cost (Step 65): provider requests and billed input tokens, plus
+    the inputs the embedding cache served for free (Step 64)."""
+
     requests: NonNegativeInt = 0
     tokens: NonNegativeInt = 0
+    cached: NonNegativeInt = 0
 
 
 class JobError(BaseModel):

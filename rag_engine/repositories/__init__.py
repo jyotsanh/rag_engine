@@ -24,6 +24,7 @@ from .pages import PageOutcome, PageRepository, truncate_markdown
 from .pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, Page, SortOrder
 from .sources import SourceRepository
 from .tenants import TenantRepository
+from .usage import UsageRepository, UsageTotals
 
 __all__ = [
     "DEFAULT_PAGE_SIZE",
@@ -56,5 +57,7 @@ __all__ = [
     "TenantNameTakenError",
     "TenantNotFoundError",
     "TenantRepository",
+    "UsageRepository",
+    "UsageTotals",
     "truncate_markdown",
 ]

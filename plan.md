@@ -1983,3 +1983,27 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Sizing: 1M cached chunks at 1536 dims is about 6 GB in Mongo. The TTL keeps it to what live sources still use.
   - **Step 76**: `embedder = get_embedder(kb.space)`; if `EMBEDDING_CACHE_ENABLED`, wrap it in `CachedEmbedder(embedder, EmbeddingCacheRepository(db))`. Meter `batch.usage` (Step 65) and report `cached` as a metric.
 - Next: Step 65: Usage metering
+
+### Step 65: Usage metering  (2026-11-08)
+- Status: ✅ done
+- Built:
+  - **Job usage**: `EmbeddingUsage` (on `CrawlJob.usage`) gains **`cached`**, the inputs the embedding cache served. `JobRepository.add_usage(..., cached=0)` `$inc`s all three and is guarded by the run. Shown in the job detail (Step 85).
+  - **Tenant rollup**:
+    - `UsagePurpose` (`ingest` | `query`, domain enum).
+    - `TenantUsage` (collection `tenant_usage`): **one row per (tenant, UTC month `YYYY-MM`, purpose, model)** with requests, tokens and cached. The deterministic `_id` (`tenant_usage_id`, sha256 of the four parts) means concurrent workers `$inc` the same row (upsert on an `_id` equality is retried by the server on a duplicate-key race). Index `tenant_period`; `usage_period(dt)` gives the month.
+  - **`UsageRepository`** (exported; injectable clock): `record(tenant, purpose, model, *, requests, tokens, cached)` (`$inc` + `$setOnInsert`, validated ≥ 0), `for_tenant(tenant, period=None)` (newest month first, then purpose, then model), `totals(tenant, period, purpose=None) -> UsageTotals`.
+  - **`UsageMeter`** (`rag_engine/services/usage.py`, exported):
+    - `record_ingest(job, run_id, batch)` writes the job first (run-guarded) and **then** the tenant row, so a superseded run (`JobRunSupersededError`) bills nothing.
+    - `record_query(tenant_id, batch)` writes the tenant only; queries have no job.
+    - Empty batches (no requests and no cache hits) aren't written. `tokens` are provider-billed input tokens; `cached` is what the cache saved.
+- Tests: `TestUsageMetering_S65` (9, integration):
+  - Ingest accumulates on the job (3 requests / 1000 tokens / 5 cached) and the tenant row; a superseded run bills nothing; queries go on the tenant only; empty batches aren't written.
+  - Rows split by month (Oct 31 23:59 vs Nov 1 00:00), purpose, model and tenant, with ordering and totals (overall, per purpose, other month).
+  - **20 concurrent records land on one row** with exact sums; increments are validated.
+  - A re-crawl through `CachedEmbedder` books 1 request and 4 cached (the second pass is free); the month is computed in UTC.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1674 passed, 4 skipped (container) in 297 s.
+- Decisions/notes:
+  - Months are UTC calendar months, which is what a monthly invoice or quota needs. A tenant token quota isn't part of this step; if added later (Step 84 quotas), `totals(tenant, current period)` is the input.
+  - At-least-once: a job that crashes after embedding but before the job write loses that batch's metering; a resumed job re-embeds through the cache, so the retry is mostly cached hits. Accepted, since the cache makes over- and under-counting small.
+  - **Step 76**: after each `embed_documents`, call `meter.record_ingest(job, run_id, batch)`. **Step 89**: after `embed_query`, call `meter.record_query(tenant_id, batch)`. **Step 85**: serve `job.usage`; the tenant's usage endpoint/admin view can read `UsageRepository.for_tenant`.
+- Next: Step 66: Sparse embedder
