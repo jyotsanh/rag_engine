@@ -9,6 +9,7 @@ dependencies = [
     "charset-normalizer>=3.4",
     "defusedxml>=0.7.1",
     "fastapi>=0.120",
+    "fastembed>=0.7",
     "httpcore>=1.0.9",
     "httpx>=0.28.1",
     "idna>=3.10",

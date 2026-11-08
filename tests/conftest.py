@@ -20,6 +20,9 @@ TEST_ENV: dict[str, str] = {
     "ADMIN_API_KEY": "test-admin-key-0123456789abcdef0123456789",
     "API_KEY_PEPPER": "test-pepper-0123456789abcdef0123456789abcd",
     "OPENAI_API_KEY": "sk-test-not-a-real-key",
+    # public models (fastembed BM25) need no token; an expired local `hf auth login` token
+    # would otherwise be sent and rejected with 401
+    "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
 }
 
 for _key, _value in TEST_ENV.items():

@@ -5,6 +5,7 @@ from .enums import (
     Environment,
     JsRenderMode,
     RerankerType,
+    SparseEmbedderType,
     VectorStoreType,
 )
 from .settings import Settings, settings
@@ -25,6 +26,7 @@ __all__ = [
     "JsRenderMode",
     "RerankerType",
     "Settings",
+    "SparseEmbedderType",
     "VectorStoreType",
     "bind_log_context",
     "get_log_context",

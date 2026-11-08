@@ -11,6 +11,7 @@ from rag_engine.config.enums import (
     Environment,
     JsRenderMode,
     RerankerType,
+    SparseEmbedderType,
     VectorStoreType,
 )
 
@@ -136,6 +137,15 @@ class Settings(BaseSettings):
     EMBEDDING_CACHE_TTL_DAYS: int = Field(default=90, ge=1)
     # tenant default when the admin does not pick one; a KB locks its model at creation
     DEFAULT_EMBEDDING_MODEL: EmbeddingModelName = EmbeddingModelName.TEXT_EMBEDDING_3_SMALL
+
+    # ---- sparse embeddings (Step 66) ---- #
+    SPARSE_EMBEDDER: SparseEmbedderType = SparseEmbedderType.BM25
+    SPARSE_EMBEDDING_MODEL: str = "Qdrant/bm25"
+    # stemmer + stopword list (fastembed BM25 languages: english, german, french, ...)
+    SPARSE_EMBEDDING_LANGUAGE: str = "english"
+    # where fastembed keeps model files; images bake them here (Step 95, with HF_HUB_OFFLINE=1).
+    # None: fastembed's default (<tmp>/fastembed_cache)
+    FASTEMBED_CACHE_DIR: str | None = None
 
     # ---- chunking (Steps 55-58) ---- #
     CHUNKER: ChunkerType = ChunkerType.STRUCTURE

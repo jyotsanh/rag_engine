@@ -44,12 +44,20 @@ from .resilience import (
     gather_in_order,
     provider_gate,
 )
+from .sparse import (
+    BaseSparseEmbedder,
+    FastembedBm25Embedder,
+    SparseVector,
+    download_model,
+    get_sparse_embedder,
+)
 from .tokenizer import TiktokenTokenizer, tokenizer_for
 
 __all__ = [
     "EMBEDDING_MODELS",
     "MIN_REDUCED_DIMENSIONS",
     "BaseEmbedder",
+    "BaseSparseEmbedder",
     "CachedEmbedder",
     "Embedder",
     "EmbeddingAuthError",
@@ -65,10 +73,12 @@ __all__ = [
     "EmbeddingSpace",
     "EmbeddingUnavailableError",
     "EmbeddingUsageCounts",
+    "FastembedBm25Embedder",
     "InputType",
     "OpenAIEmbedder",
     "ProviderGate",
     "ProviderResult",
+    "SparseVector",
     "TiktokenTokenizer",
     "TokenCounter",
     "UnsupportedEmbeddingDimensionsError",
@@ -76,10 +86,12 @@ __all__ = [
     "UnsupportedEmbeddingProviderError",
     "Vector",
     "call_with_retries",
+    "download_model",
     "duration_seconds",
     "gather_in_order",
     "get_embedder",
     "get_model_spec",
+    "get_sparse_embedder",
     "provider_gate",
     "rate_limit_reset_seconds",
     "register_embedder",

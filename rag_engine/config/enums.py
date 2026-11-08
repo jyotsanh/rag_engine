@@ -21,6 +21,12 @@ class EmbeddingProvider(StrEnum):
     OPENAI = "openai"
 
 
+class SparseEmbedderType(StrEnum):
+    """Sparse (lexical) embedders for hybrid search (Step 66)."""
+
+    BM25 = "bm25"  # fastembed `Qdrant/bm25`; Qdrant applies IDF at query time
+
+
 class RerankerType(StrEnum):
     CROSS_ENCODER = "cross_encoder"
 

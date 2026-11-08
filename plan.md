@@ -2007,3 +2007,33 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - At-least-once: a job that crashes after embedding but before the job write loses that batch's metering; a resumed job re-embeds through the cache, so the retry is mostly cached hits. Accepted, since the cache makes over- and under-counting small.
   - **Step 76**: after each `embed_documents`, call `meter.record_ingest(job, run_id, batch)`. **Step 89**: after `embed_query`, call `meter.record_query(tenant_id, batch)`. **Step 85**: serve `job.usage`; the tenant's usage endpoint/admin view can read `UsageRepository.for_tenant`.
 - Next: Step 66: Sparse embedder
+
+### Step 66: Sparse embedder  (2026-11-08)
+- Status: ✅ done
+- Built: `rag_engine/embeddings/sparse.py` (exported).
+  - **`SparseVector(indices, values)`**: indices sorted, unique and uint32; values finite and > 0. Empty is valid (a stopword-only text). `from_pairs` sorts, sums duplicates and drops zeros.
+  - **`BaseSparseEmbedder`**: subclasses implement the sync `_embed_documents` / `_embed_query`. The final async `embed_documents` / `embed_query` refuse empty texts (`EmbeddingInputError` with the index), make no model call (or load) for an empty batch, **run the CPU-bound model in a worker thread** (`asyncio.to_thread`), and check one vector per input (`EmbeddingResponseError`).
+  - **`FastembedBm25Embedder`** (`SparseEmbedderType.BM25`, model `Qdrant/bm25`):
+    - Documents get BM25 term weights (term frequency saturated by length; k=1.2, b=0.75); queries get weight 1 per term.
+    - **IDF is applied by Qdrant** (the sparse vector's IDF modifier, Step 68), so corpus statistics never go stale as sources come and go.
+    - Stemmer and stopwords come from `SPARSE_EMBEDDING_LANGUAGE`.
+    - The model loads lazily, **once**, with a thread lock for racing first uses; the `loader` is injectable.
+  - **`get_sparse_embedder(kind=None, config)`**: one cached instance per process for the global settings (keyed by model/language/cache dir); a custom config gets a fresh instance. `download_model(config)` fetches the files.
+  - **`python -m rag_engine.embeddings.download`** (`embeddings/download.py`): the **image bake step** for Step 95. It caches the BM25 files in `FASTEMBED_CACHE_DIR` and warms the tiktoken encoding; images then run with `HF_HUB_OFFLINE=1`.
+- Config:
+  - `SparseEmbedderType` (`bm25`, exported).
+  - Settings `SPARSE_EMBEDDER`, `SPARSE_EMBEDDING_MODEL` (`Qdrant/bm25`), `SPARSE_EMBEDDING_LANGUAGE` (`english`) and `FASTEMBED_CACHE_DIR` (None means fastembed's default `<tmp>/fastembed_cache`). `.env.example` updated.
+- Deps: **`fastembed` 0.9.1** (runtime). The lock adds fsspec, hf-xet, huggingface-hub, mmh3, py-rust-stemmers, tokenizers and tqdm; numpy and onnxruntime were already present. The model is about 10 MB (stopword lists + config).
+- Tests:
+  - `TestSparseEmbedder_S66` (14, unit):
+    - Real BM25: well-formed, deterministic doc vectors; the query vocabulary ⊆ the doc's, with stemmed "calibration" matching "calibrated" and query weights all 1.0; one stem for "sorting"/"sorts"; a stopword-only text → empty vector; term weight lower in a 300-word doc than in a 2-word doc.
+    - Scripted model: an empty batch never loads; empty texts are refused; the model runs off the main thread with duplicates merged and sorted; a wrong count is rejected; 8 concurrent first uses → **1 load**.
+    - `SparseVector` validation and `from_pairs`; one shared instance vs a custom config; `download_model`.
+  - `tests/conftest.py` sets **`HF_HUB_DISABLE_IMPLICIT_TOKEN=1`** for the test run (see below).
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1688 passed, 4 skipped (container) in 240 s. The first full run had **one failure in an unrelated Step 52 test** (`test_cancel_outranks_a_cap_and_wakes_idle_workers`). It passed 3/3 in isolation, in a full integration run (310/310) and in a second full run. It's most likely its `< 3 s` wall-clock assertion under load; no traceback was captured, so it's left as is and **flagged** here.
+- Decisions/notes:
+  - **Hugging Face token on this machine**: the first download failed with 401 because `huggingface_hub` sent an **expired token from the local `hf auth login`** to a public repo. Library code doesn't touch tokens or the environment. Tests disable implicit tokens, and running the download CLI locally needs `HF_HUB_DISABLE_IMPLICIT_TOKEN=1` (or re-login). Images download at build time and run offline.
+  - fastembed downloads on first use (~3 s, then cached). The unit tests use the cached model, like tiktoken; CI must allow that one download or pre-bake the cache.
+  - **Step 68**: create the collection's sparse vector `bm25` with `modifier=IDF`. **Step 76**: sparse-embed the same `embed_text` as the dense vectors (title and headings help keyword matches). Sparse is local CPU work, so it isn't metered.
+  - **Phase H (Embeddings, 61–66) is complete.**
+- Next: Step 67: Vector store framework
