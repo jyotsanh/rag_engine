@@ -2132,3 +2132,22 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - `delete_by_filter` stays count-less (Qdrant's delete doesn't report one); callers that log "deleted N" call `count` first.
   - **Step 78** (finalization): on failure/cancel, `delete_by_filter(VectorFilter(tenant, source_ids=(src,), versions=(job,)))`; after a successful flip, delete the old version the same way (enqueued as cleanup). **Step 81** (cascades): a source → `source_ids`; a KB → `kb_ids` (one call per collection the KB's space uses).
 - Next: Step 71: Qdrant dense search
+
+### Step 71: Qdrant dense search  (2026-11-08)
+- Status: ✅ done
+- Built: `QdrantVectorStore._search_dense` (`rag_engine/vectorstores/qdrant.py`).
+  - Uses the **Query API**: `query_points(query=vector, using="dense", query_filter=to_qdrant_filter(filter_), limit, score_threshold, with_payload=True, with_vectors=False)`, retried like the other idempotent calls.
+  - **Filters** (from Step 70): tenant always; KB, source, **active versions**, pages and **URL prefix** (`MatchPrefix` on the prefix-enabled `url` index). For active versions, Step 73 passes each source's `active_version`; job ids are globally unique, so `version ∈ active_versions` is exact without pairing versions to sources.
+  - **Scores** are cosine similarities, best first; `score_threshold` is applied inside Qdrant.
+  - `_hits()` (shared with Step 72) converts scored points to `SearchHit`s, validating payloads back into `ChunkPayload`.
+- Tests:
+  - `TestQdrantDenseSearch_S71` (8 × **HTTP and gRPC** = 16, integration, real Qdrant). A 60-point corpus across tenants, KBs, sources, versions and URL sections:
+    - **Matches the in-memory reference** (`InMemoryVectorStore`, exact cosine) for **8 filters × 5 queries**: same ids, same order, scores within 1e-5, every hit inside its filter.
+    - Hits carry the full payload (a self-query scores 1.0); another tenant's identical vector is never returned; only active versions are searched (an old version's exact vector is excluded); the URL prefix scopes results (including `docs/api/` under `docs/`).
+    - `score_threshold` keeps exactly the top 5; the limit is respected with descending scores; no match → `[]`; an unknown collection → `CollectionNotFoundError`.
+  - Plus a fixture guard: every filter selects a non-trivial subset.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1781 passed, 4 skipped (container) in 415 s.
+- Decisions/notes:
+  - Qdrant normalises cosine vectors on write and the reference computes exact cosine, so scores agree to float32 precision and rankings match exactly (random 16-d vectors have no near-ties).
+  - **Step 89** (search API): `search_dense(spec, query_vector, VectorFilter(tenant, kb_ids=(kb,), versions=active_versions, url_prefix=...), limit, score_threshold)`.
+- Next: Step 72: Qdrant hybrid search

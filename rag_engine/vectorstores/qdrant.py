@@ -32,6 +32,13 @@ deleting a version, a source, a KB or a whole tenant is one filtered call. Delet
 acknowledged (`wait=True`) and retried like upserts (deleting twice is harmless); counts
 are exact. Searches (Steps 71-72) use the same translation.
 
+**Dense search** (Step 71): the Query API on the named `dense` vector with the translated
+filter, so every search is scoped to a tenant and optionally to KBs, sources, the active
+versions (Step 73 passes each source's `active_version`; job ids are globally unique, so
+`version ∈ active` is exact), pages and a URL prefix. Scores are cosine similarities,
+best first; `score_threshold` drops weaker hits inside Qdrant. Reads are retried like the
+other idempotent calls.
+
 Errors from either transport (HTTP or gRPC, `QDRANT_PREFER_GRPC`) are translated:
 unreachable/5xx/timeouts → `VectorStoreUnavailableError`, unknown collection →
 `CollectionNotFoundError`, anything else → `VectorStoreError`.
@@ -59,6 +66,7 @@ from rag_engine.vectorstores.exceptions import (
 from rag_engine.vectorstores.models import (
     DENSE_VECTOR,
     SPARSE_VECTOR,
+    ChunkPayload,
     CollectionSpec,
     SearchHit,
     VectorFilter,
@@ -225,7 +233,20 @@ class QdrantVectorStore(BaseVectorStore):
         limit: int,
         score_threshold: float | None,
     ) -> list[SearchHit]:
-        raise NotImplementedError("Qdrant dense search is Step 71")
+        response = await self._retrying(
+            lambda: self.client.query_points(
+                spec.name,
+                query=list(vector),
+                using=DENSE_VECTOR,
+                query_filter=to_qdrant_filter(filter_),
+                limit=limit,
+                score_threshold=score_threshold,
+                with_payload=True,
+                with_vectors=False,
+            ),
+            spec,
+        )
+        return _hits(response.points)
 
     async def _search_hybrid(
         self,
@@ -322,3 +343,11 @@ def to_qdrant_filter(filter_: VectorFilter) -> models.Filter:
             models.FieldCondition(key="url", match=models.MatchPrefix(prefix=filter_.url_prefix))
         )
     return models.Filter(must=must)
+
+
+def _hits(points: list[models.ScoredPoint]) -> list[SearchHit]:
+    """Qdrant scored points → `SearchHit`s (payloads validated back into `ChunkPayload`)."""
+    return [
+        SearchHit(str(point.id), float(point.score), ChunkPayload.model_validate(point.payload))
+        for point in points
+    ]
