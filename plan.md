@@ -1869,3 +1869,34 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Small sections stay small** (FAQ-like sections, slides), and I'm not adding section merging. The chunks are precise and carry exact locations, and the cost (more, shorter vectors) is small. Revisit only if Step 100's retrieval evaluation shows a problem.
 - **Phase G (Chunking, 55–60) is complete.**
 - Next: Step 61: Embedder framework
+
+### Step 61: Embedder framework  (2026-11-08)
+- Status: ✅ done
+- Built (in `rag_engine/embeddings/`, all exported):
+  - **`base.py`**:
+    - `BaseEmbedder(space, *, config, tokenizer=None)`, bound to one `EmbeddingSpace` (refuses a model of another provider with `UnsupportedEmbeddingProviderError`). Subclasses implement only `_embed(texts, input_type) -> ProviderResult(vectors, usage)`. The final `embed_documents(texts)` / `embed_query(text)` return an `EmbeddingBatch(vectors, space, usage)` (`.vector` for a query) and guarantee, for every provider:
+      - an empty batch makes no provider call;
+      - every input is non-empty and ≤ the model's `max_input_tokens` (counted with the model's tokenizer), else `EmbeddingInputError` (422) with the index, before anything is sent;
+      - the response has **exactly one vector per input, in order, of the space's dimensions, all finite**, else `EmbeddingResponseError`;
+      - usage (`EmbeddingUsageCounts(requests, tokens)`, addable) comes with every result.
+    - `InputType` (document/query, for providers that distinguish them; OpenAI doesn't). `aclose()` and async context manager. `Vector` and `TokenCounter` types.
+  - **`dispatcher.py`**: `@register_embedder(provider)` (checks the class is a `BaseEmbedder` whose `provider` matches, and refuses a second class for the same provider), `registered_embedders()`, `get_embedder(space, *, provider=None, config)`. It uses `ACTIVE_EMBEDDING_PROVIDER` and refuses a model of another provider or an unregistered provider (`UnsupportedEmbeddingProviderError`, 500).
+  - **`exceptions.py`**:
+    - `EmbeddingInputError` (422) and `UnsupportedEmbeddingProviderError`.
+    - Provider failures are `EmbeddingError(UpstreamError)` with **`retryable`** and `retry_after` (which also sets a `Retry-After` header): `EmbeddingAuthError`, `EmbeddingRequestError` and `EmbeddingResponseError` are permanent (502); `EmbeddingRateLimitedError` and `EmbeddingUnavailableError` are retryable (503).
+  - **Tokenizer moved** to `rag_engine/embeddings/tokenizer.py` (git mv). It's a model concern and the embedder validates with it. `rag_engine.chunking` re-exports `tokenizer_for`/`TiktokenTokenizer`, so nothing else changed.
+- Test support: `tests/support/fakes.py` → **`FakeEmbedder`** (deterministic unit vectors per text via `fake_vector`; records calls; `respond` hook to return broken responses or raise; counts 1 request per call and 1 token per word; `closed` flag). Steps 64 and 76 use it.
+- Tests: `TestEmbedderFramework_S61` (25, unit):
+  - One vector per document in order (repeats are equal), the space, usage; a query `.vector` (256-d reduced space, unit norm); empty batch makes no call; usage adds up.
+  - Empty/blank inputs and an over-limit input (> 8191 cl100k tokens, with exact token details) are refused with no call.
+  - 5 broken responses (too few, too many, wrong dimensions, NaN, inf) → `EmbeddingResponseError`; provider errors pass through (Retry-After rounded up); the error taxonomy (status, code, retryable).
+  - Context manager closes; a mismatched provider is refused.
+  - Dispatcher builds/lists, unregistered is a typed error, registration checks, provider must match.
+  - The moved tokenizer is still exported from chunking.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1596 passed, 4 skipped (container) in 229 s.
+- Decisions/notes:
+  - No provider is registered yet. `get_embedder()` raises until **Step 62** registers `OpenAIEmbedder` (`@register_embedder(EmbeddingProvider.OPENAI)`, imported from `embeddings/__init__`).
+  - **Step 62**: batch inside `_embed` by `spec.max_batch_inputs` and `max_batch_tokens` (the base already guarantees each input fits on its own), pass `dimensions` only for reduced spaces, return vectors in input order, and sum the usage over sub-requests.
+  - **Step 63**: map HTTP/transport failures to the taxonomy (401/403 → auth, 429 → rate limited with `Retry-After`/rate-limit headers, 5xx/timeouts → unavailable, other 4xx → request) and retry only `retryable` errors.
+  - **Step 64**: the cache wraps an embedder, keyed `sha256(model|dims|embed_text)`, and only calls `embed_documents` for misses.
+- Next: Step 62: OpenAI embedder

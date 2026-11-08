@@ -1,9 +1,20 @@
 """In-memory stand-ins for infrastructure, for tests that don't need real services."""
 
-from collections.abc import Mapping
+import hashlib
+import math
+import random
+from collections.abc import Callable, Mapping
 
+from rag_engine.config import EmbeddingProvider
 from rag_engine.crawling import CachedRobots
 from rag_engine.domain import ContentHashClaim
+from rag_engine.embeddings import (
+    BaseEmbedder,
+    EmbeddingUsageCounts,
+    InputType,
+    ProviderResult,
+    Vector,
+)
 from rag_engine.infrastructure import HealthCheck
 
 
@@ -63,3 +74,41 @@ class InMemoryContentClaimStore:
                 job_id=job_id, content_hash=content_hash, page_id=page_id, url=url
             )
         return self.claims[key]
+
+
+def fake_vector(text: str, dimensions: int) -> Vector:
+    """A unit vector determined by `text` alone: the same text always embeds the same."""
+    seed = int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
+    rng = random.Random(seed)
+    values = [rng.gauss(0.0, 1.0) for _ in range(dimensions)]
+    norm = math.sqrt(sum(v * v for v in values)) or 1.0
+    return [v / norm for v in values]
+
+
+class FakeEmbedder(BaseEmbedder):
+    """A `BaseEmbedder` with deterministic vectors and no network (for OpenAI-model spaces).
+
+    Records every provider call; `respond` replaces the provider call (to return a broken
+    response or raise a provider error). Usage counts one request per call and one token
+    per whitespace-separated word.
+    """
+
+    provider = EmbeddingProvider.OPENAI
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # ty: ignore[invalid-argument-type]
+        self.calls: list[tuple[list[str], InputType]] = []
+        self.respond: Callable[[list[str], InputType], ProviderResult] | None = None
+        self.closed = False
+
+    async def _embed(self, texts: list[str], input_type: InputType) -> ProviderResult:
+        self.calls.append((list(texts), input_type))
+        if self.respond is not None:
+            return self.respond(texts, input_type)
+        return ProviderResult(
+            vectors=[fake_vector(text, self.dimensions) for text in texts],
+            usage=EmbeddingUsageCounts(requests=1, tokens=sum(len(t.split()) for t in texts)),
+        )
+
+    async def aclose(self) -> None:
+        self.closed = True

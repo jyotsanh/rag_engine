@@ -1,3 +1,5 @@
+from rag_engine.embeddings.tokenizer import TiktokenTokenizer, tokenizer_for
+
 from .base import (
     MAX_HEADING_DEPTH,
     BaseChunker,
@@ -26,7 +28,6 @@ from .markdown_parser import (
     parse_markdown,
 )
 from .structure_chunker import StructureChunker, sentences  # registers ChunkerType.STRUCTURE
-from .tokenizer import TiktokenTokenizer, tokenizer_for
 
 __all__ = [
     "MAX_HEADING_DEPTH",

@@ -1,5 +1,9 @@
 """Token counting with the embedding model's own encoding (tiktoken), Step 57.
 
+Lives with the embedding models (moved from `chunking` in Step 61): the chunker sizes
+chunks with it and the embedder validates inputs with it; `rag_engine.chunking`
+re-exports it.
+
 `tokenizer_for(model)` returns the shared `TiktokenTokenizer` for the model's
 `EmbeddingModelSpec.tokenizer_encoding` (`cl100k_base` for the OpenAI 3-series), so chunk
 sizes are measured exactly as the embedding API will count them.
@@ -14,7 +18,7 @@ from functools import cache
 import tiktoken
 
 from rag_engine.config import EmbeddingModelName
-from rag_engine.embeddings import get_model_spec
+from rag_engine.embeddings.models import get_model_spec
 
 
 class TiktokenTokenizer:

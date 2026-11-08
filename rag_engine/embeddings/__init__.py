@@ -1,4 +1,25 @@
-from .exceptions import UnsupportedEmbeddingDimensionsError, UnsupportedEmbeddingModelError
+from .base import (
+    BaseEmbedder,
+    EmbeddingBatch,
+    EmbeddingUsageCounts,
+    InputType,
+    ProviderResult,
+    TokenCounter,
+    Vector,
+)
+from .dispatcher import get_embedder, register_embedder, registered_embedders
+from .exceptions import (
+    EmbeddingAuthError,
+    EmbeddingError,
+    EmbeddingInputError,
+    EmbeddingRateLimitedError,
+    EmbeddingRequestError,
+    EmbeddingResponseError,
+    EmbeddingUnavailableError,
+    UnsupportedEmbeddingDimensionsError,
+    UnsupportedEmbeddingModelError,
+    UnsupportedEmbeddingProviderError,
+)
 from .models import (
     EMBEDDING_MODELS,
     MIN_REDUCED_DIMENSIONS,
@@ -8,15 +29,36 @@ from .models import (
     request_dimensions,
     resolve_space,
 )
+from .tokenizer import TiktokenTokenizer, tokenizer_for
 
 __all__ = [
     "EMBEDDING_MODELS",
     "MIN_REDUCED_DIMENSIONS",
+    "BaseEmbedder",
+    "EmbeddingAuthError",
+    "EmbeddingBatch",
+    "EmbeddingError",
+    "EmbeddingInputError",
     "EmbeddingModelSpec",
+    "EmbeddingRateLimitedError",
+    "EmbeddingRequestError",
+    "EmbeddingResponseError",
     "EmbeddingSpace",
+    "EmbeddingUnavailableError",
+    "EmbeddingUsageCounts",
+    "InputType",
+    "ProviderResult",
+    "TiktokenTokenizer",
+    "TokenCounter",
     "UnsupportedEmbeddingDimensionsError",
     "UnsupportedEmbeddingModelError",
+    "UnsupportedEmbeddingProviderError",
+    "Vector",
+    "get_embedder",
     "get_model_spec",
+    "register_embedder",
+    "registered_embedders",
     "request_dimensions",
     "resolve_space",
+    "tokenizer_for",
 ]
