@@ -55,6 +55,7 @@ dev = [
     "pytest>=8.4",
     "pytest-asyncio>=1.2",
     "pytest-timeout>=2.4",
+    "respx>=0.22",
     "ruff>=0.14",
     "testcontainers[mongodb,qdrant,redis]>=4.13",
     "trustme>=1.2",

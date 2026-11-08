@@ -1900,3 +1900,29 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 63**: map HTTP/transport failures to the taxonomy (401/403 → auth, 429 → rate limited with `Retry-After`/rate-limit headers, 5xx/timeouts → unavailable, other 4xx → request) and retry only `retryable` errors.
   - **Step 64**: the cache wraps an embedder, keyed `sha256(model|dims|embed_text)`, and only calls `embed_documents` for misses.
 - Next: Step 62: OpenAI embedder
+
+### Step 62: OpenAI embedder  (2026-11-08)
+- Status: ✅ done
+- Built: `rag_engine/embeddings/openai_embedder.py` → **`OpenAIEmbedder`**, registered for `EmbeddingProvider.OPENAI`, so `get_embedder(space)` now works out of the box. `retry_after_seconds` is exported.
+  - **Plain async `httpx`, no SDK**: `POST {OPENAI_BASE_URL or https://api.openai.com/v1}/embeddings` with a Bearer key. Retries, backoff and concurrency stay entirely ours (Step 63). It takes an optional shared `client` (the caller owns and closes it); otherwise it creates one with `OPENAI_TIMEOUT_SECONDS` and closes it in `aclose()`.
+  - **Batching**: in order, greedy, at most `min(EMBEDDING_MAX_BATCH_INPUTS, spec.max_batch_inputs)` inputs and `min(EMBEDDING_MAX_BATCH_TOKENS, spec.max_batch_tokens)` summed tokens per request, counted with the model's tokenizer. An input larger than a lowered token budget goes in a request of its own. Requests are sequential here; usage is summed (1 request each, billed `usage.prompt_tokens`, falling back to `total_tokens`, else 0).
+  - **Request**: `{model, input, encoding_format: "float"}`, plus **`dimensions` only for reduced spaces**, so native-size spaces also work with proxies that lack the parameter.
+  - **Order**: vectors are reassembled by `index`, which must be exactly 0..n-1 with no repeats. Items must be lists of numbers (bools refused). The Step 61 base then checks the dimensions and that values are finite.
+  - **Failures → Step 61 taxonomy** (single attempt):
+    - timeouts and transport errors → `EmbeddingUnavailableError`; 5xx → `EmbeddingUnavailableError` (with Retry-After when given);
+    - 429 → `EmbeddingRateLimitedError` with `retry_after` from `retry-after-ms`, else `Retry-After` (seconds or HTTP date); **429 `insufficient_quota`** (billing) → `EmbeddingRequestError`, which is permanent;
+    - 401/403 → `EmbeddingAuthError`; other 4xx → `EmbeddingRequestError`;
+    - details carry `status` and OpenAI's `error_code`; messages include OpenAI's message (whitespace-collapsed, ≤ 300 chars) and never the key;
+    - a malformed 2xx → `EmbeddingResponseError`.
+- Settings: `EMBEDDING_MAX_BATCH_INPUTS` (256) and `EMBEDDING_MAX_BATCH_TOKENS` (100k), capped by the model's 2048 / 300k. `.env.example` updated.
+- Deps: **`respx` 0.23.1** (dev; nothing else in the lock). The test README already named it.
+- Tests: `TestOpenAIEmbedder_S62` (33, unit, respx):
+  - Request shape: auth header, exact JSON with no `dimensions` for native and with it for 256-d; base-URL override; order restored from a shuffled response.
+  - Batching: by input count (7 → 3/3/1, vectors stitched, usage summed); by token budget (each request ≤ 50 real tokens, greedy split matches); an over-budget input goes alone; model limits cap the settings.
+  - Failures: 9 HTTP cases (401, 403, 400, 404, 429 ms, 429 seconds, 429 quota, 500, 503 HTML with Retry-After) checked for exact type, `retryable`, `retry_after`, status/code details and no key in the message; 3 transport failures; 8 malformed 200s; usage fallback.
+  - A shared client isn't closed, an owned one is; the dispatcher builds `OpenAIEmbedder`; Retry-After parsing (ms, seconds, negative, HTTP date, garbage, precedence, absent).
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1629 passed, 4 skipped (container) in 232 s.
+- Decisions/notes:
+  - The HTTP → error mapping landed here rather than in Step 63: every response needs a typed outcome. **Step 63** keeps the resilience policy: retry only `retryable` errors (up to `OPENAI_MAX_RETRIES`) with exponential backoff and jitter, using `retry_after` as a floor; send sub-batches concurrently under a semaphore of `OPENAI_MAX_CONCURRENT_REQUESTS` (one per process, shared across embedders); and keep results in order. `request()` is the unit to wrap.
+  - `encoding_format=float` is chosen for simplicity. Base64 would cut response size by about 3×; revisit if bandwidth shows up in Step 94's metrics.
+- Next: Step 63: OpenAI resilience

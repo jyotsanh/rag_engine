@@ -29,6 +29,7 @@ from .models import (
     request_dimensions,
     resolve_space,
 )
+from .openai_embedder import OpenAIEmbedder, retry_after_seconds  # registers OPENAI
 from .tokenizer import TiktokenTokenizer, tokenizer_for
 
 __all__ = [
@@ -47,6 +48,7 @@ __all__ = [
     "EmbeddingUnavailableError",
     "EmbeddingUsageCounts",
     "InputType",
+    "OpenAIEmbedder",
     "ProviderResult",
     "TiktokenTokenizer",
     "TokenCounter",
@@ -60,5 +62,6 @@ __all__ = [
     "registered_embedders",
     "request_dimensions",
     "resolve_space",
+    "retry_after_seconds",
     "tokenizer_for",
 ]

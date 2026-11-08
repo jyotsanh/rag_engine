@@ -119,6 +119,11 @@ class Settings(BaseSettings):
     OPENAI_TIMEOUT_SECONDS: float = Field(default=60.0, gt=0)
     OPENAI_MAX_RETRIES: int = Field(default=6, ge=0)
     OPENAI_MAX_CONCURRENT_REQUESTS: int = Field(default=4, gt=0)
+    # one embeddings request carries at most this many inputs / summed input tokens (the
+    # model's own limits, 2048 / 300k for OpenAI, cap these); smaller requests keep a
+    # retried failure cheap
+    EMBEDDING_MAX_BATCH_INPUTS: int = Field(default=256, gt=0)
+    EMBEDDING_MAX_BATCH_TOKENS: int = Field(default=100_000, gt=0)
     # tenant default when the admin does not pick one; a KB locks its model at creation
     DEFAULT_EMBEDDING_MODEL: EmbeddingModelName = EmbeddingModelName.TEXT_EMBEDDING_3_SMALL
 
