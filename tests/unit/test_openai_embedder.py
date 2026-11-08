@@ -64,6 +64,12 @@ def _sent(route: respx.Route) -> list[dict]:
     return [json.loads(call.request.content) for call in route.calls]
 
 
+@pytest.fixture(autouse=True)
+def _single_attempt(override_settings: OverrideSettings) -> None:
+    """One request's mapping only; retries are Step 63's (test_embedding_resilience.py)."""
+    override_settings(OPENAI_MAX_RETRIES=0)
+
+
 @pytest.fixture
 def api() -> Iterator[respx.MockRouter]:
     with respx.mock(assert_all_called=False) as router:

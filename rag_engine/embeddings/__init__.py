@@ -29,7 +29,19 @@ from .models import (
     request_dimensions,
     resolve_space,
 )
-from .openai_embedder import OpenAIEmbedder, retry_after_seconds  # registers OPENAI
+from .openai_embedder import (  # registers OPENAI
+    OpenAIEmbedder,
+    duration_seconds,
+    rate_limit_reset_seconds,
+    retry_after_seconds,
+)
+from .resilience import (
+    EmbeddingRetryPolicy,
+    ProviderGate,
+    call_with_retries,
+    gather_in_order,
+    provider_gate,
+)
 from .tokenizer import TiktokenTokenizer, tokenizer_for
 
 __all__ = [
@@ -44,11 +56,13 @@ __all__ = [
     "EmbeddingRateLimitedError",
     "EmbeddingRequestError",
     "EmbeddingResponseError",
+    "EmbeddingRetryPolicy",
     "EmbeddingSpace",
     "EmbeddingUnavailableError",
     "EmbeddingUsageCounts",
     "InputType",
     "OpenAIEmbedder",
+    "ProviderGate",
     "ProviderResult",
     "TiktokenTokenizer",
     "TokenCounter",
@@ -56,8 +70,13 @@ __all__ = [
     "UnsupportedEmbeddingModelError",
     "UnsupportedEmbeddingProviderError",
     "Vector",
+    "call_with_retries",
+    "duration_seconds",
+    "gather_in_order",
     "get_embedder",
     "get_model_spec",
+    "provider_gate",
+    "rate_limit_reset_seconds",
     "register_embedder",
     "registered_embedders",
     "request_dimensions",

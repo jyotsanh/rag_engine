@@ -8,7 +8,9 @@ entirely ours (Step 63).
 `min(EMBEDDING_MAX_BATCH_INPUTS, spec.max_batch_inputs)` inputs and
 `min(EMBEDDING_MAX_BATCH_TOKENS, spec.max_batch_tokens)` summed tokens (counted with the
 model's tokenizer; the base class already guarantees each input fits on its own).
-Requests go out one after another here; Step 63 adds bounded concurrency.
+Requests go out **concurrently** through the process-wide OpenAI gate (at most
+`OPENAI_MAX_CONCURRENT_REQUESTS` in flight, shared by every embedder), each retried per
+`EmbeddingRetryPolicy` (Step 63, `resilience.py`), and results are stitched back in order.
 
 **Request.** `{"model", "input": [...], "encoding_format": "float"}`, plus `dimensions`
 only for a reduced space (a native-size space never sends it, so it also works with
@@ -18,17 +20,20 @@ models/proxies that don't support the parameter).
 order, but `index` is the contract); the indices must be exactly 0..n-1. Usage is the
 billed `usage.prompt_tokens`, summed over requests, one request each.
 
-**Failures** map to the Step 61 taxonomy (single attempt here; Step 63 retries the
-retryable ones):
+**Failures** of one attempt map to the Step 61 taxonomy; the retryable ones are retried
+with backoff (Step 63) and a 429's wait pauses every OpenAI request in the process:
 - timeouts, connection errors, 5xx → `EmbeddingUnavailableError` (retryable);
 - 429 → `EmbeddingRateLimitedError` (retryable, `retry_after` from `retry-after-ms` /
-  `Retry-After`), except `insufficient_quota` (billing) → `EmbeddingRequestError`;
+  `Retry-After`, else the `x-ratelimit-reset-requests/-tokens` durations), except
+  `insufficient_quota` (billing) → `EmbeddingRequestError`;
 - 401/403 → `EmbeddingAuthError`; other 4xx → `EmbeddingRequestError` (with OpenAI's
   error message and code, never the key);
 - 2xx that isn't a well-formed embeddings payload → `EmbeddingResponseError`.
 """
 
+import asyncio
 import math
+import re
 from collections.abc import Iterator
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -55,9 +60,17 @@ from rag_engine.embeddings.exceptions import (
     EmbeddingUnavailableError,
 )
 from rag_engine.embeddings.models import EmbeddingSpace
+from rag_engine.embeddings.resilience import (
+    EmbeddingRetryPolicy,
+    Sleep,
+    call_with_retries,
+    gather_in_order,
+    provider_gate,
+)
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 _MAX_ERROR_MESSAGE = 300
+_DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
 
 
 @register_embedder(EmbeddingProvider.OPENAI)
@@ -71,9 +84,14 @@ class OpenAIEmbedder(BaseEmbedder):
         config: Settings = settings,
         tokenizer: TokenCounter | None = None,
         client: httpx.AsyncClient | None = None,
+        policy: EmbeddingRetryPolicy | None = None,
+        sleep: Sleep = asyncio.sleep,
     ) -> None:
         """`client`: a shared client (the caller owns and closes it); else one is created."""
         super().__init__(space, config=config, tokenizer=tokenizer)
+        self.policy = policy or EmbeddingRetryPolicy.from_settings(config)
+        self._sleep = sleep
+        self._max_concurrent = config.OPENAI_MAX_CONCURRENT_REQUESTS
         self.max_batch_inputs = min(config.EMBEDDING_MAX_BATCH_INPUTS, self.spec.max_batch_inputs)
         self.max_batch_tokens = min(config.EMBEDDING_MAX_BATCH_TOKENS, self.spec.max_batch_tokens)
         self._url = (config.OPENAI_BASE_URL or DEFAULT_BASE_URL).rstrip("/") + "/embeddings"
@@ -104,10 +122,23 @@ class OpenAIEmbedder(BaseEmbedder):
             yield start, texts[start:]
 
     async def _embed(self, texts: list[str], input_type: InputType) -> ProviderResult:
+        gate = provider_gate(self.provider.value, self._max_concurrent)
+
+        def resilient(batch: list[str], offset: int):
+            return lambda: call_with_retries(
+                lambda: self.request(batch),
+                policy=self.policy,
+                gate=gate,
+                sleep=self._sleep,
+                describe=f"OpenAI embeddings ({len(batch)} inputs from #{offset})",
+            )
+
+        results = await gather_in_order(
+            [resilient(batch, offset) for offset, batch in self.batches(texts)]
+        )
         vectors: list[Vector] = []
         usage = EmbeddingUsageCounts()
-        for _, batch in self.batches(texts):
-            batch_vectors, batch_usage = await self.request(batch)
+        for batch_vectors, batch_usage in results:
             vectors.extend(batch_vectors)
             usage += batch_usage
         return ProviderResult(vectors, usage)
@@ -155,9 +186,10 @@ class OpenAIEmbedder(BaseEmbedder):
         if status == 429 and code == "insufficient_quota":
             return EmbeddingRequestError(text, details=details)  # billing: retrying won't help
         if status == 429:
-            return EmbeddingRateLimitedError(
-                text, retry_after=retry_after_seconds(response.headers), details=details
-            )
+            wait = retry_after_seconds(response.headers)
+            if wait is None:
+                wait = rate_limit_reset_seconds(response.headers)
+            return EmbeddingRateLimitedError(text, retry_after=wait, details=details)
         if status >= 500:
             return EmbeddingUnavailableError(
                 text, retry_after=retry_after_seconds(response.headers), details=details
@@ -235,3 +267,23 @@ def retry_after_seconds(headers: httpx.Headers) -> float | None:
         except TypeError, ValueError:
             return None
     return max(value, 0.0) if math.isfinite(value) else None
+
+
+def duration_seconds(value: str) -> float | None:
+    """OpenAI's reset durations: "20ms", "1s", "6m0s", "1h2m3.5s"."""
+    value = value.strip()
+    parts = _DURATION_PART.findall(value)
+    if not parts or "".join(n + u for n, u in parts) != value:
+        return None
+    scale = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 0.001}
+    return sum(float(number) * scale[unit] for number, unit in parts)
+
+
+def rate_limit_reset_seconds(headers: httpx.Headers) -> float | None:
+    """When a 429 has no Retry-After: the longest `x-ratelimit-reset-requests/-tokens`."""
+    resets = [
+        seconds
+        for name in ("x-ratelimit-reset-requests", "x-ratelimit-reset-tokens")
+        if (raw := headers.get(name)) is not None and (seconds := duration_seconds(raw)) is not None
+    ]
+    return max(resets) if resets else None

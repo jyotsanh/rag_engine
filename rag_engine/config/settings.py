@@ -124,6 +124,12 @@ class Settings(BaseSettings):
     # retried failure cheap
     EMBEDDING_MAX_BATCH_INPUTS: int = Field(default=256, gt=0)
     EMBEDDING_MAX_BATCH_TOKENS: int = Field(default=100_000, gt=0)
+    # retries of 429/5xx/timeouts (OPENAI_MAX_RETRIES of them): delay before retry n is in
+    # [d/2, d], d = min(max, base·2^(n-1)); a provider's Retry-After is a floor on it
+    EMBEDDING_RETRY_BASE_DELAY_SECONDS: float = Field(default=1.0, gt=0)
+    EMBEDDING_RETRY_MAX_DELAY_SECONDS: float = Field(default=60.0, gt=0)
+    # a provider asking to wait longer than this fails the request instead of stalling it
+    EMBEDDING_RETRY_AFTER_MAX_SECONDS: float = Field(default=300.0, ge=0)
     # tenant default when the admin does not pick one; a KB locks its model at creation
     DEFAULT_EMBEDDING_MODEL: EmbeddingModelName = EmbeddingModelName.TEXT_EMBEDDING_3_SMALL
 
@@ -280,6 +286,10 @@ class Settings(BaseSettings):
             raise ValueError(
                 "CRAWL_FRONTIER_LEASE_SECONDS must be > "
                 "CRAWL_PAGE_TIMEOUT_SECONDS + EXTRACTION_TIMEOUT_SECONDS"
+            )
+        if self.EMBEDDING_RETRY_BASE_DELAY_SECONDS > self.EMBEDDING_RETRY_MAX_DELAY_SECONDS:
+            raise ValueError(
+                "EMBEDDING_RETRY_BASE_DELAY_SECONDS must be <= EMBEDDING_RETRY_MAX_DELAY_SECONDS"
             )
         if self.CHUNK_TARGET_TOKENS > self.CHUNK_MAX_TOKENS:
             raise ValueError("CHUNK_TARGET_TOKENS must be <= CHUNK_MAX_TOKENS")

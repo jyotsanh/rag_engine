@@ -1926,3 +1926,32 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - The HTTP → error mapping landed here rather than in Step 63: every response needs a typed outcome. **Step 63** keeps the resilience policy: retry only `retryable` errors (up to `OPENAI_MAX_RETRIES`) with exponential backoff and jitter, using `retry_after` as a floor; send sub-batches concurrently under a semaphore of `OPENAI_MAX_CONCURRENT_REQUESTS` (one per process, shared across embedders); and keep results in order. `request()` is the unit to wrap.
   - `encoding_format=float` is chosen for simplicity. Base64 would cut response size by about 3×; revisit if bandwidth shows up in Step 94's metrics.
 - Next: Step 63: OpenAI resilience
+
+### Step 63: OpenAI resilience  (2026-11-08)
+- Status: ✅ done
+- Built: `rag_engine/embeddings/resilience.py` (provider-agnostic, exported), wired into `OpenAIEmbedder`.
+  - **`EmbeddingRetryPolicy`** (`from_settings`):
+    - Only `retryable` errors (429, 5xx, timeouts/transport) are retried, at most `OPENAI_MAX_RETRIES`.
+    - The delay before retry n is in [d/2, d], d = min(max, base·2^(n-1)) (equal jitter, like the crawl policy), and the provider's `retry_after` is a **floor** on it.
+    - A requested wait over `EMBEDDING_RETRY_AFTER_MAX_SECONDS` fails at once instead of stalling the job.
+    - Permanent errors (auth, request, billing quota, malformed response) are raised immediately.
+  - **`call_with_retries(attempt, policy, gate, sleep)`**: the raised error gets `details["attempts"]`; each retry logs a warning (code, n/max, delay).
+  - **`ProviderGate`** via `provider_gate(provider, limit)`, **one per (provider, limit) per event loop**: Celery tasks may each run their own loop, and an asyncio semaphore is bound to its first loop; the gates are held in a `WeakKeyDictionary` keyed by loop.
+    - A semaphore of `OPENAI_MAX_CONCURRENT_REQUESTS` around each HTTP attempt only (never held while sleeping), shared by every embedder in the process.
+    - A **shared pause**: a 429's wait pauses every request of the provider (the longest pause wins), so concurrent requests stop hammering a rate limit.
+  - **`gather_in_order(calls)`**: runs the calls concurrently with results in input order. The first failure cancels the in-flight siblings and is raised **as itself** (no ExceptionGroup).
+  - **OpenAIEmbedder**: sub-batches now go out concurrently through the gate, each wrapped in `call_with_retries`, and are stitched back in order (`policy=` and `sleep=` are injectable). On a 429 without `Retry-After`, the wait comes from the longest **`x-ratelimit-reset-requests/-tokens`** (`duration_seconds` parses "20ms", "6m0s", "1h2m3.5s"; `rate_limit_reset_seconds`).
+- Settings: `EMBEDDING_RETRY_BASE_DELAY_SECONDS` (1), `EMBEDDING_RETRY_MAX_DELAY_SECONDS` (60; validator base ≤ max) and `EMBEDDING_RETRY_AFTER_MAX_SECONDS` (300). The existing `OPENAI_MAX_RETRIES` (6) and `OPENAI_MAX_CONCURRENT_REQUESTS` (4) are now in effect. `.env.example` updated.
+- Tests:
+  - `TestOpenAIResilience_S63` (20, unit, respx plus a recording fake `sleep`):
+    - Policy: backoff ranges, growth, cap and real jitter; the decision table (permanent, exhausted, floor, too-long wait); `from_settings` and validation.
+    - HTTP: 503 → 500 → 200 retried with the expected delays; timeouts retried; `retry-after-ms` 2.5 s honoured over backoff; reset headers → 90 s; `Retry-After: 600` fails at once (1 call, attempts=1); retries exhaust (4 calls, attempts=4); 401/400/insufficient-quota never retried.
+    - Concurrency: 10 sub-batches with peak in-flight exactly 3 and input order kept despite uneven latency; the limit is shared across two embedders (peak 2); a permanent failure cancels slow siblings, which never finish.
+    - Gate: a 429 pauses another caller; the longest pause wins; one gate per provider/limit/loop (a second loop gets its own).
+    - Helpers: `gather_in_order`, duration parsing.
+  - `TestOpenAIEmbedder_S62` now runs single-attempt (an autouse `OPENAI_MAX_RETRIES=0`): it covers one request's mapping, and the retries are tested here.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1649 passed, 4 skipped (container) in 235 s.
+- Decisions/notes:
+  - Retry budget: with the defaults, a batch can spend up to ~2 min in backoff (1 + 2 + 4 + … capped at 60 s, 6 retries) plus provider waits ≤ 300 s each. That fits the 2 h job cap. Step 76 should treat a surfaced `EmbeddingError` as **job-fatal** only when it's permanent (auth, request); a retryable one that ran out of retries can fail the job with `embedding_unavailable` so Step 80's requeue can try later.
+  - **Step 64** (cache) wraps an embedder and only sends misses through it, so cached chunks cost no requests or retries.
+- Next: Step 64: Embedding cache
