@@ -2399,3 +2399,44 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Jobs inserted without `slot` (old documents, test helpers using `insert`) hold no slot, but `count_active_for_tenant` still counts them against new submissions.
   - The worker doesn't check the quota again: running ≤ active ≤ limit holds from submission.
 - Next: Step 80: Crash recovery
+
+### Step 80: Crash recovery  (2026-11-09)
+- Status: ✅ done
+- Built:
+  - **`rag_engine/worker/recovery.py` → `JobRecovery(db, enqueue=, enqueue_cleanup=, config, clock).run() -> RecoveryReport`** (requeued / failed / cancelled / completed / resent / skipped job ids). Every action is a guarded transition, so racing sweeps, or a sweep racing a worker that was only slow, can't both act.
+    - **Stale held jobs**: `find_stale(now − CRAWL_STALE_HEARTBEAT_SECONDS)`.
+      - A **finalizing** job whose source already serves its version flipped, then lost its worker before `succeed`. It is **completed** (`succeeded`, claims released), not re-run.
+      - **attempts < `CRAWL_JOB_MAX_ATTEMPTS`** → `requeue(job, stale_run_id, heartbeat_before=cutoff)` → the task is re-sent (countdown 0). The dead run is cut off (superseded). The next run's frontier `recover()` hands its in-flight pages back and keeps finished ones; ingestion is idempotent. **The job resumes rather than restarts.** A requeued job keeps its data.
+      - A pending cancel makes `requeue` cancel the job instead. Its unfinished pages are closed out **`job_cancelled`**, claims released and its version queued for cleanup.
+      - **Out of attempts** → **`failed/worker_lost`** ("the worker stopped responding (last heartbeat …) on attempt N of M"). The crawl report is stored, unfinished pages closed out `job_failed`, claims released and its own version queued for cleanup.
+    - **Lost queued jobs** (the Step 79 note): a `queued` job untouched for `CRAWL_QUEUED_STALE_SECONDS` (an enqueue that failed after the insert, a broker that lost its data) is re-sent. `touch_queued` (conditional on the `updated_at` read) bumps it first, so a job waiting in a long backlog gets at most one extra message per window, and only one of two concurrent sweeps sends it. A duplicate delivery is a no-op (the runner only claims a queued job).
+  - **`JobRepository`**:
+    - `requeue(..., heartbeat_before=)` and `fail(..., heartbeat_before=)` (`_stale_guard` in the transition filter): **a worker whose heartbeat lands between the sweep's read and its write is left alone** (`InvalidJobTransitionError` → `skipped`). Found while designing the tests: a guard on `run_id` alone would requeue a slow but live worker, and supersede it.
+    - Before writing the `worker_lost` report, the job is re-read, so a run that woke up keeps its report.
+    - New: `find_stale_queued(updated_before, limit)` and `touch_queued(job, seen_updated_at) -> bool`.
+  - **`PageRepository.close_out_job(..., reason=PageReason.JOB_FAILED)`**: the reason is now a parameter (`job_cancelled` for recovery).
+  - **The `recover_jobs` maintenance task** (`rag_engine.worker.tasks.maintenance.recover_jobs`) returns the report as a dict. Transient errors aren't retried: the next tick sweeps again.
+  - **Celery beat schedule** (`celery_app.configure`): `recover-crawl-jobs` every `CRAWL_RECOVERY_INTERVAL_SECONDS` on `maintenance`, with `expires` = the interval, so ticks never pile up behind a busy queue. Run `celery -A rag_engine.worker.celery_app beat` as one process (Step 96's compose).
+- Settings: `CRAWL_RECOVERY_INTERVAL_SECONDS` (60), `CRAWL_STALE_HEARTBEAT_SECONDS` (300; validated ≥ 3 × `CRAWL_HEARTBEAT_SECONDS`) and `CRAWL_QUEUED_STALE_SECONDS` (1800; validated > `CRAWL_JOB_RETRY_DELAY_SECONDS × CRAWL_JOB_MAX_ATTEMPTS`, the longest a requeued job waits on purpose). `.env.example` updated.
+- Tests:
+  - `TestJobRecovery_S80` (14, integration, real Mongo, controlled clock):
+    - A live job is left alone. A stale one is requeued and re-sent: the dead run is superseded and the restart is attempt 2.
+    - Stale finalizing that didn't flip → requeued; **finalizing that already went live → succeeded**, no cleanup, claims released.
+    - **Out of attempts → `worker_lost`** with the report kept, the finished page intact, the in-flight page failed and the queued page skipped (`job_failed`), claims released and the own version's cleanup queued.
+    - A pending cancel → cancelled with `job_cancelled` pages.
+    - **A heartbeat landing just in time** → neither requeued nor failed (and no report written); the guarded transitions refuse a fresh heartbeat.
+    - **4 concurrent sweeps recover each of 5 jobs exactly once.** A job dying 3 times → requeued, requeued, failed.
+    - A lost queued job is re-sent once per window (and fresh ones aren't); `touch_queued` is conditional; jobs waiting on their retry backoff aren't re-sent.
+  - `TestCrashRecovery_S80` (2, integration, real services):
+    - **A worker killed mid-crawl** (the run's task cancelled from outside after ≥ 2 pages succeeded) leaves the job `running`. The sweep requeues it, and the next run **succeeds as attempt 2 without re-fetching any page the dead run finished** (fixture-site request log), then goes live.
+    - With max attempts 1, a dead worker → `failed/worker_lost` and its cleanup is queued.
+  - `TestRecoverJobsTask_S80` (1): the Celery task in-process requeues a stale job and re-sends it.
+  - `TestRecoverySchedule_S80` (5, unit): the beat entry (task, interval, queue, expires); task registered and routed to `maintenance`; defaults; both validators.
+  - `test_crawl_job.py` + `test_job_recovery.py` passed 3/3 consecutive runs.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ **1902 passed, 4 skipped, exit 0**, in 574 s.
+- Decisions/notes:
+  - **Leak after a finalizing crash**: when the worker died after the flip, the *previous* version's cleanup was never enqueued, and recovery can't know which version that was. It leaks until **Step 97's orphan sweeper** (versions neither active nor in flight). The Step 78 note about sweeping orphan versions moves there too.
+  - The cancel flag in Redis is left to expire (Step 52 note); recovery needs only Mongo.
+  - **Step 84**: if the enqueue fails after `submit`, the job can simply stay `queued`: recovery re-sends it after `CRAWL_QUEUED_STALE_SECONDS`.
+  - **Step 96**: run exactly one `beat` process. Several would only re-run idempotent sweeps.
+- Next: Step 81: Cascade deletes

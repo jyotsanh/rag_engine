@@ -12,6 +12,9 @@
 - **Queues**: `crawl` (long, browser-heavy), `maintenance` (cleanup, cascades, recovery,
   Celery beat) and `webhooks` (short HTTP deliveries), routed by task module, so each
   can get its own workers and concurrency.
+- **Beat** (`celery -A rag_engine.worker.celery_app beat`, one process per deployment):
+  `recover_jobs` every `CRAWL_RECOVERY_INTERVAL_SECONDS` on the `maintenance` queue (Step
+  80). Each tick expires after one interval, so a backlog of ticks never piles up.
 - JSON only (no pickle), UTC, time limits from settings, results kept for a day, and
   Celery does not take over the root logger (`setup_logging` runs in the worker init).
 """
@@ -30,6 +33,7 @@ TASK_ROUTES = {
     "rag_engine.worker.tasks.maintenance.*": {"queue": MAINTENANCE_QUEUE},
     "rag_engine.worker.tasks.webhooks.*": {"queue": WEBHOOKS_QUEUE},
 }
+RECOVER_JOBS_TASK = "rag_engine.worker.tasks.maintenance.recover_jobs"
 # a redelivery margin on top of the hard time limit (see the module docstring)
 VISIBILITY_MARGIN_SECONDS = 15 * 60
 RESULT_EXPIRES_SECONDS = 24 * 60 * 60
@@ -63,6 +67,16 @@ def configure(app: Celery, config: Settings = settings) -> Celery:
         worker_concurrency=config.CELERY_WORKER_CONCURRENCY,
         worker_hijack_root_logger=False,
         worker_redirect_stdouts=False,
+        beat_schedule={
+            "recover-crawl-jobs": {
+                "task": RECOVER_JOBS_TASK,
+                "schedule": config.CRAWL_RECOVERY_INTERVAL_SECONDS,
+                "options": {
+                    "queue": MAINTENANCE_QUEUE,
+                    "expires": config.CRAWL_RECOVERY_INTERVAL_SECONDS,
+                },
+            }
+        },
     )
     return app
 

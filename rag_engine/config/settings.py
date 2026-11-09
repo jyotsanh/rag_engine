@@ -112,6 +112,14 @@ class Settings(BaseSettings):
     # after a version swap, the previous version is deleted this much later, so searches
     # that started just before the flip finish against intact data
     CRAWL_VERSION_CLEANUP_DELAY_SECONDS: float = Field(default=60.0, ge=0)
+    # crash recovery (Step 80), a Celery beat task every CRAWL_RECOVERY_INTERVAL_SECONDS:
+    # a running/finalizing job whose heartbeat is older than CRAWL_STALE_HEARTBEAT_SECONDS
+    # lost its worker → requeued (the frontier resumes) until CRAWL_JOB_MAX_ATTEMPTS, then
+    # failed `worker_lost`; a queued job untouched for CRAWL_QUEUED_STALE_SECONDS (its task
+    # message was lost) is sent to the crawl queue again
+    CRAWL_RECOVERY_INTERVAL_SECONDS: float = Field(default=60.0, gt=0)
+    CRAWL_STALE_HEARTBEAT_SECONDS: float = Field(default=300.0, gt=0)
+    CRAWL_QUEUED_STALE_SECONDS: float = Field(default=1800.0, gt=0)
 
     # ---- vector store ---- #
     ACTIVE_VECTOR_STORE: VectorStoreType = VectorStoreType.QDRANT
@@ -347,6 +355,18 @@ class Settings(BaseSettings):
         if self.CELERY_TASK_SOFT_TIME_LIMIT_SECONDS >= self.CELERY_TASK_TIME_LIMIT_SECONDS:
             raise ValueError(
                 "CELERY_TASK_SOFT_TIME_LIMIT_SECONDS must be < CELERY_TASK_TIME_LIMIT_SECONDS"
+            )
+        if self.CRAWL_STALE_HEARTBEAT_SECONDS < 3 * self.CRAWL_HEARTBEAT_SECONDS:
+            raise ValueError(
+                "CRAWL_STALE_HEARTBEAT_SECONDS must be >= 3 x CRAWL_HEARTBEAT_SECONDS "
+                "(a couple of missed beats must not requeue a live job)"
+            )
+        if self.CRAWL_QUEUED_STALE_SECONDS <= (
+            self.CRAWL_JOB_RETRY_DELAY_SECONDS * self.CRAWL_JOB_MAX_ATTEMPTS
+        ):
+            raise ValueError(
+                "CRAWL_QUEUED_STALE_SECONDS must be > CRAWL_JOB_RETRY_DELAY_SECONDS x "
+                "CRAWL_JOB_MAX_ATTEMPTS (the longest a requeued job waits on purpose)"
             )
         if any(len(p.get_secret_value()) < 32 for p in self.API_KEY_PEPPER_PREVIOUS):
             raise ValueError("every API_KEY_PEPPER_PREVIOUS entry must be >= 32 characters")

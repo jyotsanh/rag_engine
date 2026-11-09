@@ -1,4 +1,5 @@
-"""`maintenance` queue tasks: health, version cleanup (Step 78); cascades and recovery 79-81."""
+"""`maintenance` queue tasks: health, version cleanup (Step 78), crash recovery (Step 80,
+on Celery beat); cascades (Step 81)."""
 
 import os
 from dataclasses import asdict
@@ -13,8 +14,9 @@ from rag_engine.infrastructure import (
     check_readiness,
 )
 from rag_engine.services.cleanup import VersionCleaner
-from rag_engine.worker.celery_app import MAINTENANCE_QUEUE, celery_app
+from rag_engine.worker.celery_app import MAINTENANCE_QUEUE, RECOVER_JOBS_TASK, celery_app
 from rag_engine.worker.context import run_async, worker_context
+from rag_engine.worker.recovery import JobRecovery
 
 CLEANUP_VERSION = "rag_engine.worker.tasks.maintenance.cleanup_version"
 _CLEANUP_MAX_RETRIES = 6
@@ -63,3 +65,21 @@ def cleanup_version(
     except _TRANSIENT as exc:
         raise self.retry(exc=exc, countdown=min(600, 30 * 2**self.request.retries)) from exc
     return asdict(result)
+
+
+@celery_app.task(name=RECOVER_JOBS_TASK)
+def recover_jobs() -> dict[str, Any]:
+    """Requeue/fail jobs whose worker died and re-send lost queued jobs (Celery beat).
+
+    Transient failures aren't retried: the next beat tick runs the sweep again.
+    """
+    from rag_engine.worker.tasks.crawl import enqueue_crawl_job  # crawl imports this module
+
+    recovery = JobRecovery(
+        worker_context.runtime.mongo.db,
+        enqueue=enqueue_crawl_job,
+        enqueue_cleanup=enqueue_version_cleanup,
+        config=worker_context.runtime.config,
+    )
+    report = run_async(recovery.run())
+    return asdict(report)

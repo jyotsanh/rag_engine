@@ -1,8 +1,10 @@
 """`run_crawl_job`: claim → crawl the fixture site → ingest → finalize, on real services."""
 
 import asyncio
+import time
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
+from datetime import timedelta
 
 import pytest
 
@@ -14,6 +16,7 @@ from rag_engine.domain import (
     KnowledgeBase,
     PageStatus,
     Source,
+    utc_now,
 )
 from rag_engine.embeddings import (
     Embedder,
@@ -28,6 +31,7 @@ from rag_engine.services import CleanupResult, VersionCleaner, search_scope
 from rag_engine.vectorstores import CollectionSpec, VectorFilter
 from rag_engine.worker.context import worker_context
 from rag_engine.worker.crawl_job import CrawlJobDeps, CrawlJobRunner, JobOutcome
+from rag_engine.worker.recovery import JobRecovery
 from tests.conftest import OverrideSettings
 from tests.support.fake_openai import FakeOpenAI
 from tests.support.fakes import FakeEmbedder
@@ -473,5 +477,122 @@ class TestCleanupTask_S78:
 
             assert result == {"version": "job_" + "8" * 32, "points": 0, "chunks": 0,
                               "skipped": None}  # fmt: skip
+        finally:
+            worker_context.shutdown()
+
+
+async def _until_pages_succeeded(world: _World, job: CrawlJob, count: int) -> None:
+    for _ in range(500):  # ≤ 10 s
+        if (
+            await world.runtime.mongo.db["pages"].count_documents(
+                {"job_id": job.id, "status": "succeeded"}
+            )
+            >= count
+        ):
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"fewer than {count} pages succeeded")
+
+
+def _recovery(world: _World) -> JobRecovery:
+    """A sweep as if run once every heartbeat today is stale."""
+    later = utc_now() + timedelta(seconds=world.config.CRAWL_STALE_HEARTBEAT_SECONDS + 1)
+    return JobRecovery(
+        world.runtime.mongo.db,
+        enqueue=lambda job_id, delay: world.enqueued.append((job_id, delay)),
+        enqueue_cleanup=lambda *request: world.cleanups.append(request),
+        config=world.config,
+        clock=lambda: later,
+    )
+
+
+class TestCrashRecovery_S80:
+    """S80 — a worker killed mid-crawl: recovery requeues the job, and the next run resumes
+    the frontier (finished pages aren't fetched again) and goes live."""
+
+    async def test_a_killed_worker_resumes_after_recovery(
+        self, world: _World, override_settings: OverrideSettings
+    ) -> None:
+        # Arrange: a slow crawl, killed (the run's task cancelled from outside) mid-way
+        override_settings(CRAWL_PER_DOMAIN_RPS=5.0, CRAWL_CONCURRENCY=1)
+        job = await world.job(max_pages=20)
+        killed = asyncio.create_task(world.runner().run(job.id))
+        await _until_pages_succeeded(world, job, 2)
+        killed.cancel()
+        await asyncio.gather(killed, return_exceptions=True)
+        dead = await world.jobs.get_or_raise(job.id)
+        finished_before = {
+            page["url"]
+            async for page in world.runtime.mongo.db["pages"].find(
+                {"job_id": job.id, "status": "succeeded"}
+            )
+        }
+        assert dead.status is JobStatus.RUNNING and dead.attempts == 1  # nobody released it
+        world.site.reset()
+
+        # Act: the beat sweep finds the stale heartbeat; the re-sent task runs the job
+        report = await _recovery(world).run()
+        outcome = await world.runner().run(job.id)
+
+        # Assert
+        done = await world.jobs.get_or_raise(job.id)
+        refetched = {r.path for r in world.site.requests} & {
+            url.removeprefix(world.site.base_url) for url in finished_before
+        }
+        assert report.requeued == [job.id] and world.enqueued == [(job.id, 0)]
+        assert outcome is JobOutcome.SUCCEEDED
+        assert done.status is JobStatus.SUCCEEDED and done.attempts == 2
+        assert refetched == set()  # the frontier resumed: finished pages weren't redone
+        assert (await world.sources.get_or_raise(job.source_id)).active_version == job.id
+        assert await _points(world, job) > 0
+
+    async def test_a_job_that_keeps_dying_fails_worker_lost(
+        self, world: _World, override_settings: OverrideSettings
+    ) -> None:
+        override_settings(CRAWL_JOB_MAX_ATTEMPTS=1)
+        job = await world.job()
+        run_id = "run-dead"
+        await world.jobs.start(job.id, run_id)  # a worker took it and died at once
+
+        report = await _recovery(world).run()
+
+        done = await world.jobs.get_or_raise(job.id)
+        assert report.failed == [job.id]
+        assert done.status is JobStatus.FAILED
+        assert done.error is not None and done.error.code == "worker_lost"
+        assert world.enqueued == []
+        assert world.cleanups == [(_TENANT, job.kb_id, job.source_id, job.id, 0)]
+        assert (await world.sources.get_or_raise(job.source_id)).active_version is None
+
+
+class TestRecoverJobsTask_S80:
+    """S80 — the `recover_jobs` Celery task (what beat sends), in-process."""
+
+    def test_the_task_requeues_a_stale_job(
+        self,
+        config: Settings,
+        fixture_site: FixtureSite,
+        override_settings: OverrideSettings,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from rag_engine.worker.tasks import crawl, maintenance
+
+        override_settings(CRAWL_STALE_HEARTBEAT_SECONDS=0.2)
+        sent: list[tuple[str, float]] = []
+        monkeypatch.setattr(
+            crawl, "enqueue_crawl_job", lambda job_id, countdown=0: sent.append((job_id, countdown))
+        )
+        try:
+            jobs = JobRepository(worker_context.runtime.mongo.db)
+            job = worker_context.run(_seed_job(worker_context.runtime, fixture_site))
+            worker_context.run(jobs.start(job.id, "run-dead"))
+            time.sleep(0.3)  # the heartbeat goes stale
+
+            result = maintenance.recover_jobs.apply().get(timeout=60)
+
+            assert result["requeued"] == [job.id] and result["failed"] == []
+            assert sent == [(job.id, 0)]
+            current = worker_context.run(jobs.get_or_raise(job.id))
+            assert current.status is JobStatus.QUEUED
         finally:
             worker_context.shutdown()

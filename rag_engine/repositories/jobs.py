@@ -66,6 +66,11 @@ _SLOT_KEY = {"tenant_id": 1, "slot": 1}  # key pattern of `tenant_job_slot`
 _CREATE_ATTEMPTS = 5
 
 
+def _stale_guard(heartbeat_before: datetime | None) -> dict[str, Any]:
+    """Extra transition condition: the run's heartbeat is still older than this."""
+    return {} if heartbeat_before is None else {"heartbeat_at": {"$lt": heartbeat_before}}
+
+
 def _sources_of(target: JobStatus) -> list[str]:
     """Statuses allowed to move to `target`."""
     return sorted(s.value for s, targets in JOB_TRANSITIONS.items() if target in targets)
@@ -113,6 +118,36 @@ class JobRepository(BaseRepository[CrawlJob]):
             sort=[("heartbeat_at", ASCENDING)],
             limit=limit,
         )
+
+    async def find_stale_queued(
+        self, updated_before: datetime, *, limit: int = 100
+    ) -> list[CrawlJob]:
+        """Queued jobs untouched since `updated_before`: their task message may be lost
+        (Step 80 sends them again)."""
+        return await self.find(
+            {"status": JobStatus.QUEUED.value, "updated_at": {"$lt": updated_before}},
+            sort=[("updated_at", ASCENDING)],
+            limit=limit,
+        )
+
+    async def touch_queued(self, job_id: str, seen_updated_at: datetime) -> bool:
+        """Bump a queued job's `updated_at` if nothing changed it since it was read.
+
+        Crash recovery calls this before re-sending a job's task, so the job is re-sent at
+        most once per staleness window, and of two concurrent sweeps only one sends it.
+        """
+        try:
+            result = await self.collection.update_one(
+                {
+                    "_id": job_id,
+                    "status": JobStatus.QUEUED.value,
+                    "updated_at": seen_updated_at,
+                },
+                {"$set": {"updated_at": self._clock()}},
+            )
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+        return result.modified_count == 1
 
     # ---- active jobs (Step 79) ---- #
 
@@ -229,29 +264,46 @@ class JobRepository(BaseRepository[CrawlJob]):
         """`finalizing → succeeded`."""
         return await self._finish(job_id, JobStatus.SUCCEEDED, run_id=run_id)
 
-    async def fail(self, job_id: str, error: JobError, *, run_id: str | None = None) -> CrawlJob:
+    async def fail(
+        self,
+        job_id: str,
+        error: JobError,
+        *,
+        run_id: str | None = None,
+        heartbeat_before: datetime | None = None,
+    ) -> CrawlJob:
         """Any active status → `failed`.
 
-        The worker passes its `run_id`. System code (a job that never started, crash
-        recovery giving up, Step 80) passes none and fails the job whoever holds it.
+        The worker passes its `run_id`. System code (a job that never started) passes none
+        and fails the job whoever holds it. Crash recovery (Step 80) passes the dead run and
+        `heartbeat_before`, so a run whose heartbeat just landed isn't failed.
         """
         return await self._finish(
-            job_id, JobStatus.FAILED, run_id=run_id, extra={"error": error.model_dump()}
+            job_id,
+            JobStatus.FAILED,
+            run_id=run_id,
+            extra={"error": error.model_dump()},
+            guard=_stale_guard(heartbeat_before),
         )
 
     async def cancel(self, job_id: str, run_id: str) -> CrawlJob:
         """`running → cancelled`, by the worker once in-flight pages drained (Step 52)."""
         return await self._finish(job_id, JobStatus.CANCELLED, run_id=run_id)
 
-    async def requeue(self, job_id: str, *, stale_run_id: str) -> CrawlJob:
+    async def requeue(
+        self, job_id: str, *, stale_run_id: str, heartbeat_before: datetime | None = None
+    ) -> CrawlJob:
         """`running | finalizing → queued` after `stale_run_id`'s worker died (Step 80).
 
         Guarded on the run, so a job a new run already picked up isn't requeued twice.
         The old run is cut off: everything it tries afterwards is superseded. A running
         job with a pending cancel request is **cancelled** instead (its worker is gone, so
-        there is nothing left to drain); check the returned status.
+        there is nothing left to drain); check the returned status. With `heartbeat_before`
+        (crash recovery), a run whose heartbeat landed since is left alone
+        (`InvalidJobTransitionError`).
         """
         now = self._clock()
+        guard = _stale_guard(heartbeat_before)
         try:
             raw = await self.collection.find_one_and_update(
                 {
@@ -259,6 +311,7 @@ class JobRepository(BaseRepository[CrawlJob]):
                     "status": JobStatus.RUNNING.value,
                     "run_id": stale_run_id,
                     "cancel_requested_at": {"$ne": None},
+                    **guard,
                 },
                 self._set(JobStatus.CANCELLED, now=now, finished_at=now, heartbeat_at=None),
                 return_document=ReturnDocument.AFTER,
@@ -268,7 +321,9 @@ class JobRepository(BaseRepository[CrawlJob]):
         if raw is not None:
             return self._load(raw)
         update = self._set(JobStatus.QUEUED, now=now, run_id=None, heartbeat_at=None)
-        return await self._transition(job_id, JobStatus.QUEUED, update, run_id=stale_run_id)
+        return await self._transition(
+            job_id, JobStatus.QUEUED, update, run_id=stale_run_id, guard=guard
+        )
 
     async def request_cancel(self, tenant_id: str, job_id: str) -> CrawlJob:
         """The API's cancel: a queued job is cancelled at once, a running one is flagged.
@@ -324,10 +379,11 @@ class JobRepository(BaseRepository[CrawlJob]):
         *,
         run_id: str | None,
         extra: Mapping[str, Any] | None = None,
+        guard: Mapping[str, Any] | None = None,
     ) -> CrawlJob:
         now = self._clock()
         update = self._set(target, now=now, finished_at=now, heartbeat_at=None, **(extra or {}))
-        return await self._transition(job_id, target, update, run_id=run_id)
+        return await self._transition(job_id, target, update, run_id=run_id, guard=guard)
 
     def _set(
         self, target: JobStatus, *, now: datetime | None = None, **fields: Any
@@ -342,8 +398,13 @@ class JobRepository(BaseRepository[CrawlJob]):
         update: dict[str, Any] | list[dict[str, Any]],
         *,
         run_id: str | None = None,
+        guard: Mapping[str, Any] | None = None,
     ) -> CrawlJob:
-        filter_: dict[str, Any] = {"_id": job_id, "status": {"$in": _sources_of(target)}}
+        filter_: dict[str, Any] = {
+            "_id": job_id,
+            "status": {"$in": _sources_of(target)},
+            **(guard or {}),
+        }
         if run_id is not None:
             filter_["run_id"] = run_id
         try:

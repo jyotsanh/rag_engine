@@ -10,6 +10,7 @@ from rag_engine.config import Settings
 from rag_engine.worker import context as context_module
 from rag_engine.worker.celery_app import (
     QUEUES,
+    RECOVER_JOBS_TASK,
     TASK_ROUTES,
     VISIBILITY_MARGIN_SECONDS,
     celery_app,
@@ -160,3 +161,45 @@ class TestCeleryApp_S75:
 
         assert not context.started
         assert coroutine.cr_frame is None  # closed, so no "never awaited" warning
+
+
+class TestRecoverySchedule_S80:
+    """S80 — crash recovery wiring: the beat schedule, the task's queue, the settings."""
+
+    def test_beat_runs_recovery_on_the_maintenance_queue(self) -> None:
+        config = Settings(_env_file=None, CRAWL_RECOVERY_INTERVAL_SECONDS=45)
+        app = configure(type(celery_app)("probe"), config)
+
+        entry = app.conf.beat_schedule["recover-crawl-jobs"]
+
+        assert entry["task"] == RECOVER_JOBS_TASK
+        assert entry["schedule"] == 45
+        assert entry["options"] == {"queue": "maintenance", "expires": 45}  # no tick backlog
+
+    def test_the_recovery_task_is_registered_and_routed(self) -> None:
+        celery_app.loader.import_default_modules()
+
+        assert RECOVER_JOBS_TASK in celery_app.tasks
+        assert celery_app.amqp.router.route({}, RECOVER_JOBS_TASK)["queue"].name == "maintenance"
+
+    def test_defaults(self) -> None:
+        config = Settings(_env_file=None)
+
+        assert config.CRAWL_RECOVERY_INTERVAL_SECONDS == 60
+        assert config.CRAWL_STALE_HEARTBEAT_SECONDS == 300  # 10 missed 30 s heartbeats
+        assert config.CRAWL_QUEUED_STALE_SECONDS == 1800
+
+    @pytest.mark.parametrize(
+        ("fields", "message"),
+        [
+            ({"CRAWL_HEARTBEAT_SECONDS": 30, "CRAWL_STALE_HEARTBEAT_SECONDS": 89},
+             "CRAWL_STALE_HEARTBEAT_SECONDS"),
+            ({"CRAWL_JOB_RETRY_DELAY_SECONDS": 600, "CRAWL_JOB_MAX_ATTEMPTS": 3,
+              "CRAWL_QUEUED_STALE_SECONDS": 1800}, "CRAWL_QUEUED_STALE_SECONDS"),
+        ],
+    )  # fmt: skip
+    def test_invalid_recovery_windows_are_refused(
+        self, fields: dict[str, float], message: str
+    ) -> None:
+        with pytest.raises(ValueError, match=message):
+            Settings(_env_file=None, **fields)  # ty: ignore[invalid-argument-type]

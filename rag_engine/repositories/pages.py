@@ -219,15 +219,18 @@ class PageRepository(BaseRepository[Page]):
             for row in rows
         ]
 
-    async def close_out_job(self, job_id: str, detail: str) -> tuple[int, int]:
+    async def close_out_job(
+        self, job_id: str, detail: str, *, reason: PageReason = PageReason.JOB_FAILED
+    ) -> tuple[int, int]:
         """A failed job's unfinished pages get a reason: `(skipped, failed)` counts.
 
         Queued pages were never tried (`skipped/job_failed`); pages still in progress were
-        cut off mid-crawl (`failed/job_failed`). Finished pages keep their outcome.
+        cut off mid-crawl (`failed/job_failed`). Finished pages keep their outcome. Crash
+        recovery (Step 80) passes `job_cancelled` for a dead run's cancelled job.
         """
         now = utc_now()
         changes = {
-            "reason": PageReason.JOB_FAILED.value,
+            "reason": reason.value,
             "reason_detail": detail[:500],
             "retry_at": None,
             "lease_expires_at": None,
