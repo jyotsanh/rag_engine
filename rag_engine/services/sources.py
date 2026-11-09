@@ -4,12 +4,19 @@ from rag_engine.config import logger
 from rag_engine.domain import Source, Tenant
 from rag_engine.repositories import KnowledgeBaseRepository, Page
 from rag_engine.repositories.sources import SourceRepository
+from rag_engine.worker.producer import TaskQueue
 
 
 class SourceService:
-    def __init__(self, kbs: KnowledgeBaseRepository, sources: SourceRepository) -> None:
+    def __init__(
+        self,
+        kbs: KnowledgeBaseRepository,
+        sources: SourceRepository,
+        tasks: TaskQueue | None = None,
+    ) -> None:
         self._kbs = kbs
         self._sources = sources
+        self._tasks = tasks
 
     async def _require_kb(self, tenant: Tenant, kb_id: str) -> None:
         # a missing, foreign or deleting KB hides all of its sources (404 knowledge_base_not_found)
@@ -26,11 +33,11 @@ class SourceService:
         return await self._sources.get_active(source_id, tenant.id, kb_id)
 
     async def delete(self, tenant: Tenant, kb_id: str, source_id: str) -> Source:
-        """Hides the source and frees its seed URL; Step 81 removes pages, chunks and vectors.
-
-        Step 87 must cancel an in-flight crawl of this source before deletion completes.
-        """
+        """Hides the source, frees its seed URL and enqueues the cascade (Step 81), which
+        cancels its crawl first, then removes its vectors, chunks, pages and jobs."""
         await self._require_kb(tenant, kb_id)
         source = await self._sources.mark_deleting(source_id, tenant.id, kb_id)
         logger.bind(kb_id=kb_id, source_id=source_id).info("source marked for deletion")
+        if self._tasks is not None:
+            await self._tasks.delete_source(tenant.id, source.id)
         return source

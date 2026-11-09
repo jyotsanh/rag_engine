@@ -9,11 +9,13 @@ import pytest
 from asgi_lifespan import LifespanManager
 
 from rag_engine.api import create_app
+from rag_engine.api.deps import get_task_queue
 from rag_engine.config import Settings
 from rag_engine.domain import ResourceStatus
 from rag_engine.infrastructure import AppInfrastructure, MongoConnection
 from rag_engine.repositories import SourceNotFoundError, SourceRepository
 from tests.conftest import APP_STARTUP_TIMEOUT
+from tests.support.fakes import RecordingTaskQueue
 
 API = "/api/v1"
 SEED = "https://acme.example/"
@@ -31,6 +33,7 @@ class _World:
     sources: SourceRepository
     acme: _Tenant
     globex: _Tenant
+    tasks: RecordingTaskQueue
 
     async def kb(self, tenant: _Tenant, name: str = "docs") -> str:
         response = await self.client.post(
@@ -57,6 +60,8 @@ async def _bootstrap(client: httpx.AsyncClient, admin: dict[str, str], name: str
 @pytest.fixture
 async def world(integration_settings: Settings) -> AsyncIterator[_World]:
     app = create_app(infrastructure_factory=AppInfrastructure)  # no vectors needed
+    tasks = RecordingTaskQueue()
+    app.dependency_overrides[get_task_queue] = lambda: tasks
     admin = {"Authorization": f"Bearer {integration_settings.ADMIN_API_KEY.get_secret_value()}"}
     mongo = MongoConnection(integration_settings)
     await mongo.connect()
@@ -70,6 +75,7 @@ async def world(integration_settings: Settings) -> AsyncIterator[_World]:
             SourceRepository(mongo.db),
             await _bootstrap(client, admin, "Acme"),
             await _bootstrap(client, admin, "Globex"),
+            tasks,
         )
     await mongo.close()
 
@@ -165,6 +171,7 @@ class TestSourceApi_S21:
         assert again.status_code == fetched.status_code == 404
         assert fetched.json()["error"]["code"] == "source_not_found"
         assert listed["items"] == []
+        assert world.tasks.sent == [("delete_source", world.acme.id, source)]  # S81 cascade
 
     async def test_source_is_only_reachable_through_its_own_kb(self, world: _World) -> None:
         kb1, kb2 = await world.kb(world.acme, "one"), await world.kb(world.acme, "two")
@@ -192,6 +199,7 @@ class TestSourceApi_S21:
 
         assert [r.status_code for r in responses] == [404, 404, 404]
         assert {r.json()["error"]["code"] for r in responses} == {"knowledge_base_not_found"}
+        assert world.tasks.sent == []  # nothing enqueued for a refused delete
 
     async def test_deleted_kb_hides_its_sources(self, world: _World) -> None:
         kb = await world.kb(world.acme)

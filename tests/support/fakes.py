@@ -261,3 +261,16 @@ class InMemoryVectorStore(BaseVectorStore):
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class RecordingTaskQueue:
+    """A `TaskQueue` (Step 81) that records what the API enqueues instead of publishing."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str, str]] = []  # (task, tenant_id, resource id)
+
+    async def delete_source(self, tenant_id: str, source_id: str) -> None:
+        self.sent.append(("delete_source", tenant_id, source_id))
+
+    async def delete_knowledge_base(self, tenant_id: str, kb_id: str) -> None:
+        self.sent.append(("delete_knowledge_base", tenant_id, kb_id))

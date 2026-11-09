@@ -24,6 +24,12 @@ class KnowledgeBase(MongoDocument):
             name="tenant_name_active_unique",
         ),
         IndexModel([("tenant_id", 1), ("_id", -1)], name="tenant_kbs"),
+        # Step 81: the deletion sweep finds KBs whose cascade stalled
+        IndexModel(
+            [("updated_at", 1)],
+            partialFilterExpression={"status": ResourceStatus.DELETING.value},
+            name="deleting_since",
+        ),
     )
 
     tenant_id: TenantId

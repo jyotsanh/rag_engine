@@ -33,6 +33,12 @@ class Source(MongoDocument):
             name="kb_seed_active_unique",
         ),
         IndexModel([("tenant_id", 1), ("kb_id", 1), ("_id", -1)], name="tenant_kb_sources"),
+        # Step 81: the deletion sweep finds sources whose cascade stalled
+        IndexModel(
+            [("updated_at", 1)],
+            partialFilterExpression={"status": ResourceStatus.DELETING.value},
+            name="deleting_since",
+        ),
     )
 
     tenant_id: TenantId

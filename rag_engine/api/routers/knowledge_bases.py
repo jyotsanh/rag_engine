@@ -4,7 +4,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Path, status
 
-from rag_engine.api.deps import CurrentTenant, KnowledgeBases
+from rag_engine.api.deps import CurrentTenant, KnowledgeBases, Tasks
 from rag_engine.api.params import Cursor, Limit
 from rag_engine.api.schemas import (
     KnowledgeBaseCreate,
@@ -23,8 +23,8 @@ _ERRORS: dict[int | str, dict[str, Any]] = {
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge-bases"], responses=_ERRORS)
 
 
-def get_service(kbs: KnowledgeBases) -> KnowledgeBaseService:
-    return KnowledgeBaseService(kbs)
+def get_service(kbs: KnowledgeBases, tasks: Tasks) -> KnowledgeBaseService:
+    return KnowledgeBaseService(kbs, tasks)
 
 
 Service = Annotated[KnowledgeBaseService, Depends(get_service)]

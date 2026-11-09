@@ -9,8 +9,11 @@ import pytest
 from rag_engine.config import Settings
 from rag_engine.worker import context as context_module
 from rag_engine.worker.celery_app import (
+    DELETE_KNOWLEDGE_BASE_TASK,
+    DELETE_SOURCE_TASK,
     QUEUES,
     RECOVER_JOBS_TASK,
+    SWEEP_DELETIONS_TASK,
     TASK_ROUTES,
     VISIBILITY_MARGIN_SECONDS,
     celery_app,
@@ -203,3 +206,72 @@ class TestRecoverySchedule_S80:
     ) -> None:
         with pytest.raises(ValueError, match=message):
             Settings(_env_file=None, **fields)  # ty: ignore[invalid-argument-type]
+
+
+class _RetryCalled(Exception):
+    pass
+
+
+class _FakeTask:
+    def __init__(self, retries: int) -> None:
+        self.request = SimpleNamespace(retries=retries)
+        self.retry_kwargs: dict[str, object] = {}
+
+    def retry(self, **kwargs: object) -> Exception:
+        self.retry_kwargs = kwargs
+        return _RetryCalled()
+
+
+class TestCascadeWiring_S81:
+    """S81 — cascade wiring: the sweep's beat entry, task routing, settings, and the
+    wait-for-jobs retry that never runs out."""
+
+    def test_beat_sweeps_deletions_on_the_maintenance_queue(self) -> None:
+        config = Settings(_env_file=None, CASCADE_SWEEP_INTERVAL_SECONDS=120)
+        app = configure(type(celery_app)("probe"), config)
+
+        entry = app.conf.beat_schedule["sweep-deletions"]
+
+        assert entry["task"] == SWEEP_DELETIONS_TASK and entry["schedule"] == 120
+        assert entry["options"] == {"queue": "maintenance", "expires": 120}
+        assert "recover-crawl-jobs" in app.conf.beat_schedule  # S80's entry is kept
+
+    def test_cascade_tasks_are_registered_and_routed(self) -> None:
+        celery_app.loader.import_default_modules()
+
+        for name in (DELETE_SOURCE_TASK, DELETE_KNOWLEDGE_BASE_TASK, SWEEP_DELETIONS_TASK):
+            assert name in celery_app.tasks
+            assert celery_app.amqp.router.route({}, name)["queue"].name == "maintenance"
+
+    def test_defaults_and_validation(self) -> None:
+        config = Settings(_env_file=None)
+
+        assert (config.CASCADE_RETRY_DELAY_SECONDS, config.CASCADE_SWEEP_INTERVAL_SECONDS,
+                config.CASCADE_STALE_SECONDS) == (30, 300, 900)  # fmt: skip
+        with pytest.raises(ValueError, match="CASCADE_STALE_SECONDS"):
+            Settings(_env_file=None, CASCADE_RETRY_DELAY_SECONDS=30, CASCADE_STALE_SECONDS=60)
+
+    @pytest.mark.parametrize("retries", [0, 6, 500])
+    def test_a_waiting_cascade_retries_without_limit(self, retries: int) -> None:
+        from rag_engine.services import CascadeResult, CascadeStatus
+        from rag_engine.worker.tasks.maintenance import settle_cascade
+
+        task = _FakeTask(retries)
+        waiting = CascadeResult(CascadeStatus.WAITING_FOR_JOBS, waiting_for=["job_1"])
+
+        with pytest.raises(_RetryCalled):
+            settle_cascade(task, waiting, 30.0)  # ty: ignore[invalid-argument-type]
+
+        assert task.retry_kwargs == {"countdown": 30.0, "max_retries": retries + 1}
+
+    @pytest.mark.parametrize("status", ["deleted", "already_gone", "not_deleting"])
+    def test_a_settled_cascade_returns_its_result(self, status: str) -> None:
+        from rag_engine.services import CascadeResult, CascadeStatus
+        from rag_engine.worker.tasks.maintenance import settle_cascade
+
+        task = _FakeTask(0)
+
+        result = settle_cascade(task, CascadeResult(CascadeStatus(status), points=3), 30.0)  # ty: ignore[invalid-argument-type]
+
+        assert result["status"] == status and result["points"] == 3
+        assert task.retry_kwargs == {}

@@ -120,6 +120,12 @@ class Settings(BaseSettings):
     CRAWL_RECOVERY_INTERVAL_SECONDS: float = Field(default=60.0, gt=0)
     CRAWL_STALE_HEARTBEAT_SECONDS: float = Field(default=300.0, gt=0)
     CRAWL_QUEUED_STALE_SECONDS: float = Field(default=1800.0, gt=0)
+    # cascade deletes (Step 81): a source/KB cascade waits for its active crawl jobs to be
+    # cancelled, re-checking every CASCADE_RETRY_DELAY_SECONDS; a beat sweep every
+    # CASCADE_SWEEP_INTERVAL_SECONDS restarts cascades untouched for CASCADE_STALE_SECONDS
+    CASCADE_RETRY_DELAY_SECONDS: float = Field(default=30.0, gt=0)
+    CASCADE_SWEEP_INTERVAL_SECONDS: float = Field(default=300.0, gt=0)
+    CASCADE_STALE_SECONDS: float = Field(default=900.0, gt=0)
 
     # ---- vector store ---- #
     ACTIVE_VECTOR_STORE: VectorStoreType = VectorStoreType.QDRANT
@@ -367,6 +373,11 @@ class Settings(BaseSettings):
             raise ValueError(
                 "CRAWL_QUEUED_STALE_SECONDS must be > CRAWL_JOB_RETRY_DELAY_SECONDS x "
                 "CRAWL_JOB_MAX_ATTEMPTS (the longest a requeued job waits on purpose)"
+            )
+        if self.CASCADE_STALE_SECONDS <= 2 * self.CASCADE_RETRY_DELAY_SECONDS:
+            raise ValueError(
+                "CASCADE_STALE_SECONDS must be > 2 x CASCADE_RETRY_DELAY_SECONDS "
+                "(a cascade that is waiting must not look stalled)"
             )
         if any(len(p.get_secret_value()) < 32 for p in self.API_KEY_PEPPER_PREVIOUS):
             raise ValueError("every API_KEY_PEPPER_PREVIOUS entry must be >= 32 characters")

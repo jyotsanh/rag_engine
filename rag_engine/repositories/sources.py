@@ -12,12 +12,13 @@ from rag_engine.repositories.exceptions import (
     SourceNotFoundError,
     SourceVersionConflictError,
 )
+from rag_engine.repositories.lifecycle import DeletingQueries
 from rag_engine.repositories.pagination import DEFAULT_PAGE_SIZE, Page
 
 _ACTIVE = {"status": ResourceStatus.ACTIVE.value}
 
 
-class SourceRepository(BaseRepository[Source]):
+class SourceRepository(BaseRepository[Source], DeletingQueries[Source]):
     """Tenant- and KB-scoped. Sources being deleted are invisible to reads.
 
     A source is identified by its seed URL within a KB; callers pass the
@@ -90,6 +91,26 @@ class SourceRepository(BaseRepository[Source]):
             await self.collection.update_one(
                 {"_id": source_id}, {"$set": {"last_job_id": job_id, "updated_at": utc_now()}}
             )
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+
+    # ---- cascade (Step 81) ---- #
+
+    async def mark_kb_sources_deleting(self, kb_id: str) -> int:
+        """A KB's deletion takes all of its live sources with it (their seeds are freed)."""
+        try:
+            result = await self.collection.update_many(
+                {"kb_id": kb_id, **_ACTIVE},
+                {"$set": {"status": ResourceStatus.DELETING.value, "updated_at": utc_now()}},
+            )
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+        return result.modified_count
+
+    async def ids_for_kb(self, kb_id: str) -> list[str]:
+        """Every source of a KB, whatever its status."""
+        try:
+            return [raw["_id"] async for raw in self.collection.find({"kb_id": kb_id}, {"_id": 1})]
         except PyMongoError as exc:
             raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
 

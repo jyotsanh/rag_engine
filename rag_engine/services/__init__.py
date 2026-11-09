@@ -1,3 +1,4 @@
+from .cascade import CascadeDeleter, CascadeResult, CascadeStatus, DeletionSweeper
 from .cleanup import CleanupResult, VersionCleaner
 from .crawl_jobs import CrawlJobService, JobSubmission
 from .knowledge_bases import KnowledgeBaseService
@@ -7,8 +8,12 @@ from .usage import UsageMeter
 from .versions import search_scope
 
 __all__ = [
+    "CascadeDeleter",
+    "CascadeResult",
+    "CascadeStatus",
     "CleanupResult",
     "CrawlJobService",
+    "DeletionSweeper",
     "JobSubmission",
     "KnowledgeBaseService",
     "SourceService",

@@ -157,6 +157,27 @@ class JobRepository(BaseRepository[CrawlJob]):
             {"source_id": source_id, **ACTIVE_JOB_FILTER}, scope={"tenant_id": tenant_id}
         )
 
+    async def active_for_kb(self, tenant_id: str, kb_id: str) -> list[CrawlJob]:
+        """A KB's queued, running or finalizing jobs (the KB cascade waits for them)."""
+        return await self.find(
+            {"kb_id": kb_id, **ACTIVE_JOB_FILTER}, scope={"tenant_id": tenant_id}
+        )
+
+    async def ids_for_source(self, source_id: str) -> list[str]:
+        """Every job of a source, any status (the source cascade deletes their pages)."""
+        try:
+            cursor = self.collection.find({"source_id": source_id}, {"_id": 1})
+            return [raw["_id"] async for raw in cursor]
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+
+    async def delete_for_source(self, source_id: str) -> int:
+        """Drop a deleted source's job records, the last step of its cascade (Step 81)."""
+        try:
+            return await self.delete_many({"source_id": source_id})
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+
     async def count_active_for_tenant(self, tenant_id: str) -> int:
         """The tenant's concurrent jobs: queued, running or finalizing."""
         try:

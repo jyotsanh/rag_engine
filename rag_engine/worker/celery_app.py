@@ -14,7 +14,8 @@
   can get its own workers and concurrency.
 - **Beat** (`celery -A rag_engine.worker.celery_app beat`, one process per deployment):
   `recover_jobs` every `CRAWL_RECOVERY_INTERVAL_SECONDS` on the `maintenance` queue (Step
-  80). Each tick expires after one interval, so a backlog of ticks never piles up.
+  80) and `sweep_deletions` every `CASCADE_SWEEP_INTERVAL_SECONDS` (Step 81). Each tick
+  expires after one interval, so a backlog of ticks never piles up.
 - JSON only (no pickle), UTC, time limits from settings, results kept for a day, and
   Celery does not take over the root logger (`setup_logging` runs in the worker init).
 """
@@ -34,6 +35,9 @@ TASK_ROUTES = {
     "rag_engine.worker.tasks.webhooks.*": {"queue": WEBHOOKS_QUEUE},
 }
 RECOVER_JOBS_TASK = "rag_engine.worker.tasks.maintenance.recover_jobs"
+DELETE_SOURCE_TASK = "rag_engine.worker.tasks.maintenance.delete_source"
+DELETE_KNOWLEDGE_BASE_TASK = "rag_engine.worker.tasks.maintenance.delete_knowledge_base"
+SWEEP_DELETIONS_TASK = "rag_engine.worker.tasks.maintenance.sweep_deletions"
 # a redelivery margin on top of the hard time limit (see the module docstring)
 VISIBILITY_MARGIN_SECONDS = 15 * 60
 RESULT_EXPIRES_SECONDS = 24 * 60 * 60
@@ -75,7 +79,15 @@ def configure(app: Celery, config: Settings = settings) -> Celery:
                     "queue": MAINTENANCE_QUEUE,
                     "expires": config.CRAWL_RECOVERY_INTERVAL_SECONDS,
                 },
-            }
+            },
+            "sweep-deletions": {
+                "task": SWEEP_DELETIONS_TASK,
+                "schedule": config.CASCADE_SWEEP_INTERVAL_SECONDS,
+                "options": {
+                    "queue": MAINTENANCE_QUEUE,
+                    "expires": config.CASCADE_SWEEP_INTERVAL_SECONDS,
+                },
+            },
         },
     )
     return app

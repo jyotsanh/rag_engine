@@ -9,9 +9,11 @@ import pytest
 from asgi_lifespan import LifespanManager
 
 from rag_engine.api import create_app
+from rag_engine.api.deps import get_task_queue
 from rag_engine.config import Settings
 from rag_engine.infrastructure import AppInfrastructure
 from tests.conftest import APP_STARTUP_TIMEOUT
+from tests.support.fakes import RecordingTaskQueue
 
 API = "/api/v1"
 KBS = f"{API}/knowledge-bases"
@@ -29,6 +31,7 @@ class _World:
     admin: dict[str, str]
     acme: _Tenant
     globex: _Tenant
+    tasks: RecordingTaskQueue
 
     async def create_kb(self, tenant: _Tenant, **body: Any) -> dict[str, Any]:
         response = await self.client.post(
@@ -53,6 +56,8 @@ async def _bootstrap_tenant(
 @pytest.fixture
 async def world(integration_settings: Settings) -> AsyncIterator[_World]:
     app = create_app(infrastructure_factory=AppInfrastructure)  # no vectors needed
+    tasks = RecordingTaskQueue()
+    app.dependency_overrides[get_task_queue] = lambda: tasks
     admin = {"Authorization": f"Bearer {integration_settings.ADMIN_API_KEY.get_secret_value()}"}
     transport = httpx.ASGITransport(app=app)
     async with (
@@ -61,7 +66,7 @@ async def world(integration_settings: Settings) -> AsyncIterator[_World]:
     ):
         acme = await _bootstrap_tenant(client, admin, "Acme", quotas={"max_knowledge_bases": 3})
         globex = await _bootstrap_tenant(client, admin, "Globex")
-        yield _World(client, admin, acme, globex)
+        yield _World(client, admin, acme, globex, tasks)
 
 
 # ---- #
@@ -188,6 +193,8 @@ class TestKnowledgeBaseApi_S20:
         assert again.status_code == fetched.status_code == 404
         assert listed["items"] == []
         assert recreated.status_code == 201
+        # S81: the cascade is enqueued once (the repeated delete is a 404)
+        assert world.tasks.sent == [("delete_knowledge_base", world.acme.id, kb["id"])]
 
     async def test_malformed_ids_are_422(self, world: _World) -> None:
         for url in (f"{KBS}/not-an-id", f"{KBS}/ten_{'0' * 32}"):

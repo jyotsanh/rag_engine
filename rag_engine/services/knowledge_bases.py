@@ -9,11 +9,13 @@ from rag_engine.embeddings import resolve_space
 from rag_engine.exceptions import AppValidationError, QuotaExceededError
 from rag_engine.repositories import Page
 from rag_engine.repositories.knowledge_bases import KnowledgeBaseRepository
+from rag_engine.worker.producer import TaskQueue
 
 
 class KnowledgeBaseService:
-    def __init__(self, kbs: KnowledgeBaseRepository) -> None:
+    def __init__(self, kbs: KnowledgeBaseRepository, tasks: TaskQueue | None = None) -> None:
         self._kbs = kbs
+        self._tasks = tasks
 
     def _quota_error(self, tenant: Tenant) -> QuotaExceededError:
         return QuotaExceededError(
@@ -76,7 +78,10 @@ class KnowledgeBaseService:
         return await self._kbs.update_active(kb_id, tenant.id, changes)
 
     async def delete(self, tenant: Tenant, kb_id: str) -> KnowledgeBase:
-        """Marks the KB deleting (hidden immediately, name freed). Step 81 cascades the data."""
+        """Marks the KB deleting (hidden immediately, name freed) and enqueues the cascade
+        of its sources, pages, chunks and vectors (Step 81)."""
         kb = await self._kbs.mark_deleting(kb_id, tenant.id)
         logger.bind(kb_id=kb.id).info("knowledge base marked for deletion")
+        if self._tasks is not None:
+            await self._tasks.delete_knowledge_base(tenant.id, kb.id)
         return kb

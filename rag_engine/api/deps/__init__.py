@@ -23,6 +23,7 @@ from .infrastructure import (
     get_source_repository,
     get_tenant_repository,
 )
+from .tasks import Tasks, get_task_queue
 
 __all__ = [
     "API_RATE_LIMIT_WINDOW_SECONDS",
@@ -34,6 +35,7 @@ __all__ = [
     "InvalidCredentialsError",
     "KnowledgeBases",
     "Sources",
+    "Tasks",
     "TenantContext",
     "TenantDisabledError",
     "Tenants",
@@ -42,6 +44,7 @@ __all__ = [
     "get_db",
     "get_knowledge_base_repository",
     "get_source_repository",
+    "get_task_queue",
     "get_tenant_repository",
     "require_admin",
     "require_tenant",

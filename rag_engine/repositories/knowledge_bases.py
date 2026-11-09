@@ -14,12 +14,13 @@ from rag_engine.repositories.exceptions import (
     KnowledgeBaseNameTakenError,
     KnowledgeBaseNotFoundError,
 )
+from rag_engine.repositories.lifecycle import DeletingQueries
 from rag_engine.repositories.pagination import DEFAULT_PAGE_SIZE, Page
 
 _ACTIVE = {"status": ResourceStatus.ACTIVE.value}
 
 
-class KnowledgeBaseRepository(BaseRepository[KnowledgeBase]):
+class KnowledgeBaseRepository(BaseRepository[KnowledgeBase], DeletingQueries[KnowledgeBase]):
     """Tenant-owned: every query takes the tenant id. Deleting KBs are invisible to reads."""
 
     model: ClassVar[type[MongoDocument]] = KnowledgeBase

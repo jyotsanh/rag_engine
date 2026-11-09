@@ -2440,3 +2440,51 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 84**: if the enqueue fails after `submit`, the job can simply stay `queued`: recovery re-sends it after `CRAWL_QUEUED_STALE_SECONDS`.
   - **Step 96**: run exactly one `beat` process. Several would only re-run idempotent sweeps.
 - Next: Step 81: Cascade deletes
+
+### Step 81: Cascade deletes  (2026-11-09)
+- Status: ✅ done
+- Built:
+  - **`rag_engine/services/cascade.py` → `CascadeDeleter(db, store)`** (exported with `CascadeResult`, `CascadeStatus` and `DeletionSweeper`):
+    - **`delete_source(tenant, source)`**:
+      1. **Its crawl jobs stop first.** An active job is cancelled through `request_cancel`: a queued job at once, a running job flagged for its worker's heartbeat. A finalizing job can't be cancelled and is waited for.
+      2. While any job is still active → **`waiting_for_jobs`**, and nothing is touched. Deleting vectors under a job that still upserts would leave orphans.
+      3. Then the **vectors** (every version, from the KB's collection), **chunks**, each job's **pages** and content claims, the **job records**, and **the source record last**.
+    - **`delete_knowledge_base(tenant, kb)`**: marks its live sources deleting (`mark_kb_sources_deleting`), waits until **every job of the KB** has stopped, cascades each source as above, deletes the KB's remaining vectors with one KB-wide filter (a safety net for vectors whose source record already went), then removes the KB record. The collection is shared per embedding space, so it stays.
+    - **Statuses**: `deleted`; `already_gone` (repeated, racing, or another tenant's id); `waiting_for_jobs`; `not_deleting` (a live record is **never** cascaded).
+    - Records go last and every step is idempotent, so a cascade that crashed half-way is simply run again.
+    - Each pass `touch`es the record it works on.
+    - Kept on purpose: tenant usage (billing) and the embedding cache (shared by content hash; Step 97 prunes it).
+  - **`DeletionSweeper`** restarts cascades nobody touched for `CASCADE_STALE_SECONDS` (an enqueue that failed, a lost message, a dead worker). It uses a conditional `touch_deleting(id, seen_updated_at, now=)`, so a stalled cascade is restarted at most once per window.
+  - **Repositories**:
+    - `repositories/lifecycle.py` → the `DeletingQueries` mixin (`find_deleting_since`, `touch_deleting`) on the KB and source repositories, plus a partial **`deleting_since`** index on `updated_at` (status `deleting`) for both.
+    - `SourceRepository.mark_kb_sources_deleting` and `ids_for_kb`; `JobRepository.active_for_kb`, `ids_for_source` and `delete_for_source`.
+  - **Tasks** (`maintenance` queue):
+    - `delete_source(tenant, source)` and `delete_knowledge_base(tenant, kb)`. Outages back off exponentially. **`waiting_for_jobs` retries every `CASCADE_RETRY_DELAY_SECONDS`, without limit**: Step 80 settles any job left active, so the wait ends.
+    - `settle_cascade` lifts the limit with `max_retries = retries + 1`, because `max_retries=None` means the task's default.
+    - `sweep_deletions` runs on **Celery beat** (`sweep-deletions`, every `CASCADE_SWEEP_INTERVAL_SECONDS`, expiring after one interval).
+  - **Producer**: `rag_engine/worker/producer.py`:
+    - `TaskQueue` protocol and `CeleryTaskQueue`, which sends by name from a worker thread (publishing is blocking I/O). **A failed publish only logs**: the record is already marked, and the sweep restarts it.
+    - Plus `send_source_deletion` / `send_kb_deletion` for worker code.
+  - **API**: `get_task_queue` dependency (`api/deps/tasks.py`, `Tasks`). `KnowledgeBaseService(kbs, tasks)` and `SourceService(kbs, sources, tasks)` enqueue the cascade after marking deleting. This also covers the Step 21 note that deleting a source must stop its in-flight crawl.
+- Settings: `CASCADE_RETRY_DELAY_SECONDS` (30), `CASCADE_SWEEP_INTERVAL_SECONDS` (300) and `CASCADE_STALE_SECONDS` (900; validated > 2 × the retry delay). `.env.example` updated.
+- Tests:
+  - `TestCascadeDeletes_S81` (12, integration: Mongo + the reference vector store, one test on real Qdrant):
+    - **A source cascade** (an old and a live crawl) removes its 5 points, chunks, pages, claims, 2 jobs and the record, and leaves the neighbour source intact.
+    - A live source is never cascaded. Repeated and foreign cascades are no-ops.
+    - A queued job is cancelled and the cascade proceeds.
+    - **A running job is flagged and the cascade waits with every byte in place**; after the worker cancels, the retry completes. A finalizing job is waited for, not cancelled. The cascade touches its source.
+    - **A KB cascade** removes both sources (one already deleting on its own) and the KB, and leaves another KB alone. **It waits for every job of the KB**, deleting nothing (not even idle sources) and hiding all the KB's sources as deleting at once.
+    - A live KB is never cascaded. A KB cascade survives a crash half-way (the KB-wide safety net).
+    - End to end on real Qdrant.
+  - `TestDeletionSweep_S81` (3): stalled deletions restarted once per window (fresh ones and live sources left alone); `touch_deleting` is conditional; the `deleting_since` indexes.
+  - `TestCascadeTasks_S81` (1): both Celery tasks in-process.
+  - `TestCascadeWiring_S81` (9, unit): the beat entry (S80's kept), tasks registered and routed to `maintenance`, defaults and validation; **a waiting cascade retries without limit** (at 0, 6 and 500 retries); a settled one returns its result.
+  - API tests (`test_sources.py`, `test_knowledge_bases_api.py`) override `get_task_queue` with **`RecordingTaskQueue`** (`tests/support/fakes.py`). They assert that a delete enqueues exactly one cascade, and that a refused delete enqueues none.
+  - `test_cascade_deletes.py` + the two API files were run 4 times. Every test passed each time. Two runs also logged a **testcontainers teardown error** (Docker 409 "removal of container … is already in progress", a container-removal race at session end), not a test failure.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ **1927 passed, 4 skipped, exit 0**, in 665 s.
+- Decisions/notes:
+  - **Outage retries share Celery's retry counter with waits.** After a long wait, an outage gives up sooner (the default limit is 6); the sweep restarts the cascade after `CASCADE_STALE_SECONDS`.
+  - **Step 84** reuses `Tasks`: add `enqueue_crawl_job` to `TaskQueue` and `CeleryTaskQueue`, and refuse submissions to deleting KBs and sources (`get_active` already does).
+  - **Step 87** (job cancel API) is independent; the cascade calls the repository's `request_cancel` itself and doesn't need the Redis flag (the heartbeat sees the Mongo flag within `CRAWL_HEARTBEAT_SECONDS`).
+  - **Step 96**: the `beat` process now drives two schedules (recovery and deletion sweep).
+- Next: Step 82: Webhook signer
