@@ -28,6 +28,7 @@ from .enums import (
 )
 from .job import (
     ACTIVE_JOB_FILTER,
+    MAX_PATTERNS,
     MAX_WEBHOOK_LOG,
     CrawlConfig,
     CrawlJob,
@@ -57,6 +58,7 @@ __all__ = [
     "EMBEDDING_CACHE_TTL_SECONDS",
     "JOB_TRANSITIONS",
     "MAX_DEFERRED_LINKS",
+    "MAX_PATTERNS",
     "MAX_WEBHOOK_LOG",
     "MAX_WEBHOOK_SECRETS",
     "REPORT_SAMPLES_PER_REASON",

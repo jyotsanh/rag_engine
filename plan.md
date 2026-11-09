@@ -2594,3 +2594,44 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 85** (job read API): expose `webhook` (status, attempts, delivered_at, the log) on `GET /jobs/{id}`.
   - **Step 96**: run a worker consuming `webhooks` (short tasks, high concurrency); the Dockerfile's default `--queues` already includes it.
 - Next: Step 84: Start crawl
+
+### Step 84: Start crawl  (2026-11-09)
+- Status: ✅ done
+- Built:
+  - **`POST /api/v1/knowledge-bases/{kb_id}/crawls`** (`api/routers/crawls.py`, tenant key with the rate limit):
+    - **202** with a `CrawlJobResponse` for a new queued job; **200** with the source's running job for a duplicate (its own settings apply, not re-enqueued).
+    - `Location: /api/v1/jobs/{id}` (the read endpoint arrives in Step 85).
+    - The OpenAPI docs list 200/202/401/403/404/422.
+  - **`CrawlCreate`** (`extra=forbid`): `url`, `max_pages` (optional, ≤ the hard cap), `max_depth`, `include_subdomains`, `path_prefix`, `include_patterns`/`exclude_patterns` (≤ 50 globs), `webhook_url`, and **`js_rendering`** (a per-job `auto`/`always`/`never`, the override Step 36 left for this API).
+  - `CrawlJobResponse`: id (= version), kb, source, seed, status, config, counters, usage, error, attempts, timestamps. Internals (tenant, run id, slot, heartbeat, report, webhook) are left out; Step 85 adds report and webhook views.
+  - **`rag_engine/services/crawls.py` → `CrawlSubmissionService(kbs, sources, CrawlJobService, tasks, guard=)`**. Everything is checked before any record is written:
+    1. The KB is the tenant's and live (404).
+    2. **Seed URL normalized** (Step 23; 422 `invalid_url`), then **SSRF-vetted with DNS** (422 `url_not_allowed`, with no IPs echoed; 422 `host_unresolvable`).
+    3. The seed's path must be inside `path_prefix` (422 `seed_outside_path_prefix`), with the same `startswith` rule as the crawl scope.
+    4. **Quotas**: `resolve_max_pages` defaults to `min(CRAWL_DEFAULT_MAX_PAGES, max_pages_per_job)`. An explicit value above the tenant's quota is **403 `quota_exceeded`** (`requested`, `limit`) and is never silently lowered.
+    5. **`webhook_url`** is vetted the same way (422 `webhook_url_not_allowed` / `host_unresolvable`, with `field: webhook_url`). **The tenant must have a webhook secret** (422 `webhook_secret_missing`).
+    6. **Concurrent-job pre-check** (`CrawlJobService.would_exceed_quota`) before the source upsert, so a refused crawl doesn't create its source. `submit` still enforces the quota atomically with slots; only a race can leave an empty source, and the next submission of that seed reuses it.
+    7. `sources.get_or_create(normalized seed)` → `CrawlJobService.submit` (Step 79). **Enqueue only when `created`**, via `TaskQueue.enqueue_crawl_job` → `run_crawl_job` on `crawl`. A failed publish only logs; the job stays queued and recovery re-sends it after `CRAWL_QUEUED_STALE_SECONDS` (Step 80).
+  - **Per-job rendering**: `CrawlConfig.js_rendering`. The runner uses `job.config.js_rendering or CRAWL_JS_RENDERING` both for opening a browser context and for `AutoFetcher(mode=)`.
+  - Supporting changes:
+    - `RUN_CRAWL_JOB_TASK` moved to `celery_app` (producers never import task modules).
+    - `CeleryTaskQueue.enqueue_crawl_job` (`_send` takes a queue); `RecordingTaskQueue` records it.
+    - `SourceRepository.find_active_by_seed`, `CrawlJobService.quota_error`, and `MAX_PATTERNS` exported from the domain.
+- Tests:
+  - `TestStartCrawl_S84` (6, integration, real app + Mongo, recording task queue):
+    - **A crawl is queued**: 202, `Location`, the config (default `max_pages` within the quota), no internals in the body, `last_job_id` set, enqueued once.
+    - **Different spellings normalize to one source** (200 duplicate, same job, enqueued once).
+    - A duplicate keeps its own settings; a finished crawl can be resubmitted (new job, same source).
+    - A foreign or deleted KB → 404 with nothing created; a tenant key is required.
+  - `TestCrawlValidation_S84` (14): invalid URLs (4); a private target refused up front (metadata always blocked, loopback once the test flag is off, no IP in the details); an unresolvable `.invalid` host; the seed must be inside `path_prefix`; 8 schema errors (bounds, prefix, glob, webhook scheme, render mode, unknown field) with nothing created.
+  - `TestCrawlQuotas_S84` (3): `max_pages` defaults within the quota; above the quota it is refused, not lowered; **the concurrent-job quota creates nothing** (no source for the refused seed; the running source still answers 200).
+  - `TestCrawlWebhook_S84` (3): a webhook needs a tenant secret (422, then 202 after issuing one); a private or unresolvable webhook is refused (`field: webhook_url`); OpenAPI documents both success codes.
+  - `TestPerJobRendering_S84` (3, in `test_crawl_job.py`, with a recording browser pool): a job turns rendering on against a `never` default, turns it off against an `always` default, and without an override the service default applies.
+  - `test_crawls_api.py`, `test_crawl_job.py` and `test_concurrency_guards.py` passed 3/3 consecutive runs (80 tests each).
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ **2055 passed, 4 skipped, exit 0**, in 733 s.
+- Decisions/notes:
+  - The seed's SSRF vet runs at submission *and* in the worker on every request (the worker's check is the one that matters; DNS can change in between).
+  - **Step 85**: `GET /jobs/{id}` and `GET /jobs` (the `Location` target) should reuse `CrawlJobResponse` and add `webhook` (status, attempts, log) and the report summary.
+  - **Step 87**: `DELETE /jobs/{id}` → `rag_engine.crawling.request_cancel(jobs, flags, tenant, job)` (Mongo + Redis flag).
+  - **Step 88 (API E2E)**: drive this endpoint with a real worker, instead of seeding jobs directly.
+- Next: Step 85: Job read API

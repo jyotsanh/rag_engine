@@ -36,6 +36,25 @@ class CrawlJobService:
         self._jobs = jobs
         self._sources = sources
 
+    async def would_exceed_quota(self, tenant: Tenant, source: Source | None) -> int | None:
+        """A cheap pre-check before creating anything: the tenant's active job count when a
+        *new* job would be over its quota, else None. `submit` enforces it atomically; this
+        only avoids creating a source for a crawl that will be refused."""
+        if source is not None and await self._jobs.find_active_for_source(tenant.id, source.id):
+            return None  # a duplicate: returns the running job, no new slot needed
+        active = await self._jobs.count_active_for_tenant(tenant.id)
+        return active if active >= tenant.quotas.max_concurrent_jobs else None
+
+    def quota_error(self, tenant: Tenant, active: int) -> QuotaExceededError:
+        return QuotaExceededError(
+            "Concurrent crawl job limit reached; wait for a job to finish or cancel one",
+            details={
+                "quota": "max_concurrent_jobs",
+                "limit": tenant.quotas.max_concurrent_jobs,
+                "active": active,
+            },
+        )
+
     async def submit(self, tenant: Tenant, source: Source, config: CrawlConfig) -> JobSubmission:
         """Queue a crawl of `source`, or return the job already crawling it.
 
@@ -59,14 +78,8 @@ class CrawlJobService:
         try:
             job, created = await self._jobs.create_active(job, slots=limit)
         except JobSlotsExhaustedError as exc:
-            raise QuotaExceededError(
-                "Concurrent crawl job limit reached; wait for a job to finish or cancel one",
-                details={
-                    "quota": "max_concurrent_jobs",
-                    "limit": limit,
-                    "active": await self._jobs.count_active_for_tenant(tenant.id),
-                },
-            ) from exc
+            active = await self._jobs.count_active_for_tenant(tenant.id)
+            raise self.quota_error(tenant, active) from exc
         if not created:
             return self._duplicate(job)
 

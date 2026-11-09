@@ -1,6 +1,7 @@
 """`run_crawl_job`: claim → crawl the fixture site → ingest → finalize, on real services."""
 
 import asyncio
+import contextlib
 import time
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
@@ -654,3 +655,57 @@ class TestCompletionWebhook_S83:
         outcome = await world.runner(enqueue_webhook=broken).run(job.id)
 
         assert outcome is JobOutcome.SUCCEEDED  # the recovery sweep re-sends it later
+
+
+class _RecordingBrowserPool:
+    """Stands in for the browser pool: records which jobs opened a browser context and
+    yields no browser (so pages are fetched over HTTP)."""
+
+    def __init__(self) -> None:
+        self.jobs: list[str | None] = []
+
+    @contextlib.asynccontextmanager
+    async def job_context(self, *, job_id: str | None = None, request_guard: object = None):
+        self.jobs.append(job_id)
+        yield None
+
+
+class TestPerJobRendering_S84:
+    """S84 — a crawl's `js_rendering` overrides the service's `CRAWL_JS_RENDERING`."""
+
+    async def _job(self, world: _World, mode: str | None) -> CrawlJob:
+        job = await world.job()
+        await world.runtime.mongo.db["crawl_jobs"].update_one(
+            {"_id": job.id}, {"$set": {"config.js_rendering": mode}}
+        )
+        return job
+
+    async def test_a_job_can_turn_rendering_on(self, world: _World) -> None:
+        job = await self._job(world, "always")  # the service default here is `never`
+        pool = _RecordingBrowserPool()
+
+        outcome = await world.runner(browser_pool=pool).run(job.id)
+
+        assert outcome is JobOutcome.SUCCEEDED and pool.jobs == [job.id]
+
+    async def test_a_job_can_turn_rendering_off(
+        self, world: _World, override_settings: OverrideSettings
+    ) -> None:
+        override_settings(CRAWL_JS_RENDERING=JsRenderMode.ALWAYS)
+        job = await self._job(world, "never")
+        pool = _RecordingBrowserPool()
+
+        outcome = await world.runner(browser_pool=pool).run(job.id)
+
+        assert outcome is JobOutcome.SUCCEEDED and pool.jobs == []
+
+    async def test_without_an_override_the_service_default_applies(
+        self, world: _World, override_settings: OverrideSettings
+    ) -> None:
+        override_settings(CRAWL_JS_RENDERING=JsRenderMode.AUTO)
+        job = await self._job(world, None)
+        pool = _RecordingBrowserPool()
+
+        await world.runner(browser_pool=pool).run(job.id)
+
+        assert pool.jobs == [job.id]

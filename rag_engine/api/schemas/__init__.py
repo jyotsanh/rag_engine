@@ -10,6 +10,7 @@ from .admin import (
     WebhookSecretCreatedResponse,
     WebhookSecretInfo,
 )
+from .crawls import CrawlCreate, CrawlJobResponse
 from .knowledge_bases import KnowledgeBaseCreate, KnowledgeBasePatch, KnowledgeBaseResponse
 from .sources import SourceResponse
 
@@ -18,6 +19,8 @@ __all__ = [
     "ApiKeyCreatedResponse",
     "ApiKeyResponse",
     "ApiKeyState",
+    "CrawlCreate",
+    "CrawlJobResponse",
     "KnowledgeBaseCreate",
     "KnowledgeBasePatch",
     "KnowledgeBaseResponse",

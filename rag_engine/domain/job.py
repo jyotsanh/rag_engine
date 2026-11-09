@@ -4,7 +4,7 @@ from typing import Self
 from pydantic import BaseModel, Field, model_validator
 from pymongo import IndexModel
 
-from rag_engine.config import settings
+from rag_engine.config import JsRenderMode, settings
 from rag_engine.domain.base import MongoDocument
 from rag_engine.domain.enums import ACTIVE_JOB_STATUSES, JobStatus, WebhookStatus
 from rag_engine.domain.report import CrawlReport
@@ -52,6 +52,11 @@ class CrawlConfig(BaseModel):
     include_patterns: list[PathPattern] = Field(default_factory=list, max_length=MAX_PATTERNS)
     exclude_patterns: list[PathPattern] = Field(default_factory=list, max_length=MAX_PATTERNS)
     webhook_url: HttpUrlStr | None = None
+    js_rendering: JsRenderMode | None = Field(
+        default=None,
+        description="Re-render HTML in headless Chromium: `auto` (pages that look like a JS "
+        "shell), `always` or `never`. Omit for the service default.",
+    )
 
 
 class JobCounters(BaseModel):

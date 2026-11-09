@@ -34,6 +34,7 @@ TASK_ROUTES = {
     "rag_engine.worker.tasks.maintenance.*": {"queue": MAINTENANCE_QUEUE},
     "rag_engine.worker.tasks.webhooks.*": {"queue": WEBHOOKS_QUEUE},
 }
+RUN_CRAWL_JOB_TASK = "rag_engine.worker.tasks.crawl.run_crawl_job"
 RECOVER_JOBS_TASK = "rag_engine.worker.tasks.maintenance.recover_jobs"
 DELETE_SOURCE_TASK = "rag_engine.worker.tasks.maintenance.delete_source"
 DELETE_KNOWLEDGE_BASE_TASK = "rag_engine.worker.tasks.maintenance.delete_knowledge_base"

@@ -1,12 +1,12 @@
 """`crawl` queue tasks (Step 77)."""
 
-from rag_engine.worker.celery_app import CRAWL_QUEUE, celery_app
+from rag_engine.worker.celery_app import CRAWL_QUEUE, RUN_CRAWL_JOB_TASK, celery_app
 from rag_engine.worker.context import run_async, worker_context
 from rag_engine.worker.crawl_job import CrawlJobDeps, CrawlJobRunner
 from rag_engine.worker.producer import send_job_webhook
 from rag_engine.worker.tasks.maintenance import enqueue_version_cleanup
 
-RUN_CRAWL_JOB = "rag_engine.worker.tasks.crawl.run_crawl_job"
+RUN_CRAWL_JOB = RUN_CRAWL_JOB_TASK
 
 
 def enqueue_crawl_job(job_id: str, countdown: float = 0) -> None:

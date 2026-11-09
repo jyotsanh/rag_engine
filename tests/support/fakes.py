@@ -264,10 +264,13 @@ class InMemoryVectorStore(BaseVectorStore):
 
 
 class RecordingTaskQueue:
-    """A `TaskQueue` (Step 81) that records what the API enqueues instead of publishing."""
+    """A `TaskQueue` (Steps 81, 84) that records what the API enqueues instead of publishing."""
 
     def __init__(self) -> None:
-        self.sent: list[tuple[str, str, str]] = []  # (task, tenant_id, resource id)
+        self.sent: list[tuple[str, ...]] = []  # (task, *args)
+
+    async def enqueue_crawl_job(self, job_id: str) -> None:
+        self.sent.append(("run_crawl_job", job_id))
 
     async def delete_source(self, tenant_id: str, source_id: str) -> None:
         self.sent.append(("delete_source", tenant_id, source_id))

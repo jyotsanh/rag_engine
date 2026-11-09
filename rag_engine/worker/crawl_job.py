@@ -288,7 +288,8 @@ class CrawlJobRunner:
             http = HttpFetcher(client, config)
             robots = RobotsCache(http, RedisRobotsStore(deps.redis, deps.keys), config=config)
             limiter = DomainRateLimiter(deps.redis, deps.keys, config)
-            render = config.CRAWL_JS_RENDERING is not JsRenderMode.NEVER
+            mode = job.config.js_rendering or config.CRAWL_JS_RENDERING  # per job (Step 84)
+            render = mode is not JsRenderMode.NEVER
             browser_scope = (
                 deps.browser_pool.job_context(job_id=job.id)
                 if render and deps.browser_pool is not None
@@ -305,6 +306,7 @@ class CrawlJobRunner:
                         http,
                         browser,
                         config=config,
+                        mode=mode,
                         before_render=render_politeness(robots, limiter),
                     ),
                     robots=robots,

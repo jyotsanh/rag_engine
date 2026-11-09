@@ -51,6 +51,12 @@ class SourceRepository(BaseRepository[Source], DeletingQueries[Source]):
                 raise
             return winner, False
 
+    async def find_active_by_seed(self, tenant_id: str, kb_id: str, seed_url: str) -> Source | None:
+        """The KB's live source for this (normalized) seed URL, if any."""
+        return await self.find_one(
+            {"seed_url": seed_url, **_ACTIVE}, scope=self._scope(tenant_id, kb_id)
+        )
+
     async def get_active(self, source_id: str, tenant_id: str, kb_id: str) -> Source:
         source = await self.find_one(
             {"_id": source_id, **_ACTIVE}, scope=self._scope(tenant_id, kb_id)
