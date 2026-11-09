@@ -9,6 +9,7 @@ the beat sweeps restart work whose message was lost (Steps 80-81).
 import asyncio
 from typing import Protocol
 
+from celery import Celery
 from loguru import logger
 
 from rag_engine.worker.celery_app import (
@@ -34,6 +35,10 @@ class TaskQueue(Protocol):
 
 
 class CeleryTaskQueue:
+    def __init__(self, app: Celery = celery_app) -> None:
+        """`app`: the producer app (the module's, configured from settings, by default)."""
+        self._app = app
+
     async def enqueue_crawl_job(self, job_id: str) -> None:
         """A submitted crawl (Step 84). If this publish fails, the job stays queued and
         crash recovery re-sends it after `CRAWL_QUEUED_STALE_SECONDS` (Step 80)."""
@@ -50,10 +55,9 @@ class CeleryTaskQueue:
     async def delete_knowledge_base(self, tenant_id: str, kb_id: str) -> None:
         await self._send(DELETE_KNOWLEDGE_BASE_TASK, [tenant_id, kb_id])
 
-    @staticmethod
-    async def _send(name: str, args: list[str], *, queue: str = MAINTENANCE_QUEUE) -> None:
+    async def _send(self, name: str, args: list[str], *, queue: str = MAINTENANCE_QUEUE) -> None:
         try:
-            await asyncio.to_thread(celery_app.send_task, name, args=args, queue=queue)
+            await asyncio.to_thread(self._app.send_task, name, args=args, queue=queue)
         except Exception:
             logger.opt(exception=True).error(
                 "could not enqueue {}{}; a recovery sweep will resend it", name, args

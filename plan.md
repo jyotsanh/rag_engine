@@ -2727,3 +2727,34 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
 - Decisions/notes:
   - **Step 88 (API E2E)**: drive the whole flow over HTTP with a real Celery worker: admin → tenant → key → KB → `POST …/crawls` → poll `GET /jobs/{id}` until succeeded → sources and pages consistent → re-crawl → atomic swap verified. Add a cancel mid-crawl (`DELETE`) against the real worker: the old version keeps serving.
 - Next: Step 88: API E2E
+
+### Step 88: API E2E  (2026-11-09)
+- Status: ✅ done (system checkpoint)
+- Built: **`tests/integration/test_api_e2e.py`**, the whole service over HTTP with a **real prefork Celery worker process**.
+  - The worker consumes `crawl`, `maintenance` and `webhooks`; the real OpenAI client talks to `FakeOpenAI` over HTTP; Qdrant, MongoDB and Redis are the test containers.
+  - The in-process API publishes to the test broker. The test only observes through the API, plus counting points in Qdrant.
+  - The operator side: tenant → API key → webhook secret (admin API). The tenant side: KB (`text-embedding-3-small`, 256 dims) → `POST …/crawls` of the fixture site → poll `GET /jobs/{id}`.
+  - **`test_crawl_then_recrawl_swaps_atomically`**:
+    - **First crawl succeeds, and everything agrees**: counters (`fetched` == report's succeeded, `chunked` == `embedded` > 0), usage, the source (`active_version`, `last_job_id`, stats pages and chunks), the per-page report (every succeeded page under `/docs/`, each detail with its Markdown), **Σ per-page `chunks` == `chunked` == Qdrant points of the version**.
+    - The **signed completion webhook** arrives and verifies with the tenant's secret (`job.succeeded`), and the job shows it `delivered` after 1 attempt.
+    - **Re-crawl**: a 202 with a new job on the same source. While it runs, the test **samples what search would serve** (the source's `active_version` and its point count) every 0.1 s.
+      - The sampling starts on v1, and **every sample has points > 0** (never an empty source).
+      - The versions go v1 … v2 exactly once.
+      - v2's points == its `chunked`.
+      - **v1's points are cleaned up after the swap** (cleanup task, 1 s delay); v1's per-page report stays readable.
+      - `GET /jobs?source_id=` lists v2 then v1.
+  - **`test_a_cancelled_recrawl_keeps_the_old_version`**: the whole site (≤ 40 pages, 5 req/s) succeeds, then a re-crawl starts.
+    - While it runs, a **duplicate submission → 200 with the same job**.
+    - **`DELETE /jobs/{id}` → 202**, and the job ends `cancelled` with fewer pages fetched than its cap.
+    - **The old version keeps serving** (`active_version` and point count unchanged); the cancelled crawl's points are 0.
+    - Its frontier remainder is listed as `skipped/job_cancelled`; the `job.cancelled` webhook is delivered.
+  - **`test_deleting_the_source_cascades_through_the_worker`**: `DELETE …/sources/{id}` → 202. The worker's cascade deletes the vectors, then the job records (`GET /jobs/{id}` → 404), and the source is gone from the API.
+- Test support:
+  - **`tests/support/celery_worker.py`**: `worker_env(config, extra)` and the `running_worker(config, producer, log, queues=, concurrency=, extra_env=)` context manager (ready once a `health` task round-trips; SIGTERM on exit, kill after 30 s). It was moved out of `test_celery_worker.py`, which now uses it too (its 4 tests unchanged).
+  - **`CeleryTaskQueue(app=)`**: producers can publish through an explicit Celery app (the module's by default). The E2E's API uses a producer configured for the test broker.
+- Tests: 3 E2E tests (~70 s for the file), passed 3/3 consecutive runs; no worker process left behind.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ **2104 passed, 4 skipped, exit 0**, in 910 s.
+- Decisions/notes:
+  - Job timing in the E2E comes from the worker's environment: 5 req/s per domain so a crawl is slow enough to cancel, a 0.5 s heartbeat, a 1 s version cleanup delay, and a 1 s cascade retry.
+  - The E2E proves Steps 75-87 end to end. **Step 90/91** (search API) should add a search assertion to the re-crawl test: queries during the re-crawl return v1 hits, then v2 hits.
+- Next: Step 89: Reranker framework + cross-encoder
