@@ -48,5 +48,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-editable
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin app
 USER app
-# Step 75 replaces this with the Celery worker command
-CMD ["python", "-m", "rag_engine.crawling.fetchers.smoke", "--help"]
+# the Celery worker (Step 75): prefork children, one async runtime each; split the queues
+# across deployments with `--queues` (e.g. crawl workers vs maintenance/webhooks workers)
+CMD ["celery", "--app", "rag_engine.worker.celery_app", "worker", "--loglevel", "INFO", \
+     "--pool", "prefork", "--queues", "crawl,maintenance,webhooks"]

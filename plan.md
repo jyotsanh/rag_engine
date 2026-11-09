@@ -2218,3 +2218,40 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Phase I (Vector Store, 67–74) is complete.**
   - **Step 75** (Celery): the worker process init builds an `AppRuntime` too, so workers get the same connections, vector store and collections.
 - Next: Step 75: Celery app
+
+### Step 75: Celery app  (2026-11-09)
+- Status: ✅ done
+- Built: the `rag_engine/worker/` package.
+  - **`celery_app.py`** → `celery_app = configure(Celery("rag_engine", include=[...tasks.maintenance]))` for `celery --app rag_engine.worker.celery_app worker`. `configure(app, config)` can be re-applied by tests and producers.
+    - Redis broker/backend on their own DBs (`REDIS_CELERY_BROKER_DB`=1 / `RESULT_DB`=2).
+    - **At-least-once delivery**: `task_acks_late`, `task_reject_on_worker_lost`, `worker_prefetch_multiplier=1`, so tasks must be idempotent (crawl jobs are: the frontier resumes).
+    - **`visibility_timeout` = hard time limit + 15 min.** With late acks, Redis redelivers an unacknowledged task after the visibility timeout (default 1 h). Without this, a long crawl (up to the ~3 h limit) would be started a second time while still running.
+    - JSON only, UTC, `task_track_started`, soft/hard time limits from settings, results kept 1 day, `worker_concurrency` from settings, `worker_hijack_root_logger=False`, stdouts not redirected.
+    - **Queues** `crawl` / `maintenance` (default) / `webhooks`, routed by task module (`TASK_ROUTES`: `rag_engine.worker.tasks.<queue>.*`).
+  - **`context.py` → `WorkerContext`** (process-wide `worker_context`, `run_async(coro)`): **one persistent event loop (`asyncio.Runner`) per worker process**, with one started `AppRuntime` on it (Step 74: connections, vector store, collections). Every task runs its coroutine on that loop, so loop-bound async clients stay valid across tasks.
+    - **Fork-safe**: created after fork, with the pid recorded; an inherited context is discarded and rebuilt.
+    - Lazy for the solo pool.
+    - A failed start closes the loop (and the pending coroutine) and propagates.
+    - `shutdown()` stops the runtime, then the process browser pool (Step 34's `shutdown_process_browser_pool`), then the loop; it's idempotent.
+  - **`signals.py`**:
+    - `worker_init`: `setup_logging()`, and **refuse the thread/gevent/eventlet pools** (they would share one loop across threads; matched by `celery.concurrency.<name>` module).
+    - `worker_process_init`: logging plus `worker_context.start()` (prefork child, connections after fork).
+    - `worker_process_shutdown` and `worker_shutdown`: shutdown, never blocking exit on a close error.
+  - **`tasks/maintenance.py` → `health`** (`rag_engine.worker.tasks.maintenance.health`): the worker's own readiness report from inside a worker process (pid + dependencies). Operational liveness, and the integration probe.
+- **Dockerfile**: the worker stage `CMD` is now `celery --app rag_engine.worker.celery_app worker --loglevel INFO --pool prefork --queues crawl,maintenance,webhooks` (split the queues across deployments with `--queues`). The container smoke tests pass explicit commands and are unaffected.
+- Deps: **`celery[redis]` 5.7.0** (runtime). The lock adds amqp, billiard, kombu, vine, click-didyoumean/-plugins/-repl, prompt-toolkit and wcwidth. ⚠️ **`python-dateutil` was downgraded 4.0.0 → 2.9.0.post0** by Celery's constraint. Only trafilatura's date parsing uses it (via htmldate/dateparser), our code doesn't import it, and the full suite (including all extraction tests) is green.
+- Tests:
+  - `TestCeleryApp_S75` (9, unit): delivery guarantees and serializers; **the visibility timeout outlasts the hard limit**; broker/backend on DBs 1/2; queues and routes (task modules loaded as a worker does, via `loader.import_default_modules()`); the thread/gevent pools are refused and prefork allowed.
+    - `WorkerContext` (fake runtime): 3 tasks → **one loop**, started once; shutdown stops the runtime and the browser pool (idempotent); a forked child builds its own runtime; a failed start propagates, leaves nothing open and closes the coroutine.
+  - `TestCeleryWorker_S75` (4, integration): **a real `celery worker` subprocess** (prefork, 2 children, `--queues maintenance`) on the test containers, with a separate producer app sending by name.
+    - `health` runs in a **prefork child** (pid ≠ the test and ≠ the worker main) with mongo/redis/qdrant/vector_collections all OK.
+    - 6 consecutive tasks stay healthy on the same process loop.
+    - A task sent to `crawl` stays `PENDING` with exactly 1 message in the broker's `crawl` list (routing: this worker doesn't consume it).
+    - **SIGTERM** → exit 0, and both children logged "ready" and "stopped" (clean runtime shutdown).
+  - Passed 2/2 runs (~42 s).
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1816 passed, 4 skipped (container) in 419 s.
+- Decisions/notes:
+  - Producers (the API) should send tasks **by name** (`celery_app.send_task(...)`), or import the task module; the app's `include` only loads modules in workers.
+  - **Step 76/77**: `run_crawl_job` is `@celery_app.task(name="rag_engine.worker.tasks.crawl.run_crawl_job", bind=True)` → `run_async(...)`, using `worker_context.runtime` (mongo, redis, `vector_store`, `collections`) and the process browser pool. Handle `SoftTimeLimitExceeded` by failing the job cleanly.
+  - **Step 80**: Celery beat for periodic recovery; a beat schedule goes on the `maintenance` queue.
+- Next: Step 76: Ingestion pipeline

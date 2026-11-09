@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 authors = [{ name = "jyotsanh", email = "hamaljyotsan@gmail.com" }]
 dependencies = [
+    "celery[redis]>=5.5",
     "charset-normalizer>=3.4",
     "defusedxml>=0.7.1",
     "fastapi>=0.120",
