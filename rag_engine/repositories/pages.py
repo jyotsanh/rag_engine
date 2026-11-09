@@ -16,9 +16,10 @@ for the API.
 """
 
 from collections import Counter
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, ClassVar
 
 from pymongo import ASCENDING
@@ -34,6 +35,7 @@ from rag_engine.domain import (
     PageReason,
     PageSample,
     PageStatus,
+    PageSummary,
     ReasonCount,
     RenderedWith,
     utc_now,
@@ -46,8 +48,26 @@ from rag_engine.repositories.exceptions import (
     DuplicateDocumentError,
     PageNotFoundError,
 )
-from rag_engine.repositories.pagination import DEFAULT_PAGE_SIZE
+from rag_engine.repositories.pagination import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    decode_cursor,
+    encode_cursor,
+)
 from rag_engine.repositories.pagination import Page as ResultPage
+
+# the report's view of a page: every summary field, and the Markdown's length instead of it
+_SUMMARY_PROJECTION: dict[str, Any] = {
+    **{name: 1 for name in PageSummary.model_fields if name not in ("id", "markdown_chars")},
+    "markdown_chars": {"$strLenCP": {"$ifNull": ["$markdown", ""]}},
+}
+
+
+def _one_or_in(value: StrEnum | Sequence[StrEnum]) -> str | dict[str, list[str]]:
+    if isinstance(value, StrEnum):
+        return value.value
+    return {"$in": sorted({v.value for v in value})}
+
 
 _DUPLICATE_KEY = 11000
 
@@ -264,20 +284,45 @@ class PageRepository(BaseRepository[Page]):
         tenant_id: str,
         job_id: str,
         *,
-        status: PageStatus | None = None,
-        reason: PageReason | None = None,
+        status: PageStatus | Sequence[PageStatus] | None = None,
+        reason: PageReason | Sequence[PageReason] | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         cursor: str | None = None,
-    ) -> ResultPage[Page]:
-        """A job's pages for the API, oldest first, scoped to the tenant."""
-        filter_: dict[str, Any] = {"job_id": job_id}
-        if status is not None:
-            filter_["status"] = status.value
-        if reason is not None:
-            filter_["reason"] = reason.value
-        return await self.paginate(
-            filter_, scope={"tenant_id": tenant_id}, limit=limit, cursor=cursor, order="asc"
+    ) -> ResultPage[PageSummary]:
+        """A job's pages for the per-page report (Step 86): oldest first (discovery order),
+        scoped to the tenant, optionally only some statuses and/or reasons.
+
+        Keyset-paginated on `_id` like `paginate`, but projected server-side: the Markdown
+        (up to `PAGE_MAX_MARKDOWN_BYTES` each) never leaves MongoDB, only its length does.
+        `get_for_job` returns a page in full.
+        """
+        if not 1 <= limit <= MAX_PAGE_SIZE:
+            raise ValueError(f"limit must be between 1 and {MAX_PAGE_SIZE}")
+        where: dict[str, Any] = {"tenant_id": tenant_id, "job_id": job_id}
+        if status:
+            where["status"] = _one_or_in(status)
+        if reason:
+            where["reason"] = _one_or_in(reason)
+        if cursor is not None:
+            where["_id"] = {"$gt": decode_cursor(cursor, "asc")}
+        try:
+            rows = [
+                PageSummary.model_validate(raw)
+                async for raw in self.collection.find(
+                    where, _SUMMARY_PROJECTION, sort=[("_id", ASCENDING)], limit=limit + 1
+                )
+            ]
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+        items = rows[:limit]
+        more = len(rows) > limit
+        return ResultPage[PageSummary](
+            items=items, next_cursor=encode_cursor(items[-1].id, "asc") if more else None
         )
+
+    async def get_for_job(self, tenant_id: str, job_id: str, page_id: str) -> Page:
+        """One page of a job, in full (404 `page_not_found` for another job's or tenant's)."""
+        return await self.get_or_raise(page_id, scope={"tenant_id": tenant_id, "job_id": job_id})
 
     async def iter_deferred_links(
         self, job_id: str, *, batch_size: int = 200

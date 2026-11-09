@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pymongo import IndexModel
 
 from rag_engine.domain.base import MongoDocument
@@ -44,6 +44,8 @@ class Page(MongoDocument):
     indexes = (
         IndexModel([("job_id", 1), ("url_hash", 1)], unique=True, name="job_url_unique"),
         IndexModel([("job_id", 1), ("status", 1), ("_id", 1)], name="job_status"),
+        # the per-page report filtered by reason, in discovery order (Step 86)
+        IndexModel([("job_id", 1), ("reason", 1), ("_id", 1)], name="job_reason"),
         # frontier claim: next queued page of a job by priority, then discovery order (Step 48)
         IndexModel([("job_id", 1), ("status", 1), ("priority", 1), ("_id", 1)],
                    name="job_frontier"),
@@ -104,3 +106,36 @@ class Page(MongoDocument):
         ):
             raise ValueError("a succeeded page needs content_kind and markdown")
         return self
+
+
+class PageSummary(BaseModel):
+    """A page as the per-page report lists it (Step 86): its outcome and fetch facts, the
+    size of its Markdown instead of the Markdown itself."""
+
+    id: str = Field(alias="_id")
+    url: str
+    final_url: str | None = None
+    depth: int = 0
+    discovered_via: DiscoveredVia = DiscoveredVia.LINK
+    discovered_from: str | None = None
+    status: PageStatus
+    reason: PageReason | None = None
+    reason_detail: str | None = None
+    http_status: int | None = None
+    content_type: str | None = None
+    content_kind: ContentKind | None = None
+    rendered_with: RenderedWith | None = None
+    title: str | None = None
+    lang: str | None = None
+    canonical_url: str | None = None
+    duplicate_of: str | None = None
+    markdown_chars: int = 0
+    markdown_truncated: bool = False
+    bytes_downloaded: int = 0
+    fetch_ms: int | None = None
+    attempts: int = 0
+    fetched_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")

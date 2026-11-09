@@ -2670,3 +2670,32 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 87** (`DELETE /jobs/{id}`): return `CrawlJobDetailResponse` after `request_cancel`.
   - A tenant's jobs stay listed after their KB or source is deleted until the cascade removes them (Step 81).
 - Next: Step 86: Per-page report
+
+### Step 86: Per-page report  (2026-11-09)
+- Status: ✅ done
+- Built:
+  - **`GET /api/v1/jobs/{job_id}/pages`** → `Page[PageResponse]`:
+    - Every URL the job saw, **in discovery order** (oldest first), with its outcome: `succeeded`, or `skipped` / `failed` / `duplicate` with the stable `reason` code and `reason_detail`, plus HTTP status, depth, how it was discovered, final and canonical URL, content kind and type, how it was rendered, title, language, bytes, fetch time, attempts and `markdown_chars`.
+    - **`status` and `reason` filters, each repeatable**, combinable; cursor pagination.
+    - The job is checked with `jobs.get_for_tenant` first, so another tenant's job is 404 `job_not_found`.
+  - **`GET /api/v1/jobs/{job_id}/pages/{page_id}`** → `PageDetailResponse`: the page in full. Its **extracted Markdown**, description, document metadata, extractor, JS signals and render note, content hash, and **`chunks`** (how many chunks it produced). Scoped to its job: through another job it is 404 `page_not_found`.
+  - **The list never transfers Markdown.** Up to `PAGE_MAX_MARKDOWN_BYTES` per page × 200 per page of results would be far too much.
+    - `PageRepository.list_for_job` now runs a server-side **projection** (`_SUMMARY_PROJECTION`, built from the read model's fields) with **`markdown_chars = $strLenCP(markdown)`**, into a light read model **`PageSummary`** (domain).
+    - That required its own keyset query (same cursor format as `paginate`). `Page` itself can't be loaded without Markdown: a succeeded page must have it.
+    - `get_for_job` returns the full `Page`.
+  - Response models expose **`id`**, not Mongo's `_id` alias. A test guards the OpenAPI schema, after FastAPI's alias serialization first leaked `_id`.
+  - New index **`job_reason`** `(job_id, reason, _id)`; `job_status` already serves the status filter in order.
+- Tests:
+  - `TestJobPages_S86` (12, integration, real app + Mongo; jobs created through `POST …/crawls`, pages inserted directly):
+    - Every page in discovery order without Markdown, `deferred_links` or internals; skipped and failed pages carry their reason and detail.
+    - **Status and reason filters**: single, multiple, combined, and an empty combination.
+    - Cursor pagination over 7 pages, and with a filter.
+    - **A 1,000,000-character page lists as `markdown_chars` with a response under 10 KB** (projected in MongoDB).
+    - Only this job's pages; another tenant's or an unknown job → 404; 4 invalid parameters → 422; a tenant key is required; the index exists.
+  - `TestJobPage_S86` (4): a page in full (Markdown, metadata, 3 chunks); a failed page has no content; scoped to its job and tenant (`page_not_found` / `job_not_found`, malformed → 422); the OpenAPI schemas expose `id`.
+  - `test_pages.py` (the repository) still passes unchanged; both files passed 3/3 consecutive runs.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ **2088 passed, 4 skipped, exit 0**, in 794 s.
+- Decisions/notes:
+  - Pages stay after a version's cleanup (Step 78) as that job's report. They go with the source's cascade (Step 81); TTL retention is Step 97.
+  - **Step 87**: `DELETE /jobs/{id}` next to these routes in `api/routers/jobs.py`.
+- Next: Step 87: Cancel

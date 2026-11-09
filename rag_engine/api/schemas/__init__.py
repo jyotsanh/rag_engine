@@ -12,6 +12,7 @@ from .admin import (
 )
 from .crawls import CrawlCreate, CrawlJobDetailResponse, CrawlJobResponse, WebhookView
 from .knowledge_bases import KnowledgeBaseCreate, KnowledgeBasePatch, KnowledgeBaseResponse
+from .pages import PageDetailResponse, PageResponse
 from .sources import SourceResponse
 
 __all__ = [
@@ -25,6 +26,8 @@ __all__ = [
     "KnowledgeBaseCreate",
     "KnowledgeBasePatch",
     "KnowledgeBaseResponse",
+    "PageDetailResponse",
+    "PageResponse",
     "SourceResponse",
     "TenantCreate",
     "TenantPatch",

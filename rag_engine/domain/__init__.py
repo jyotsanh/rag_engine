@@ -39,7 +39,7 @@ from .job import (
     WebhookState,
 )
 from .knowledge_base import KnowledgeBase
-from .page import MAX_DEFERRED_LINKS, DeferredLink, Page
+from .page import MAX_DEFERRED_LINKS, DeferredLink, Page, PageSummary
 from .report import REPORT_SAMPLES_PER_REASON, CrawlReport, PageSample, ReasonCount
 from .source import Source, SourceStats
 from .tenant import (
@@ -86,6 +86,7 @@ __all__ = [
     "PageReason",
     "PageSample",
     "PageStatus",
+    "PageSummary",
     "ReasonCount",
     "RenderedWith",
     "ResourceStatus",
