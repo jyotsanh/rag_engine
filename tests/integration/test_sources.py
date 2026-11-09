@@ -11,8 +11,9 @@ from asgi_lifespan import LifespanManager
 from rag_engine.api import create_app
 from rag_engine.config import Settings
 from rag_engine.domain import ResourceStatus
-from rag_engine.infrastructure import MongoConnection
+from rag_engine.infrastructure import AppInfrastructure, MongoConnection
 from rag_engine.repositories import SourceNotFoundError, SourceRepository
+from tests.conftest import APP_STARTUP_TIMEOUT
 
 API = "/api/v1"
 SEED = "https://acme.example/"
@@ -55,13 +56,13 @@ async def _bootstrap(client: httpx.AsyncClient, admin: dict[str, str], name: str
 
 @pytest.fixture
 async def world(integration_settings: Settings) -> AsyncIterator[_World]:
-    app = create_app()
+    app = create_app(infrastructure_factory=AppInfrastructure)  # no vectors needed
     admin = {"Authorization": f"Bearer {integration_settings.ADMIN_API_KEY.get_secret_value()}"}
     mongo = MongoConnection(integration_settings)
     await mongo.connect()
     transport = httpx.ASGITransport(app=app)
     async with (
-        LifespanManager(app),
+        LifespanManager(app, startup_timeout=APP_STARTUP_TIMEOUT),
         httpx.AsyncClient(transport=transport, base_url="http://t") as client,
     ):
         yield _World(

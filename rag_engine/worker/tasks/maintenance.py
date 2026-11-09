@@ -1,11 +1,24 @@
-"""`maintenance` queue tasks (cleanup, cascades and recovery arrive in Steps 78-81)."""
+"""`maintenance` queue tasks: health, version cleanup (Step 78); cascades and recovery 79-81."""
 
 import os
+from dataclasses import asdict
 from typing import Any
 
-from rag_engine.infrastructure import check_readiness
-from rag_engine.worker.celery_app import celery_app
+from celery import Task
+
+from rag_engine.infrastructure import (
+    DatabaseUnavailableError,
+    RedisUnavailableError,
+    VectorStoreUnavailableError,
+    check_readiness,
+)
+from rag_engine.services.cleanup import VersionCleaner
+from rag_engine.worker.celery_app import MAINTENANCE_QUEUE, celery_app
 from rag_engine.worker.context import run_async, worker_context
+
+CLEANUP_VERSION = "rag_engine.worker.tasks.maintenance.cleanup_version"
+_CLEANUP_MAX_RETRIES = 6
+_TRANSIENT = (DatabaseUnavailableError, RedisUnavailableError, VectorStoreUnavailableError)
 
 _HEALTH_BUDGET_SECONDS = 5.0
 
@@ -18,3 +31,35 @@ def health() -> dict[str, Any]:
         check_readiness(worker_context.runtime.health_checks(), _HEALTH_BUDGET_SECONDS)
     )
     return {"pid": os.getpid(), **report.model_dump(mode="json")}
+
+
+def enqueue_version_cleanup(
+    tenant_id: str, kb_id: str, source_id: str, version: str, countdown: float = 0
+) -> None:
+    """Send `cleanup_version` by name to the `maintenance` queue."""
+    celery_app.send_task(
+        CLEANUP_VERSION,
+        args=[tenant_id, kb_id, source_id, version],
+        queue=MAINTENANCE_QUEUE,
+        countdown=countdown or None,
+    )
+
+
+@celery_app.task(name=CLEANUP_VERSION, bind=True, max_retries=_CLEANUP_MAX_RETRIES)
+def cleanup_version(
+    self: Task, tenant_id: str, kb_id: str, source_id: str, version: str
+) -> dict[str, Any]:
+    """Delete a version's vectors and chunks (never the active one). Idempotent; transient
+    failures are retried with exponential backoff (30 s, 60 s, ... capped at 10 min)."""
+    store = worker_context.runtime.vector_store
+    assert store is not None
+    cleaner = VersionCleaner(worker_context.runtime.mongo.db, store)
+    try:
+        result = run_async(
+            cleaner.delete_version(
+                tenant_id=tenant_id, kb_id=kb_id, source_id=source_id, version=version
+            )
+        )
+    except _TRANSIENT as exc:
+        raise self.retry(exc=exc, countdown=min(600, 30 * 2**self.request.retries)) from exc
+    return asdict(result)

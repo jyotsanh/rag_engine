@@ -11,18 +11,19 @@ from asgi_lifespan import LifespanManager
 from rag_engine.api import create_app
 from rag_engine.config import Settings
 from rag_engine.domain import utc_now
-from tests.conftest import OverrideSettings
+from rag_engine.infrastructure import AppInfrastructure
+from tests.conftest import APP_STARTUP_TIMEOUT, OverrideSettings
 
 API = "/api/v1/admin"
 
 
 @pytest.fixture
 async def admin(integration_settings: Settings) -> AsyncIterator[httpx.AsyncClient]:
-    app = create_app()
+    app = create_app(infrastructure_factory=AppInfrastructure)  # no vectors needed
     headers = {"Authorization": f"Bearer {integration_settings.ADMIN_API_KEY.get_secret_value()}"}
     transport = httpx.ASGITransport(app=app)
     async with (
-        LifespanManager(app),
+        LifespanManager(app, startup_timeout=APP_STARTUP_TIMEOUT),
         httpx.AsyncClient(transport=transport, base_url="http://t", headers=headers) as client,
     ):
         yield client

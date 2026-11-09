@@ -1,5 +1,7 @@
 """Async MongoDB client lifecycle (PyMongo's native asyncio API)."""
 
+import asyncio
+
 from bson.codec_options import CodecOptions
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.database import AsyncDatabase
@@ -63,10 +65,11 @@ class MongoConnection:
         self, documents: list[type[MongoDocument]] | None = None
     ) -> dict[str, list[str]]:
         """Create every registered document's indexes (idempotent); returns names per collection."""
-        created: dict[str, list[str]] = {}
-        for model in documents if documents is not None else registered_documents():
-            if not model.indexes:
-                continue
+        models = [
+            m for m in (documents if documents is not None else registered_documents()) if m.indexes
+        ]
+
+        async def ensure(model: type[MongoDocument]) -> tuple[str, list[str]]:
             try:
                 names = await self.db[model.collection_name].create_indexes(list(model.indexes))
             except PyMongoError as exc:
@@ -74,8 +77,11 @@ class MongoConnection:
                     "Failed to create indexes",
                     details={"collection": model.collection_name, "reason": str(exc)},
                 ) from exc
-            created[model.collection_name] = names
             logger.debug("ensured indexes on {}: {}", model.collection_name, names)
+            return model.collection_name, names
+
+        # collections are independent: create their indexes concurrently (faster startup)
+        created: dict[str, list[str]] = dict(await asyncio.gather(*map(ensure, models)))
         return created
 
     async def close(self) -> None:

@@ -10,6 +10,8 @@ from asgi_lifespan import LifespanManager
 
 from rag_engine.api import create_app
 from rag_engine.config import Settings
+from rag_engine.infrastructure import AppInfrastructure
+from tests.conftest import APP_STARTUP_TIMEOUT
 
 API = "/api/v1"
 KBS = f"{API}/knowledge-bases"
@@ -50,11 +52,11 @@ async def _bootstrap_tenant(
 
 @pytest.fixture
 async def world(integration_settings: Settings) -> AsyncIterator[_World]:
-    app = create_app()
+    app = create_app(infrastructure_factory=AppInfrastructure)  # no vectors needed
     admin = {"Authorization": f"Bearer {integration_settings.ADMIN_API_KEY.get_secret_value()}"}
     transport = httpx.ASGITransport(app=app)
     async with (
-        LifespanManager(app),
+        LifespanManager(app, startup_timeout=APP_STARTUP_TIMEOUT),
         httpx.AsyncClient(transport=transport, base_url="http://t") as client,
     ):
         acme = await _bootstrap_tenant(client, admin, "Acme", quotas={"max_knowledge_bases": 3})

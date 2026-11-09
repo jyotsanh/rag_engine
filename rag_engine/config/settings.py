@@ -109,6 +109,9 @@ class Settings(BaseSettings):
     # requeued with backoff (delay x attempts) up to this many attempts in total, then failed
     CRAWL_JOB_MAX_ATTEMPTS: int = Field(default=3, ge=1)
     CRAWL_JOB_RETRY_DELAY_SECONDS: float = Field(default=60.0, ge=0)
+    # after a version swap, the previous version is deleted this much later, so searches
+    # that started just before the flip finish against intact data
+    CRAWL_VERSION_CLEANUP_DELAY_SECONDS: float = Field(default=60.0, ge=0)
 
     # ---- vector store ---- #
     ACTIVE_VECTOR_STORE: VectorStoreType = VectorStoreType.QDRANT

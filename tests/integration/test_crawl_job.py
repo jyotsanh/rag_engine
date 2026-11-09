@@ -24,7 +24,7 @@ from rag_engine.embeddings import (
 )
 from rag_engine.repositories import JobRepository, KnowledgeBaseRepository, SourceRepository
 from rag_engine.runtime import AppRuntime
-from rag_engine.services import search_scope
+from rag_engine.services import CleanupResult, VersionCleaner, search_scope
 from rag_engine.vectorstores import CollectionSpec, VectorFilter
 from rag_engine.worker.context import worker_context
 from rag_engine.worker.crawl_job import CrawlJobDeps, CrawlJobRunner, JobOutcome
@@ -73,6 +73,7 @@ class _World:
     site: FixtureSite
     config: Settings
     enqueued: list[tuple[str, float]] = field(default_factory=list)
+    cleanups: list[tuple[str, str, str, str, float]] = field(default_factory=list)
 
     @property
     def jobs(self) -> JobRepository:
@@ -87,10 +88,24 @@ class _World:
 
     def runner(self, **overrides: object) -> CrawlJobRunner:
         deps = CrawlJobDeps.from_runtime(
-            self.runtime, enqueue=lambda job_id, delay: self.enqueued.append((job_id, delay)),
+            self.runtime,
+            enqueue=lambda job_id, delay: self.enqueued.append((job_id, delay)),
+            enqueue_cleanup=lambda *request: self.cleanups.append(request),
             **overrides,
-        )  # fmt: skip
+        )
         return CrawlJobRunner(deps)
+
+    async def run_cleanups(self) -> list[CleanupResult]:
+        """What the `cleanup_version` task would do for every enqueued request."""
+        store = self.runtime.vector_store
+        assert store is not None
+        cleaner = VersionCleaner(self.runtime.mongo.db, store)
+        results = [
+            await cleaner.delete_version(tenant_id=t, kb_id=k, source_id=s, version=v)
+            for t, k, s, v, _ in self.cleanups
+        ]
+        self.cleanups.clear()
+        return results
 
 
 async def _seed_job(
@@ -325,5 +340,137 @@ class TestRunCrawlJobTask_S77:
             assert done is not None and done.status is JobStatus.SUCCEEDED
             assert isinstance(source, Source) and source.active_version == job.id
             assert fake_openai.requests
+        finally:
+            worker_context.shutdown()
+
+
+async def _chunks(world: _World, job: CrawlJob) -> int:
+    return await world.runtime.mongo.db["chunks"].count_documents({"version": job.id})
+
+
+class _FlakyCleanupStore:
+    """Delegates to the real store, but its cleanup calls fail as if Qdrant were down."""
+
+    def __init__(self, real: object) -> None:
+        self._real = real
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+    async def count(self, *args: object, **kwargs: object) -> int:
+        from rag_engine.vectorstores import VectorStoreUnavailableError
+
+        raise VectorStoreUnavailableError()
+
+
+class TestFinalization_S78:
+    """S78 — Finalization: success flips + cleans the old version; failure/cancel discards."""
+
+    async def test_a_recrawl_cleans_up_the_previous_version(self, world: _World) -> None:
+        first = await world.job()
+        await world.runner().run(first.id)
+        assert world.cleanups == []  # a first crawl has nothing to clean up
+        kb = await KnowledgeBaseRepository(world.runtime.mongo.db).get_or_raise(first.kb_id)
+        second = await world.job(kb=kb)
+
+        await world.runner().run(second.id)
+
+        assert world.cleanups == [(_TENANT, first.kb_id, first.source_id, first.id, 60.0)]
+        (result,) = await world.run_cleanups()
+        assert result.version == first.id and result.points > 0 and result.chunks > 0
+        assert (await _points(world, first), await _chunks(world, first)) == (0, 0)
+        assert await _points(world, second) > 0  # the live version is untouched
+        pages = await world.runtime.mongo.db["pages"].count_documents({"job_id": first.id})
+        assert pages > 0  # the old job's per-page report stays
+        scope = await search_scope(world.sources, _TENANT, first.kb_id)
+        assert scope is not None and scope.versions == (second.id,)
+
+    async def test_a_failed_recrawl_keeps_the_old_version_and_discards_its_own(
+        self, world: _World, fake_openai: FakeOpenAI, override_settings: OverrideSettings
+    ) -> None:
+        # without the embedding cache: unchanged chunks would never reach the failing API
+        override_settings(EMBEDDING_CACHE_ENABLED=False)
+        first = await world.job()
+        await world.runner().run(first.id)
+        kb = await KnowledgeBaseRepository(world.runtime.mongo.db).get_or_raise(first.kb_id)
+        second = await world.job(kb=kb)
+        fake_openai.fail_with(401)
+
+        outcome = await world.runner().run(second.id)
+
+        source = await world.sources.get_or_raise(first.source_id)
+        assert outcome is JobOutcome.FAILED
+        assert source.active_version == first.id  # search keeps serving the old version
+        assert (await _points(world, second), await _chunks(world, second)) == (0, 0)
+        assert await _points(world, first) > 0
+        assert world.cleanups == []  # deleted inline, nothing left to queue
+
+    async def test_a_cancelled_job_discards_its_own_version(self, world: _World) -> None:
+        job = await world.job()
+
+        async def cancel() -> None:
+            await world.jobs.request_cancel(_TENANT, job.id)
+
+        runner = world.runner(embedder_factory=lambda space: _SlowEmbedder(space, on_first=cancel))
+
+        assert await runner.run(job.id) is JobOutcome.CANCELLED
+
+        assert (await _points(world, job), await _chunks(world, job)) == (0, 0)
+
+    async def test_a_discard_during_an_outage_falls_back_to_the_cleanup_task(
+        self, world: _World, fake_openai: FakeOpenAI
+    ) -> None:
+        fake_openai.fail_with(401)
+        job = await world.job()
+        store = _FlakyCleanupStore(world.runtime.vector_store)
+
+        outcome = await world.runner(store=store).run(job.id)
+
+        assert outcome is JobOutcome.FAILED
+        assert world.cleanups == [(_TENANT, job.kb_id, job.source_id, job.id, 5.0)]
+        (result,) = await world.run_cleanups()  # the task, once Qdrant is back
+        assert result.skipped is None and await _chunks(world, job) == 0
+
+    async def test_the_active_version_is_never_deleted(self, world: _World) -> None:
+        job = await world.job()
+        await world.runner().run(job.id)
+        store = world.runtime.vector_store
+        assert store is not None
+
+        result = await VersionCleaner(world.runtime.mongo.db, store).delete_version(
+            tenant_id=_TENANT, kb_id=job.kb_id, source_id=job.source_id, version=job.id
+        )
+
+        assert result.skipped == "active_version" and (result.points, result.chunks) == (0, 0)
+        assert await _points(world, job) > 0
+
+    async def test_cleanup_is_idempotent_and_tolerates_missing_data(self, world: _World) -> None:
+        store = world.runtime.vector_store
+        assert store is not None
+        cleaner = VersionCleaner(world.runtime.mongo.db, store)
+
+        unknown_kb = await cleaner.delete_version(
+            tenant_id=_TENANT, kb_id="kb_" + "9" * 32, source_id="src_" + "9" * 32,
+            version="job_" + "9" * 32,
+        )  # fmt: skip
+
+        assert (unknown_kb.points, unknown_kb.chunks, unknown_kb.skipped) == (0, 0, None)
+
+
+class TestCleanupTask_S78:
+    """S78 — the `cleanup_version` Celery task, in-process."""
+
+    def test_the_task_deletes_a_version(self, config: Settings, fixture_site: FixtureSite) -> None:
+        from rag_engine.worker.tasks.maintenance import cleanup_version
+
+        try:
+            job = worker_context.run(_seed_job(worker_context.runtime, fixture_site))
+
+            result = cleanup_version.apply(
+                args=[_TENANT, job.kb_id, job.source_id, "job_" + "8" * 32]
+            ).get(timeout=60)
+
+            assert result == {"version": "job_" + "8" * 32, "points": 0, "chunks": 0,
+                              "skipped": None}  # fmt: skip
         finally:
             worker_context.shutdown()

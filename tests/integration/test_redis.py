@@ -13,7 +13,7 @@ from rag_engine.infrastructure import (
     RedisNamespace,
     RedisUnavailableError,
 )
-from tests.conftest import OverrideSettings
+from tests.conftest import APP_STARTUP_TIMEOUT, OverrideSettings
 
 
 @pytest.fixture
@@ -103,9 +103,9 @@ class TestRedisInfrastructure_S11:
         assert await redis.client.exists("other_prefix:robots:h1") == 1
 
     async def test_app_lifespan_connects_redis(self, integration_settings: Settings) -> None:
-        app = create_app()
+        app = create_app(infrastructure_factory=AppInfrastructure)  # no vectors needed
 
-        async with LifespanManager(app):
+        async with LifespanManager(app, startup_timeout=APP_STARTUP_TIMEOUT):
             infra = app.state.infrastructure
             assert isinstance(infra, AppInfrastructure)
             await infra.redis.ping()

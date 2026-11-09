@@ -2322,3 +2322,37 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 78** (finalization) extends this runner: delete the job's own vectors (and chunks) when it fails or is cancelled; after a successful flip, enqueue cleanup of `previous` (the version `activate_version` returns). The flip itself is done here.
   - **Step 79** must guarantee one active job per source; today's CAS already refuses a stale flip.
 - Next: Step 78: Finalization
+
+### Step 78: Finalization  (2026-11-09)
+- Status: ✅ done
+- Built:
+  - **`rag_engine/services/cleanup.py` → `VersionCleaner(db, store).delete_version(tenant_id, kb_id, source_id, version) -> CleanupResult(version, points, chunks, skipped)`** (exported).
+    - Deletes one version's **vectors** (from its KB's collection, filtered tenant + source + version, counted first) and its **chunks** (Mongo). **Pages stay**: they're that job's per-page report (Step 86).
+    - **Never deletes a source's active version**: the source is re-read at deletion time (`skipped="active_version"`), so a racing flip can't destroy live data.
+    - Idempotent and tolerant: a deleted KB (its cascade handles the vectors) or a missing collection → 0 points.
+  - **`cleanup_version`** maintenance task (`rag_engine.worker.tasks.maintenance.cleanup_version`, `maintenance` queue) plus **`enqueue_version_cleanup(...)`** (sends by name). Transient failures (Mongo/Redis/vector store) are retried with exponential backoff (30 s → 10 min cap, 6 retries); it returns the `CleanupResult` as a dict.
+  - **The runner** (`worker/crawl_job.py`), with `CrawlJobDeps` gaining **`enqueue_cleanup`**:
+    - **Success**: `activate_version` returns the **previous** version, and its cleanup is enqueued with **`CRAWL_VERSION_CLEANUP_DELAY_SECONDS`** (60) so searches that started just before the flip finish. A broker error there is logged, never failing a job that already went live.
+    - **Fail / cancel**: the job never flipped, so the old version keeps serving. **Its own version is deleted inline** (`_discard_own_version`); on a transient outage it falls back to the cleanup task (after `CRAWL_JOB_RETRY_DELAY_SECONDS`), and it never raises. **Requeued** jobs keep their data (the next run reuses it).
+    - **Race fixed** (found by a Step 77 test that started returning `superseded`): after the job's terminal transition, the extra discard work let the still-running heartbeat see "not held", treat it as a takeover, and cancel the cleanup mid-way. Runs now enter a **`finishing` phase** before cancel/fail/requeue transitions, and the heartbeat stops there.
+- Settings: `CRAWL_VERSION_CLEANUP_DELAY_SECONDS` (60). `.env.example` updated.
+- **Startup/test speed** (found because 6 older API tests started erroring at setup):
+  - The Step 74 vector bootstrap made every API test's app startup ~5 s (3.6 s creating the default collection and 6 payload indexes in a freshly emptied Qdrant, plus 1.4 s of Mongo indexes). That hit `asgi_lifespan`'s **5 s startup timeout**.
+  - Production: Mongo indexes per collection and Qdrant payload indexes are now created **concurrently**. That's harmless; Qdrant largely serialises them, so the gain is small.
+  - Tests: the API tests that never touch vectors (admin, auth, KBs, sources, rate limits, Redis, Mongo) now start the app with **`AppInfrastructure`** (as before Step 74). Readiness, bootstrap and crawl-job tests keep `AppRuntime`. Every integration `LifespanManager` gets `startup_timeout=APP_STARTUP_TIMEOUT` (30 s, `tests/conftest.py`). API test setup went from ~6 s to ~2 s.
+- Tests:
+  - `TestFinalization_S78` (6, integration):
+    - **A re-crawl**: the first crawl enqueues no cleanup; the second enqueues exactly `(tenant, kb, source, first, 60.0)`. Running it deletes the first version's points and chunks; the live version is intact, the old job's pages remain, and search serves the new version.
+    - **A failed re-crawl** (embedding cache off, since cached chunks would never reach the failing API) keeps the old version active with its points, and the failed version's points/chunks are 0.
+    - **A cancelled job** discards its own version.
+    - **A discard during an outage** (the store's count raising unavailable) falls back to the queued cleanup `(…, own version, 5.0)`, which later succeeds.
+    - The active version is never deleted; cleanup with an unknown KB/source/version is a no-op.
+  - `TestCleanupTask_S78` (1): the Celery task in-process returns the result dict.
+  - `test_crawl_job.py` (18 tests, S77 + S78) passed 3/3 consecutive runs.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ **1855 passed, 4 skipped, exit 0**, in 1185 s.
+  - ⚠️ The suite was ~2.8× slower than at Step 77 (428 s). The reference file `test_crawl_engine.py` still runs in its usual ~37 s. The host was heavily loaded: 15-min load average ~11 on 8 cores, ~3 GB free RAM.
+  - **3 orphaned testcontainers** (mongo:8.0, redis:8.2, qdrant v1.19.2) were still running from an earlier run that the outer `timeout` killed, so its teardown never ran. Removing them was outside what I was permitted to do; **the user can remove them**. Lesson: don't wrap the full suite in a shell `timeout` shorter than its runtime.
+- Decisions/notes:
+  - Orphan sweep: a version whose cleanup message was lost (a broker outage right after the flip) leaks. `ChunkRepository.versions(source)` vs `active_version` finds them; **Step 80's periodic maintenance** should sweep non-active versions of sources with no running job.
+  - **Step 79**: one active job per source (a partial unique index) and per-tenant concurrency. **Step 81**: the cascades reuse `VersionCleaner`-style deletes per source/KB.
+- Next: Step 79: Concurrency guards

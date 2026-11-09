@@ -18,7 +18,7 @@ from rag_engine.repositories import (
     DuplicateDocumentError,
     InvalidCursorError,
 )
-from tests.conftest import OverrideSettings
+from tests.conftest import APP_STARTUP_TIMEOUT, OverrideSettings
 
 
 class _Widget(MongoDocument):
@@ -218,9 +218,9 @@ class TestMongoInfrastructure_S10:
     async def test_app_lifespan_connects_and_creates_indexes(
         self, integration_settings: Settings
     ) -> None:
-        app = create_app()
+        app = create_app(infrastructure_factory=AppInfrastructure)  # no vectors needed
 
-        async with LifespanManager(app):
+        async with LifespanManager(app, startup_timeout=APP_STARTUP_TIMEOUT):
             infra = app.state.infrastructure
             assert isinstance(infra, AppInfrastructure)
             info = await infra.mongo.db["s10_widgets"].index_information()

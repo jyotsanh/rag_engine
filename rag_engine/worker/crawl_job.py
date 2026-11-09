@@ -14,10 +14,16 @@ claim it.
    flag, and the process's browser pool when JS rendering is on.
 3. **Ingest** (Step 76): chunks + dense (cached OpenAI) + sparse BM25 vectors under the
    job's version.
-4. **Finalize** (Step 73): `running → finalizing`, the **atomic compare-and-swap flip** of
-   the source's `active_version` (with the new stats), content claims released,
-   `→ succeeded`. Cleanup of the previous version and of a failed job's own vectors is
-   Step 78.
+4. **Finalize** (Steps 73, 78): `running → finalizing`, the **atomic compare-and-swap
+   flip** of the source's `active_version` (with the new stats), the **previous version's
+   cleanup enqueued** (`cleanup_version`, after `CRAWL_VERSION_CLEANUP_DELAY_SECONDS`, so
+   searches that started just before the flip finish), content claims released,
+   `→ succeeded`.
+
+A failed or cancelled job never flipped, so the old version keeps serving; its **own
+version's vectors and chunks are deleted** right away (`VersionCleaner`), falling back to
+the cleanup task if the vector store is unavailable. A requeued job keeps its data (the
+next run resumes and reuses it).
 
 **Heartbeat**: every `CRAWL_HEARTBEAT_SECONDS` beside the work. It proves the run is
 alive (Step 80 recovers stale jobs) and carries cancel requests: during the crawl it stops
@@ -105,6 +111,7 @@ from rag_engine.repositories import (
 )
 from rag_engine.runtime import AppRuntime
 from rag_engine.security import SafeHttpClient
+from rag_engine.services.cleanup import VersionCleaner
 from rag_engine.services.usage import UsageMeter
 from rag_engine.vectorstores import BaseVectorStore, VectorCollections
 
@@ -129,6 +136,8 @@ class _JobRejectedError(Exception):
 
 
 type Enqueue = Callable[[str, float], None]  # (job_id, countdown seconds)
+# (tenant_id, kb_id, source_id, version, countdown seconds): the `cleanup_version` task
+type EnqueueCleanup = Callable[[str, str, str, str, float], None]
 
 
 @dataclass
@@ -139,6 +148,7 @@ class CrawlJobDeps:
     store: BaseVectorStore
     collections: VectorCollections
     enqueue: Enqueue
+    enqueue_cleanup: EnqueueCleanup
     config: Settings = field(default_factory=lambda: settings)
     embedder_factory: Callable[[EmbeddingSpace], Embedder] | None = None
     sparse: SparseEmbedder | None = None
@@ -147,26 +157,32 @@ class CrawlJobDeps:
 
     @classmethod
     def from_runtime(
-        cls, runtime: AppRuntime, *, enqueue: Enqueue, **overrides: Any
+        cls,
+        runtime: AppRuntime,
+        *,
+        enqueue: Enqueue,
+        enqueue_cleanup: EnqueueCleanup,
+        **overrides: Any,
     ) -> CrawlJobDeps:
         assert runtime.vector_store is not None and runtime.collections is not None
-        return cls(
-            db=runtime.mongo.db,
-            redis=runtime.redis.client,
-            keys=runtime.redis.keys,
-            store=runtime.vector_store,
-            collections=runtime.collections,
-            enqueue=enqueue,
-            config=runtime.config,
-            **overrides,
-        )
+        values: dict[str, Any] = {
+            "db": runtime.mongo.db,
+            "redis": runtime.redis.client,
+            "keys": runtime.redis.keys,
+            "store": runtime.vector_store,
+            "collections": runtime.collections,
+            "config": runtime.config,
+        }
+        return cls(enqueue=enqueue, enqueue_cleanup=enqueue_cleanup, **{**values, **overrides})
 
 
 @dataclass
 class _Run:
     job: CrawlJob
     run_id: str
-    phase: str = "start"  # start → crawl → ingest → finalize
+    # start → crawl → ingest → finalize, or → finishing once the run is ending the job
+    # (cancel/fail/requeue): the heartbeat stops, since the job is about to leave our hands
+    phase: str = "start"
     previous_version: str | None = None
     engine: CrawlEngine | None = None
     summary: CrawlSummary | None = None
@@ -188,6 +204,7 @@ class CrawlJobRunner:
         self.sources = SourceRepository(db)
         self.usage = UsageRepository(db)
         self.flags = RedisCancelFlags(deps.redis, deps.keys, self.config)
+        self.cleaner = VersionCleaner(db, deps.store)
 
     # ---- entry point ---- #
 
@@ -329,22 +346,48 @@ class CrawlJobRunner:
             chunks=report.chunks,
             last_succeeded_at=utc_now(),
         )
-        await self.sources.activate_version(
+        previous = await self.sources.activate_version(
             job.source_id,
             job.version,
             stats=stats,
             check_previous=True,
             expected_previous=run.previous_version,
         )
+        if previous is not None and previous != job.version:
+            self._enqueue_cleanup(job, previous, self.config.CRAWL_VERSION_CLEANUP_DELAY_SECONDS)
         await self.claims.release_job(job.id)
         await self.jobs.succeed(job.id, run.run_id)
         return JobOutcome.SUCCEEDED
+
+    def _enqueue_cleanup(self, job: CrawlJob, version: str, countdown: float) -> None:
+        try:
+            self.deps.enqueue_cleanup(job.tenant_id, job.kb_id, job.source_id, version, countdown)
+        except Exception:  # never fail a job that already went live over its cleanup
+            logger.opt(exception=True).error("could not enqueue cleanup of version {}", version)
+
+    async def _discard_own_version(self, run: _Run) -> None:
+        """A failed/cancelled job's own vectors and chunks: never served, delete them now."""
+        job = run.job
+        try:
+            await self.cleaner.delete_version(
+                tenant_id=job.tenant_id,
+                kb_id=job.kb_id,
+                source_id=job.source_id,
+                version=job.version,
+            )
+        except _TRANSIENT as exc:
+            logger.warning("could not delete version {} now ({}); queued", job.version, exc.code)
+            self._enqueue_cleanup(job, job.version, self.config.CRAWL_JOB_RETRY_DELAY_SECONDS)
+        except Exception:
+            logger.opt(exception=True).error("could not delete version {}", job.version)
 
     # ---- heartbeat and cancellation ---- #
 
     async def _heartbeat(self, run: _Run, work: asyncio.Task[JobOutcome]) -> None:
         while True:
             await asyncio.sleep(self.config.CRAWL_HEARTBEAT_SECONDS)
+            if run.phase == "finishing":
+                return  # the job is (being) released: "not held" is expected, not a takeover
             try:
                 job = await self.jobs.heartbeat(run.job.id, run.run_id)
             except JobRunSupersededError:
@@ -367,13 +410,16 @@ class CrawlJobRunner:
             # finalizing (the version swap) is not cancellable
 
     async def _cancel(self, run: _Run) -> JobOutcome:
+        run.phase = "finishing"
         await finish_cancelled(self.jobs, self.flags, run.job.id, run.run_id)
         await self.claims.release_job(run.job.id)
+        await self._discard_own_version(run)
         return JobOutcome.CANCELLED
 
     # ---- failures ---- #
 
     async def _failed(self, run: _Run, exc: Exception) -> JobOutcome:
+        run.phase = "finishing"
         code, message, transient = _classify(exc)
         job = run.job
         if transient and job.attempts < self.config.CRAWL_JOB_MAX_ATTEMPTS:
@@ -394,6 +440,7 @@ class CrawlJobRunner:
         await self.jobs.fail(job.id, JobError(code=code, message=message[:2000]), run_id=run.run_id)
         await self.pages.close_out_job(job.id, f"job failed: {code}")
         await self.claims.release_job(job.id)
+        await self._discard_own_version(run)
         return JobOutcome.FAILED
 
 

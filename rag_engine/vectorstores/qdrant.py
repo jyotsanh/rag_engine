@@ -201,14 +201,20 @@ class QdrantVectorStore(BaseVectorStore):
         self, spec: CollectionSpec, info: models.CollectionInfo
     ) -> None:
         existing = info.payload_schema or {}
-        for field, schema in PAYLOAD_INDEXES.items():
-            if field not in existing:
-                await self._call(
+        missing = [(f, schema) for f, schema in PAYLOAD_INDEXES.items() if f not in existing]
+        # independent indexes, each acknowledged (wait=True): create them concurrently
+        # (sequentially they dominated startup: ~0.4 s each)
+        await asyncio.gather(
+            *(
+                self._call(
                     self.client.create_payload_index(
                         spec.name, field_name=field, field_schema=schema, wait=True
                     ),
                     spec,
                 )
+                for field, schema in missing
+            )
+        )
 
     # ---- points: Steps 69-72 ---- #
 

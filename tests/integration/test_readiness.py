@@ -14,7 +14,7 @@ from rag_engine.infrastructure import (
     QdrantConnection,
     VectorStoreUnavailableError,
 )
-from tests.conftest import OverrideSettings
+from tests.conftest import APP_STARTUP_TIMEOUT, OverrideSettings
 
 # ---- #
 # Tests
@@ -66,7 +66,7 @@ class TestReadinessIntegration_S12:
         transport = httpx.ASGITransport(app=app)
 
         async with (
-            LifespanManager(app),
+            LifespanManager(app, startup_timeout=APP_STARTUP_TIMEOUT),
             httpx.AsyncClient(transport=transport, base_url="http://t") as client,
         ):
             response = await client.get(f"{integration_settings.API_V1_STR}/health/ready")
@@ -88,7 +88,7 @@ class TestReadinessIntegration_S12:
         transport = httpx.ASGITransport(app=app)
 
         async with (
-            LifespanManager(app),
+            LifespanManager(app, startup_timeout=APP_STARTUP_TIMEOUT),
             httpx.AsyncClient(transport=transport, base_url="http://t") as client,
         ):
             infra = app.state.infrastructure

@@ -42,6 +42,9 @@ _DIRECTORY_MARKERS = {
 }
 
 OverrideSettings = Callable[..., Settings]
+# app startup against real services also bootstraps the vector store (Step 74): give the
+# lifespan more than asgi-lifespan's 5 s default so a busy Docker host can't fail setup
+APP_STARTUP_TIMEOUT = 30
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
