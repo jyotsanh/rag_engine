@@ -39,6 +39,14 @@ versions (Step 73 passes each source's `active_version`; job ids are globally un
 best first; `score_threshold` drops weaker hits inside Qdrant. Reads are retried like the
 other idempotent calls.
 
+**Hybrid search** (Step 72): one Query API call with two filtered prefetches, the dense
+vector (`dense`) and the sparse BM25 vector (`bm25`, IDF applied by Qdrant), each
+returning `prefetch_limit` candidates, fused by **reciprocal rank fusion** (`RRF_K` = 60,
+the same constant as the reference implementation). Exact-term matches (model numbers,
+error codes) that dense search ranks low still surface. A query with an empty sparse
+vector (only stopwords) skips the sparse prefetch; the dense candidates are still ranked by
+RRF, so hybrid scores always mean the same thing.
+
 Errors from either transport (HTTP or gRPC, `QDRANT_PREFER_GRPC`) are translated:
 unreachable/5xx/timeouts → `VectorStoreUnavailableError`, unknown collection →
 `CollectionNotFoundError`, anything else → `VectorStoreError`.
@@ -65,6 +73,7 @@ from rag_engine.vectorstores.exceptions import (
 )
 from rag_engine.vectorstores.models import (
     DENSE_VECTOR,
+    RRF_K,
     SPARSE_VECTOR,
     ChunkPayload,
     CollectionSpec,
@@ -257,7 +266,35 @@ class QdrantVectorStore(BaseVectorStore):
         limit: int,
         prefetch_limit: int,
     ) -> list[SearchHit]:
-        raise NotImplementedError("Qdrant hybrid search is Step 72")
+        where = to_qdrant_filter(filter_)
+        prefetch = [
+            models.Prefetch(query=list(dense), using=DENSE_VECTOR, filter=where,
+                            limit=prefetch_limit)
+        ]  # fmt: skip
+        if len(sparse):
+            prefetch.append(
+                models.Prefetch(
+                    query=models.SparseVector(
+                        indices=list(sparse.indices), values=list(sparse.values)
+                    ),
+                    using=SPARSE_VECTOR,
+                    filter=where,
+                    limit=prefetch_limit,
+                )
+            )
+        response = await self._retrying(
+            lambda: self.client.query_points(
+                spec.name,
+                prefetch=prefetch,
+                query=models.RrfQuery(rrf=models.Rrf(k=RRF_K)),
+                query_filter=where,
+                limit=limit,
+                with_payload=True,
+                with_vectors=False,
+            ),
+            spec,
+        )
+        return _hits(response.points)
 
     # ---- retries and errors ---- #
 

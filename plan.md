@@ -2151,3 +2151,20 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Qdrant normalises cosine vectors on write and the reference computes exact cosine, so scores agree to float32 precision and rankings match exactly (random 16-d vectors have no near-ties).
   - **Step 89** (search API): `search_dense(spec, query_vector, VectorFilter(tenant, kb_ids=(kb,), versions=active_versions, url_prefix=...), limit, score_threshold)`.
 - Next: Step 72: Qdrant hybrid search
+
+### Step 72: Qdrant hybrid search  (2026-11-08)
+- Status: ✅ done
+- Built: `QdrantVectorStore._search_hybrid` (`rag_engine/vectorstores/qdrant.py`).
+  - **One Query API call**: two prefetches, each filtered with `to_qdrant_filter`: the dense vector on `dense`, and the BM25 `models.SparseVector` on `bm25` (Qdrant applies IDF). Each returns `prefetch_limit` candidates (default 4 × limit, bounded by the base class), fused by **`RrfQuery(rrf=Rrf(k=RRF_K))`**, with the filter also applied at the top level.
+  - **`RRF_K = 60`** (new, in `vectorstores/models.py`, exported) is shared with the reference store. **Qdrant's RRF uses 0-based ranks**: score = Σ 1/(60 + rank), so the top candidate of a list adds 1/60. This was found by comparing scores: Qdrant's top score was 0.031818 = 1/60 + 1/66, not 1/61 + 1/67. The reference now uses 0-based ranks too, and the constant's comment records the convention.
+  - **Empty sparse query** (stopwords only): the sparse prefetch is skipped; the dense candidates are still ranked by RRF, so hybrid scores always mean the same thing.
+- Reference store fix (`InMemoryVectorStore`, test support): **IDF statistics now cover the whole collection** (every point with a sparse vector), like Qdrant's IDF modifier, instead of only the filtered points. The Step 67 tests are unaffected.
+- Tests: `TestQdrantHybridSearch_S72` (5 × **HTTP and gRPC** = 10, integration). The corpus is 12 realistic texts per tenant (24 points), with **real BM25 sparse vectors from the Step 66 embedder** and seeded dense vectors:
+  - **An exact term wins the fusion even when dense search misses it.** The dense query is a decoy document's own vector (dense ranks the decoy first), yet the "error E-417" query puts the E-417 chunk first: sparse rank 0 plus its dense share beats the decoy's dense-only 1/60. This is deterministic by construction; an earlier version relied on a random dense query missing the target, and it didn't.
+  - **Matches the reference** for 5 queries × 2 filters (tenant, and tenant + URL prefix): same ids, same order, scores within 1e-4 relative.
+  - Identical content in another tenant never crosses (all 12 T2 points, no T1 duplicate); a stopword-only query gives exactly the dense ranking; limit and prefetch are respected.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1791 passed, 4 skipped (container) in 493 s. The suite time grew (Steps 68–72 run every Qdrant case on both transports, about 2 min); still well within limits.
+- Decisions/notes:
+  - RRF fuses ranks, not raw scores, so hybrid scores aren't comparable to cosine scores, and a cosine `score_threshold` doesn't apply to hybrid search. Step 89 should take a threshold only for dense mode (or apply it to the dense prefetch only), and expose the mode.
+  - **Step 76** sparse-embeds `embed_text` for documents. **Step 89** sparse-embeds the raw query with `embed_query` (weight 1 per term; IDF comes from Qdrant).
+- Next: Step 73: Version swap semantics

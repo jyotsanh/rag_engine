@@ -11,6 +11,7 @@ from .exceptions import (
 )
 from .models import (
     DENSE_VECTOR,
+    RRF_K,
     SPARSE_VECTOR,
     ChunkPayload,
     CollectionSpec,
@@ -25,6 +26,7 @@ __all__ = [
     "DENSE_VECTOR",
     "MAX_SEARCH_LIMIT",
     "PAYLOAD_INDEXES",
+    "RRF_K",
     "SPARSE_VECTOR",
     "BaseVectorStore",
     "ChunkPayload",

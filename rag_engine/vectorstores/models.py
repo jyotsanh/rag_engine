@@ -22,6 +22,9 @@ from rag_engine.domain import Chunk
 from rag_engine.embeddings import EmbeddingSpace, SparseVector
 
 DENSE_VECTOR = "dense"
+# reciprocal rank fusion: score = sum of 1 / (RRF_K + rank) over the dense and sparse
+# rankings, with 0-based ranks (Qdrant's convention: the top candidate adds 1/60)
+RRF_K = 60
 SPARSE_VECTOR = "bm25"
 COLLECTION_PREFIX = "chunks"
 # a fixed namespace: point ids are stable across processes, machines and releases

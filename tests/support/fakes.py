@@ -18,6 +18,7 @@ from rag_engine.embeddings import (
 )
 from rag_engine.infrastructure import DatabaseUnavailableError, HealthCheck
 from rag_engine.vectorstores import (
+    RRF_K,
     BaseVectorStore,
     CollectionMismatchError,
     CollectionNotFoundError,
@@ -148,9 +149,6 @@ class InMemoryEmbeddingCache:
         return len(vectors)
 
 
-RRF_K = 60  # reciprocal rank fusion constant (the usual default)
-
-
 def _cosine(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b, strict=True))
     norms = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
@@ -216,11 +214,15 @@ class InMemoryVectorStore(BaseVectorStore):
             hits = [h for h in hits if h.score >= score_threshold]
         return sorted(hits, key=lambda h: (-h.score, h.id))[:limit]
 
-    def _sparse_ranking(self, points: list[VectorPoint], query: SparseVector) -> list[VectorPoint]:
-        """Points by IDF-weighted dot product (IDF over the filtered points, like Qdrant)."""
-        total = len(points)
+    def _sparse_ranking(
+        self, spec: CollectionSpec, points: list[VectorPoint], query: SparseVector
+    ) -> list[VectorPoint]:
+        """`points` by IDF-weighted dot product. Like Qdrant's IDF modifier, the statistics
+        cover the whole collection (every point with a sparse vector), not the filtered set."""
+        corpus = [p for p in self._points(spec).values() if p.sparse is not None and len(p.sparse)]
+        total = len(corpus)
         frequency: dict[int, int] = {}
-        for point in points:
+        for point in corpus:
             for index in point.sparse.indices if point.sparse else ():
                 frequency[index] = frequency.get(index, 0) + 1
         weights = dict(zip(query.indices, query.values, strict=True))
@@ -248,10 +250,10 @@ class InMemoryVectorStore(BaseVectorStore):
     ) -> list[SearchHit]:
         points = self._matching(spec, filter_)
         by_dense = sorted(points, key=lambda p: (-_cosine(dense, p.dense), p.id))[:prefetch_limit]
-        by_sparse = self._sparse_ranking(points, sparse)[:prefetch_limit]
+        by_sparse = self._sparse_ranking(spec, points, sparse)[:prefetch_limit]
         fused: dict[str, float] = {}
         for ranking in (by_dense, by_sparse):
-            for rank, point in enumerate(ranking, start=1):
+            for rank, point in enumerate(ranking):  # 0-based, like Qdrant
                 fused[point.id] = fused.get(point.id, 0.0) + 1.0 / (RRF_K + rank)
         payloads = {p.id: p.payload for p in points}
         ordered = sorted(fused.items(), key=lambda item: (-item[1], item[0]))[:limit]
