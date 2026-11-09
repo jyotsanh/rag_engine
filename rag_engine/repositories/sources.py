@@ -1,11 +1,16 @@
 from typing import ClassVar
 
-from rag_engine.domain import MongoDocument, ResourceStatus, Source, utc_now
+from pymongo import ReturnDocument
+from pymongo.errors import PyMongoError
+
+from rag_engine.domain import MongoDocument, ResourceStatus, Source, SourceStats, utc_now
+from rag_engine.infrastructure.exceptions import DatabaseUnavailableError
 from rag_engine.repositories.base import BaseRepository
 from rag_engine.repositories.exceptions import (
     DocumentNotFoundError,
     DuplicateDocumentError,
     SourceNotFoundError,
+    SourceVersionConflictError,
 )
 from rag_engine.repositories.pagination import DEFAULT_PAGE_SIZE, Page
 
@@ -78,3 +83,69 @@ class SourceRepository(BaseRepository[Source]):
         if result.modified_count != 1:
             raise SourceNotFoundError(details={"id": source_id})
         return await self.get_or_raise(source_id, scope=scope)
+
+    # ---- versions (Step 73) ---- #
+
+    async def activate_version(
+        self,
+        source_id: str,
+        version: str,
+        *,
+        stats: SourceStats,
+        check_previous: bool = False,
+        expected_previous: str | None = None,
+    ) -> str | None:
+        """**The atomic swap**: make `version` the one search serves; returns the previous one.
+
+        A single conditional update, so a search sees either the old version or the new one,
+        never neither. Refused (`SourceVersionConflictError`) for a source being deleted, and,
+        with `check_previous`, when the active version is no longer `expected_previous`
+        (compare-and-swap: a stale finalizer can't overwrite a newer flip).
+        """
+        condition: dict[str, object] = {"_id": source_id, **_ACTIVE}
+        if check_previous:
+            condition["active_version"] = expected_previous
+        now = utc_now()
+        try:
+            before = await self.collection.find_one_and_update(
+                condition,
+                {
+                    "$set": {
+                        "active_version": version,
+                        "stats": stats.model_dump(),
+                        "updated_at": now,
+                    }
+                },
+                return_document=ReturnDocument.BEFORE,
+            )
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+        if before is None:
+            current = await self.get(source_id)
+            if current is None:
+                raise SourceNotFoundError(details={"id": source_id})
+            raise SourceVersionConflictError(
+                details={
+                    "id": source_id,
+                    "status": current.status.value,
+                    "active_version": current.active_version,
+                    "expected_previous": expected_previous if check_previous else None,
+                }
+            )
+        return before.get("active_version")
+
+    async def active_versions(
+        self, tenant_id: str, kb_id: str, *, source_ids: tuple[str, ...] = ()
+    ) -> dict[str, str]:
+        """`source_id → active version` for the KB's live sources that have one."""
+        filter_: dict[str, object] = {**_ACTIVE, "active_version": {"$ne": None}}
+        if source_ids:
+            filter_["_id"] = {"$in": list(source_ids)}
+        try:
+            cursor = self.collection.find(
+                self._where(filter_, self._scope(tenant_id, kb_id)),
+                projection={"active_version": 1},
+            )
+            return {raw["_id"]: raw["active_version"] async for raw in cursor}
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc

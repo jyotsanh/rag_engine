@@ -2168,3 +2168,25 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - RRF fuses ranks, not raw scores, so hybrid scores aren't comparable to cosine scores, and a cosine `score_threshold` doesn't apply to hybrid search. Step 89 should take a threshold only for dense mode (or apply it to the dense prefetch only), and expose the mode.
   - **Step 76** sparse-embeds `embed_text` for documents. **Step 89** sparse-embeds the raw query with `embed_query` (weight 1 per term; IDF comes from Qdrant).
 - Next: Step 73: Version swap semantics
+
+### Step 73: Version swap semantics  (2026-11-09)
+- Status: ✅ done
+- Built:
+  - **`SourceRepository.activate_version(source_id, version, *, stats, check_previous=False, expected_previous=None) -> previous`** (`rag_engine/repositories/sources.py`): **the atomic swap**.
+    - One conditional `find_one_and_update` sets `active_version` and `stats` (pages, chunks, last_succeeded_at) and returns the **previous** version for cleanup (Step 78). Every search sees either the old version or the new one, never neither.
+    - Refused for a source being deleted. With `check_previous`, it's a compare-and-swap: a stale finalizer can't overwrite a newer flip. Both raise the new **`SourceVersionConflictError`** (409 `source_version_conflict`, with `status`, `active_version` and `expected_previous` in details); an unknown source → `SourceNotFoundError`.
+  - **`SourceRepository.active_versions(tenant, kb, *, source_ids=()) -> {source_id: version}`**: the KB's live (non-deleting) sources that have an active version, tenant- and KB-scoped.
+  - **`search_scope(sources, tenant, kb, *, source_ids=(), url_prefix=None) -> VectorFilter | None`** (`rag_engine/services/versions.py`, exported): `VectorFilter(tenant, kb_ids=(kb,), source_ids=active sources, versions=their active versions, url_prefix)`.
+    - **Safety rule**: an empty `versions` means "no constraint" in `VectorFilter`, so when no source has an active version yet (only first crawls in progress) it returns **`None`**, never a version-less filter that would serve half-ingested points. Callers answer with no results.
+- Tests: `TestVersionSwap_S73` (6, integration, Mongo + real Qdrant):
+  - **A concurrent re-ingest**: v1 is active (20 points) while v2 (40 points) is upserted in 8 batches. A second task searches continuously, at least 3 searches overlap the ingest, and **every one sees only v1**. Once v2 is fully ingested but not flipped, it's still v1 only. The flip returns `previous == v1`, and the next search sees **only v2**. v1's 20 points are still in Qdrant (unserved, awaiting cleanup), and the source's `active_version`/stats are updated.
+  - **A KB with four sources**: two active (v1, v3), one first crawl in progress (v4 points, no active version) and one being deleted (v5 active). Search serves exactly {v1, v3}, and scoping to one source serves only its version.
+  - **No active version → `None`** and no search, even though points exist.
+  - `active_versions` is tenant- and KB-scoped, and the wrong tenant for a KB gets nothing.
+  - Compare-and-swap refuses a stale flip (the active version stays v2); a deleting source can't be flipped (status in details) and an unknown source → not found.
+  - Passed 3/3 consecutive runs.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1797 passed, 4 skipped (container) in 276 s.
+- Decisions/notes:
+  - `search_scope` includes both `source_ids` and `versions`. The versions alone would be exact (job ids are unique), but the source ids make a deleted source's points unservable the moment it's marked deleting, even before its active version is cleared.
+  - **Step 78** (finalization): `previous = activate_version(source, job_id, stats=..., check_previous=True, expected_previous=source.active_version as read at job start)`, then enqueue cleanup of `previous`. On failure/cancel, never flip; delete the job's own version. **Step 89**: `scope = await search_scope(...)`; return `[]` when it's `None`.
+- Next: Step 74: Vector store bootstrap

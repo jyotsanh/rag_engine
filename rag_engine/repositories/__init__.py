@@ -15,6 +15,7 @@ from .exceptions import (
     KnowledgeBaseNotFoundError,
     PageNotFoundError,
     SourceNotFoundError,
+    SourceVersionConflictError,
     TenantNameTakenError,
     TenantNotFoundError,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "SortOrder",
     "SourceNotFoundError",
     "SourceRepository",
+    "SourceVersionConflictError",
     "TenantNameTakenError",
     "TenantNotFoundError",
     "TenantRepository",

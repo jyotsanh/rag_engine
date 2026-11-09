@@ -46,6 +46,13 @@ class SourceNotFoundError(DocumentNotFoundError):
     default_message = "Source not found"
 
 
+class SourceVersionConflictError(ConflictError):
+    """The source's active version changed since the caller read it (or it is being deleted)."""
+
+    code = "source_version_conflict"
+    default_message = "The source's active version changed concurrently"
+
+
 class PageNotFoundError(DocumentNotFoundError):
     code = "page_not_found"
     default_message = "Page not found"
