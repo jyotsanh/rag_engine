@@ -5,6 +5,7 @@ from typing import Annotated
 
 from fastapi import Depends, Request
 
+from rag_engine.crawling.cancellation import RedisCancelFlags
 from rag_engine.infrastructure import MongoDatabase
 from rag_engine.repositories import (
     ApiKeyRepository,
@@ -68,3 +69,12 @@ def get_job_repository(db: Database) -> JobRepository:
 
 
 Jobs = Annotated[JobRepository, Depends(get_job_repository)]
+
+
+def get_cancel_flags(request: Request) -> RedisCancelFlags:
+    """The Redis cancel flags a running crawl polls (Step 52), for `DELETE /jobs/{id}`."""
+    redis = request.app.state.infrastructure.redis
+    return RedisCancelFlags(redis.client, redis.keys)
+
+
+CancelFlags = Annotated[RedisCancelFlags, Depends(get_cancel_flags)]

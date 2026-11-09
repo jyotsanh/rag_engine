@@ -2699,3 +2699,31 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Pages stay after a version's cleanup (Step 78) as that job's report. They go with the source's cascade (Step 81); TTL retention is Step 97.
   - **Step 87**: `DELETE /jobs/{id}` next to these routes in `api/routers/jobs.py`.
 - Next: Step 87: Cancel
+
+### Step 87: Cancel  (2026-11-09)
+- Status: ✅ done
+- Built:
+  - **`DELETE /api/v1/jobs/{job_id}`** (`api/routers/jobs.py`) → `CrawlJobDetailResponse`, through `rag_engine.crawling.request_cancel(jobs, flags, tenant, job)` (Step 52):
+    - **Queued → 200, `cancelled` at once** (no Redis flag; there is nothing to stop).
+    - **Running → 202**. `cancel_requested_at` is stamped in Mongo (the first stamp is kept on repeats) and **the Redis cancel flag** that the engine polls is set. The worker stops fetching, drains in-flight pages and ends the job `cancelled`; the client polls `GET /jobs/{id}`.
+    - **Already cancelled → 200**, unchanged, so retries are safe.
+    - **Finalizing or finished → 409 `invalid_job_transition`** (`from`, `to`); the version swap isn't cancellable.
+    - Another tenant's or an unknown job → 404 `job_not_found`; malformed → 422.
+    - **A Redis outage doesn't fail it** (202): the durable Mongo stamp reaches the worker through its heartbeat.
+  - **The old version keeps serving.** A cancelled job never flips `active_version` (Steps 77-78 discard its own version), and the API endpoint never touches the source.
+  - **Webhook**: a queued job cancelled by this call ended without a worker, so its completion webhook is **enqueued at once** (`TaskQueue.enqueue_job_webhook`, `webhooks` queue), only on the call that cancelled it. A running job's webhook is sent by its runner when it stops (Step 83); the recovery sweep covers a lost message either way.
+  - `CancelFlags` dependency (`get_cancel_flags`: `RedisCancelFlags` over the app's Redis connection). `CeleryTaskQueue.enqueue_job_webhook`, and `RecordingTaskQueue` records it.
+  - The OpenAPI docs list 200/202/404/409 with the behaviour described.
+- Tests: `TestCancelJob_S87` (13, integration, real app + Mongo + Redis):
+  - A queued job is cancelled at once (no flag, no webhook without a URL).
+  - **A running job is flagged for its worker** (202 twice; first stamp kept; Redis flag set; the heartbeat sees it). After the worker stops, the call returns 200; cancelling twice is safe.
+  - Finalizing, succeeded and failed → 409 with `from`/`to`, status unchanged.
+  - **The previous version keeps serving** (`active_version` and stats unchanged).
+  - **A cancelled queued job's webhook is sent once** (pending; not on the repeat call); a running job's webhook waits for its worker.
+  - **A Redis outage still cancels** (202, Mongo stamp).
+  - Tenant scoping and ids (foreign or unknown 404, malformed 422, anonymous 401); OpenAPI documents the outcomes.
+  - `test_cancel_api.py` + `test_cancellation.py` passed 3/3 consecutive runs.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ **2101 passed, 4 skipped, exit 0**, in 831 s.
+- Decisions/notes:
+  - **Step 88 (API E2E)**: drive the whole flow over HTTP with a real Celery worker: admin → tenant → key → KB → `POST …/crawls` → poll `GET /jobs/{id}` until succeeded → sources and pages consistent → re-crawl → atomic swap verified. Add a cancel mid-crawl (`DELETE`) against the real worker: the old version keeps serving.
+- Next: Step 88: API E2E

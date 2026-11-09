@@ -26,6 +26,8 @@ from rag_engine.worker.celery_app import (
 class TaskQueue(Protocol):
     async def enqueue_crawl_job(self, job_id: str) -> None: ...
 
+    async def enqueue_job_webhook(self, job_id: str) -> None: ...
+
     async def delete_source(self, tenant_id: str, source_id: str) -> None: ...
 
     async def delete_knowledge_base(self, tenant_id: str, kb_id: str) -> None: ...
@@ -36,6 +38,11 @@ class CeleryTaskQueue:
         """A submitted crawl (Step 84). If this publish fails, the job stays queued and
         crash recovery re-sends it after `CRAWL_QUEUED_STALE_SECONDS` (Step 80)."""
         await self._send(RUN_CRAWL_JOB_TASK, [job_id], queue=CRAWL_QUEUE)
+
+    async def enqueue_job_webhook(self, job_id: str) -> None:
+        """A job the API itself ended (a queued job cancelled, Step 87); the recovery
+        sweep sends it anyway if this publish fails (Step 83)."""
+        await self._send(DELIVER_WEBHOOK_TASK, [job_id], queue=WEBHOOKS_QUEUE)
 
     async def delete_source(self, tenant_id: str, source_id: str) -> None:
         await self._send(DELETE_SOURCE_TASK, [tenant_id, source_id])

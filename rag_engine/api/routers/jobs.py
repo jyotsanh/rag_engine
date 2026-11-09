@@ -1,14 +1,15 @@
 """Reading crawl jobs (Step 85) and their per-page report (Step 86).
 
 Every read is confined to the caller's tenant: another tenant's job id is a 404, the same
-as an unknown one. Cancelling is Step 87.
+as an unknown one. `DELETE /jobs/{id}` cancels a job (Step 87).
 """
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Path, Query
+from fastapi import APIRouter, Path, Query, Response
+from fastapi import status as http_status
 
-from rag_engine.api.deps import CurrentTenant, Database, Jobs
+from rag_engine.api.deps import CancelFlags, CurrentTenant, Database, Jobs, Tasks
 from rag_engine.api.params import Cursor, Limit
 from rag_engine.api.schemas import (
     CrawlJobDetailResponse,
@@ -16,6 +17,7 @@ from rag_engine.api.schemas import (
     PageDetailResponse,
     PageResponse,
 )
+from rag_engine.crawling.cancellation import request_cancel
 from rag_engine.domain import JobStatus, PageReason, PageStatus
 from rag_engine.domain.types import JobId, KnowledgeBaseId, PageId, SourceId
 from rag_engine.exceptions import ErrorResponse
@@ -23,6 +25,10 @@ from rag_engine.repositories import DEFAULT_PAGE_SIZE, ChunkRepository, Page, Pa
 
 _ERRORS: dict[int | str, dict[str, Any]] = {
     code: {"model": ErrorResponse} for code in (401, 403, 404)
+}
+_CANCEL_ERRORS: dict[int | str, dict[str, Any]] = {
+    409: {"model": ErrorResponse, "description": "Finalizing or already finished"},
+    202: {"model": CrawlJobDetailResponse, "description": "Running: cancellation requested"},
 }
 
 router = APIRouter(prefix="/jobs", tags=["jobs"], responses=_ERRORS)
@@ -104,3 +110,37 @@ async def get_job_page(
     page = await PageRepository(db).get_for_job(ctx.tenant.id, job.id, page_id)
     chunks = await ChunkRepository(db).count({"page_id": page.id})
     return PageDetailResponse.of(page, chunks=chunks)
+
+
+@router.delete(
+    "/{job_id}",
+    summary="Cancel a crawl job",
+    description=(
+        "- **Queued**: cancelled at once (**200**).\n"
+        "- **Running**: cancellation is requested (**202**); the worker stops fetching, "
+        "lets in-flight pages finish and ends the job `cancelled` within seconds. Poll "
+        "`GET /jobs/{id}`.\n"
+        "- **Already cancelled**: returned as is (**200**), so retries are safe.\n"
+        "- **Finalizing or finished**: **409** `invalid_job_transition` (the version swap "
+        "isn't cancellable).\n\n"
+        "A cancelled crawl never replaces the source's content: the previous version keeps "
+        "serving search, and whatever the cancelled crawl stored is deleted."
+    ),
+    responses=_CANCEL_ERRORS,
+)
+async def cancel_job(
+    job_id: JobPath,
+    ctx: CurrentTenant,
+    jobs: Jobs,
+    flags: CancelFlags,
+    tasks: Tasks,
+    response: Response,
+) -> CrawlJobDetailResponse:
+    before = await jobs.get_for_tenant(ctx.tenant.id, job_id)
+    job = await request_cancel(jobs, flags, ctx.tenant.id, job_id)
+    if job.status is JobStatus.RUNNING:
+        response.status_code = http_status.HTTP_202_ACCEPTED
+    elif before.status is JobStatus.QUEUED and job.webhook is not None:
+        # ended right here, not by a worker: send its webhook now (the sweep would later)
+        await tasks.enqueue_job_webhook(job.id)
+    return CrawlJobDetailResponse.of(job)
