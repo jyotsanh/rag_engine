@@ -6,7 +6,7 @@ from pymongo import IndexModel
 
 from rag_engine.config import settings
 from rag_engine.domain.base import MongoDocument
-from rag_engine.domain.enums import JobStatus
+from rag_engine.domain.enums import ACTIVE_JOB_STATUSES, JobStatus
 from rag_engine.domain.report import CrawlReport
 from rag_engine.domain.types import (
     HttpUrlStr,
@@ -20,6 +20,12 @@ from rag_engine.domain.types import (
 
 MAX_PATTERNS = 50
 _HELD = frozenset({JobStatus.RUNNING, JobStatus.FINALIZING})  # a worker run owns the job
+
+# Partial filter of the "active job" indexes (Step 79): queued, running or finalizing. Queries
+# must repeat this exact `status` predicate for the planner to pick a partial index.
+ACTIVE_JOB_FILTER: dict[str, dict[str, list[str]]] = {
+    "status": {"$in": sorted(s.value for s in ACTIVE_JOB_STATUSES)}
+}
 
 
 class CrawlConfig(BaseModel):
@@ -88,6 +94,28 @@ class CrawlJob(MongoDocument):
         IndexModel([("tenant_id", 1), ("_id", -1)], name="tenant_jobs"),
         IndexModel([("source_id", 1), ("_id", -1)], name="source_jobs"),
         IndexModel([("status", 1), ("heartbeat_at", 1)], name="status_heartbeat"),
+        # Step 79: at most one active job per source, enforced by the database, so two racing
+        # submissions (or API replicas) can't both start crawling the same source
+        IndexModel(
+            [("source_id", 1)],
+            unique=True,
+            partialFilterExpression=ACTIVE_JOB_FILTER,
+            name="one_active_job_per_source",
+        ),
+        # Step 79: the tenant's concurrent-job quota. Each active job holds one of the
+        # tenant's `max_concurrent_jobs` slots; a finished job leaves the index, freeing it
+        IndexModel(
+            [("tenant_id", 1), ("slot", 1)],
+            unique=True,
+            partialFilterExpression={**ACTIVE_JOB_FILTER, "slot": {"$type": "int"}},
+            name="tenant_job_slot",
+        ),
+        # Step 79: counting a tenant's concurrent jobs reads only its active ones
+        IndexModel(
+            [("tenant_id", 1), ("status", 1)],
+            partialFilterExpression=ACTIVE_JOB_FILTER,
+            name="tenant_active_jobs",
+        ),
     )
 
     tenant_id: TenantId
@@ -102,6 +130,8 @@ class CrawlJob(MongoDocument):
     report: CrawlReport | None = None  # written at the end of each crawl run (Step 53)
     attempts: NonNegativeInt = 0  # times a worker started it (crash recovery requeues, Step 80)
     run_id: str | None = Field(default=None, max_length=100)  # the worker run holding the job
+    # the tenant concurrency slot (0 ≤ slot < max_concurrent_jobs) held while active (Step 79)
+    slot: NonNegativeInt | None = None
     cancel_requested_at: datetime | None = None
     started_at: datetime | None = None
     heartbeat_at: datetime | None = None

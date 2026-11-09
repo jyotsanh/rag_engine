@@ -7,13 +7,12 @@ import pytest
 
 from rag_engine.config import Settings
 from rag_engine.crawling import RedisCancelFlags, finish_cancelled, request_cancel
-from rag_engine.domain import CrawlJob, JobStatus
+from rag_engine.domain import CrawlJob, JobStatus, new_id
 from rag_engine.infrastructure import MongoConnection, RedisConnection, RedisNamespace
 from rag_engine.repositories import InvalidJobTransitionError, JobNotFoundError, JobRepository
 
 _TENANT = "ten_" + "1" * 32
 _KB = "kb_" + "1" * 32
-_SOURCE = "src_" + "1" * 32
 
 
 @dataclass
@@ -24,7 +23,10 @@ class _Env:
 
     async def job(self) -> CrawlJob:
         return await self.jobs.insert(
-            CrawlJob(tenant_id=_TENANT, kb_id=_KB, source_id=_SOURCE, seed_url="https://a.example/")
+            # each job on its own source: a source has at most one active job (S79)
+            CrawlJob(
+                tenant_id=_TENANT, kb_id=_KB, source_id=new_id("src"), seed_url="https://a.example/"
+            )
         )
 
     async def running(self, run_id: str = "run-1") -> CrawlJob:

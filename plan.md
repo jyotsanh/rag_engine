@@ -2356,3 +2356,46 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Orphan sweep: a version whose cleanup message was lost (a broker outage right after the flip) leaks. `ChunkRepository.versions(source)` vs `active_version` finds them; **Step 80's periodic maintenance** should sweep non-active versions of sources with no running job.
   - **Step 79**: one active job per source (a partial unique index) and per-tenant concurrency. **Step 81**: the cascades reuse `VersionCleaner`-style deletes per source/KB.
 - Next: Step 79: Concurrency guards
+
+### Step 79: Concurrency guards  (2026-11-09)
+- Status: ✅ done
+- Built:
+  - **`CrawlJob` indexes** (`domain/job.py`, with `ACTIVE_JOB_FILTER` = `status ∈ {queued, running, finalizing}` exported from `rag_engine.domain`):
+    - **`one_active_job_per_source`**: unique on `source_id`, partial on the active statuses. The database refuses a second active job for a source. Finished jobs leave the index, so any number of past jobs coexist. A requeued job (Step 80) keeps the slot.
+    - **`tenant_job_slot`**: unique on `(tenant_id, slot)`, partial on active **and** `slot` being an int. New field **`CrawlJob.slot`** is the tenant concurrency slot `0 ≤ slot < max_concurrent_jobs`, held while the job is active.
+    - `tenant_active_jobs`: `(tenant_id, status)` partial, for counting.
+    - Mongo 8 accepts `$in` in partial filters. Queries repeat `ACTIVE_JOB_FILTER` exactly so the planner can use the partial indexes.
+  - **`JobRepository`** (`repositories/jobs.py`):
+    - `find_active_for_source(tenant, source)` and `count_active_for_tenant(tenant)`.
+    - **`create_active(job, *, slots=None) -> (job, created)`**:
+      - It inserts a queued job. A duplicate on the source index returns **the existing active job** (`created=False`). If that job finished between the insert and the read, it retries.
+      - With `slots`, it claims a random free slot. A duplicate on the slot index means another submission took that slot, so it picks again. That's bounded: every lost race means someone else won.
+      - No free slot, or already `slots` active jobs in any slot (so a **lowered quota** applies at once) → **`JobSlotsExhaustedError`** (new, repositories). If the source already has an active job, that job is returned instead.
+  - **`SourceRepository.set_last_job(source, job)`**: `Source.last_job_id` is now written on submission.
+  - **`rag_engine/services/crawl_jobs.py` → `CrawlJobService(jobs, sources).submit(tenant, source, config) -> JobSubmission(job, created)`** (exported):
+    - The duplicate check comes **first**, so re-submitting a source that is already crawling never fails on the quota it is itself using. The existing job keeps its own config.
+    - Then `create_active(slots=tenant.quotas.max_concurrent_jobs)`. When it raises `JobSlotsExhaustedError`, submit raises **`QuotaExceededError`** (403 `quota_exceeded`, details `{quota: "max_concurrent_jobs", limit, active}`).
+    - **Queued jobs count** toward the limit, so a backlog can't drain past it.
+    - A source of another tenant → `ValueError`.
+- **Design choice: DB-enforced slots, not count → insert → re-count.** The KB quota (Step 19) uses count → insert → re-count. For jobs that would refuse a whole burst: every submission inserts before any of them re-counts, so all of them see too many jobs and roll back. With slots, a burst fills exactly the free slots, never more, and none is refused while a slot is free. No rollback either.
+- Tests:
+  - `TestActiveJobIndex_S79` (16, integration):
+    - Both index definitions.
+    - A second active insert for a source is refused (`fields: ["source_id"]`). Succeeded, failed and cancelled jobs free the source. Running, finalizing and requeued jobs keep it.
+    - `create_active` returns the existing job. **10 racing creates → one insert**. It retries when the blocker finishes mid-way, and only accepts queued jobs. Active reads are tenant-scoped.
+    - Slots: the DB refuses two active jobs in one slot. Slots are per tenant, a job without a slot is unindexed, and a finished job frees its slot. Slots are distinct up to the limit, then exhausted. Exhausted slots still return the source's active job. A lowered limit counts jobs in higher slots. **12 racing claims at 4 slots → exactly 4 win, slots {0..3}**.
+  - `TestCrawlJobSubmission_S79` (9, integration):
+    - Submit queues a job with the source's seed/KB/config and sets `last_job_id`.
+    - A duplicate (queued or running) returns the existing job with its original config; at the quota too.
+    - A resubmission after the job finished creates a new job.
+    - Quota: running and queued jobs both count; the third job is refused with typed details; a finished job frees a slot. The quota is per tenant.
+    - **12 racing submissions at limit 3 → exactly 3 accepted (slots {0,1,2}), 9 refused, nothing left behind**. **10 racing duplicates → one job**. A foreign source is refused.
+  - Adjusted for the new invariant: `test_jobs.py` (each helper job gets its own source), `test_cancellation.py` (same), and `test_ingestion_pipeline.py` (the "other job" is now a finished earlier job of the same source).
+  - `test_crawl_job.py`: the three re-crawl tests now **assert their first crawl `SUCCEEDED`**. In one loaded full run, a first crawl hit `vector_store_unavailable` (a Qdrant timeout) and was requeued. That left it active, so the second insert failed on the new index with an unclear error. The test would have failed before Step 79 as well (no version activated), but the cause wasn't visible.
+  - `test_crawl_job.py` + `test_concurrency_guards.py` passed 3/3 consecutive runs.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ **1880 passed, 4 skipped, exit 0**, in 548 s. An earlier full run had 1 failure: the load flake above, fixed by the precondition asserts.
+- Decisions/notes:
+  - **Step 84** (start crawl): `sources.get_or_create(...)` → `CrawlJobService.submit(tenant, source, config)`. **Enqueue only when `created`**: return 202 with the new job, or 200 with the existing one (a duplicate). If the enqueue fails after the insert, the job sits `queued` and blocks its source. Step 84 should then fail it (`jobs.fail(job, JobError("enqueue_failed"))`), or Step 80 should also re-enqueue old `queued` jobs.
+  - Jobs inserted without `slot` (old documents, test helpers using `insert`) hold no slot, but `count_active_for_tenant` still counts them against new submissions.
+  - The worker doesn't check the quota again: running ≤ active ≤ limit holds from submission.
+- Next: Step 80: Crash recovery

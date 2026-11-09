@@ -73,3 +73,13 @@ class JobRunSupersededError(ConflictError):
 
     code = "job_run_superseded"
     default_message = "The crawl job is no longer held by this run"
+
+
+class JobSlotsExhaustedError(ConflictError):
+    """Every concurrency slot of the tenant is held by an active job (Step 79).
+
+    Internal: the submission service turns it into `QuotaExceededError`.
+    """
+
+    code = "job_slots_exhausted"
+    default_message = "The tenant has no free concurrent job slot"

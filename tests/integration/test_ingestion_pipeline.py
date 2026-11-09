@@ -13,6 +13,7 @@ from rag_engine.domain import (
     Chunk,
     ContentKind,
     CrawlJob,
+    JobError,
     Page,
     PageReason,
     PageStatus,
@@ -166,7 +167,10 @@ class TestIngestionPipeline_S76:
         assert (row.purpose, row.tokens) == (UsagePurpose.INGEST, report.tokens)
 
     async def test_only_the_jobs_succeeded_pages_are_ingested(self, env: _Env) -> None:
-        job, other = await env.job(), await env.job()
+        # an earlier job of the same source (finished: a source has one active job, S79)
+        other = await env.job()
+        await env.jobs.fail(other.id, JobError(code="engine_crashed", message="boom"))
+        job = await env.job()
         await env.page(job, 1, _markdown(1))
         await env.page(job, 2, None, status=PageStatus.FAILED, reason=PageReason.TIMEOUT,
                        content_kind=None)  # fmt: skip

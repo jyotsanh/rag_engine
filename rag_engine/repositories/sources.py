@@ -84,6 +84,15 @@ class SourceRepository(BaseRepository[Source]):
             raise SourceNotFoundError(details={"id": source_id})
         return await self.get_or_raise(source_id, scope=scope)
 
+    async def set_last_job(self, source_id: str, job_id: str) -> None:
+        """Record the source's most recent crawl job (Step 79's submission)."""
+        try:
+            await self.collection.update_one(
+                {"_id": source_id}, {"$set": {"last_job_id": job_id, "updated_at": utc_now()}}
+            )
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+
     # ---- versions (Step 73) ---- #
 
     async def activate_version(

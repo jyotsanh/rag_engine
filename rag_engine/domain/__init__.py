@@ -25,7 +25,7 @@ from .enums import (
     TenantStatus,
     UsagePurpose,
 )
-from .job import CrawlConfig, CrawlJob, EmbeddingUsage, JobCounters, JobError
+from .job import ACTIVE_JOB_FILTER, CrawlConfig, CrawlJob, EmbeddingUsage, JobCounters, JobError
 from .knowledge_base import KnowledgeBase
 from .page import MAX_DEFERRED_LINKS, DeferredLink, Page
 from .report import REPORT_SAMPLES_PER_REASON, CrawlReport, PageSample, ReasonCount
@@ -34,6 +34,7 @@ from .tenant import TENANT_NAME_COLLATION, Tenant, TenantQuotas
 from .usage import TenantUsage, tenant_usage_id, usage_period
 
 __all__ = [
+    "ACTIVE_JOB_FILTER",
     "ACTIVE_JOB_STATUSES",
     "CLAIM_TTL_SECONDS",
     "EMBEDDING_CACHE_TTL_SECONDS",

@@ -17,16 +17,25 @@ that was presumed dead from finalizing over the run that replaced it.
 ingest pipeline can bump them freely. `set_counters()` overwrites them, for reconciling
 with the page table after a crash (an increment can be lost between writing a page and
 counting it).
+
+**One active job per source** (Step 79): a partial unique index on `source_id` over the
+active statuses (`one_active_job_per_source`). `create_active()` inserts a job or, when the
+source already has an active one, returns that job instead, whoever raced to insert first.
+**Tenant concurrency** works the same way: each active job holds one of the tenant's
+`max_concurrent_jobs` slots (`tenant_job_slot`, unique over active jobs), so the database,
+not a count-then-insert, caps it. A finished job drops out of both indexes, freeing them.
 """
 
+import random
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Any, ClassVar
 
 from pymongo import ASCENDING, ReturnDocument
-from pymongo.errors import PyMongoError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from rag_engine.domain import (
+    ACTIVE_JOB_FILTER,
     JOB_TRANSITIONS,
     CrawlJob,
     CrawlReport,
@@ -41,13 +50,20 @@ from rag_engine.infrastructure.mongo import MongoDatabase
 from rag_engine.repositories.base import BaseRepository
 from rag_engine.repositories.exceptions import (
     DocumentNotFoundError,
+    DuplicateDocumentError,
     InvalidJobTransitionError,
     JobNotFoundError,
     JobRunSupersededError,
+    JobSlotsExhaustedError,
 )
 from rag_engine.repositories.pagination import DEFAULT_PAGE_SIZE, Page
 
 _HELD = (JobStatus.RUNNING, JobStatus.FINALIZING)  # owned by a worker run
+_ACTIVE_PER_SOURCE_KEY = {"source_id": 1}  # key pattern of `one_active_job_per_source`
+_SLOT_KEY = {"tenant_id": 1, "slot": 1}  # key pattern of `tenant_job_slot`
+# a DuplicateKeyError on the source names an active job; it can finish before we read it, so
+# the insert is retried a few times before giving up
+_CREATE_ATTEMPTS = 5
 
 
 def _sources_of(target: JobStatus) -> list[str]:
@@ -97,6 +113,87 @@ class JobRepository(BaseRepository[CrawlJob]):
             sort=[("heartbeat_at", ASCENDING)],
             limit=limit,
         )
+
+    # ---- active jobs (Step 79) ---- #
+
+    async def find_active_for_source(self, tenant_id: str, source_id: str) -> CrawlJob | None:
+        """The source's queued, running or finalizing job, if any (at most one exists)."""
+        return await self.find_one(
+            {"source_id": source_id, **ACTIVE_JOB_FILTER}, scope={"tenant_id": tenant_id}
+        )
+
+    async def count_active_for_tenant(self, tenant_id: str) -> int:
+        """The tenant's concurrent jobs: queued, running or finalizing."""
+        try:
+            return await self.count(ACTIVE_JOB_FILTER, scope={"tenant_id": tenant_id})
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+
+    async def create_active(
+        self, job: CrawlJob, *, slots: int | None = None
+    ) -> tuple[CrawlJob, bool]:
+        """Insert a new queued job unless its source already has an active one.
+
+        Returns `(job, True)` when `job` was inserted, `(existing, False)` when another
+        active job of the same source (same tenant) won: the partial unique index
+        `one_active_job_per_source` decides, so of N racing submissions exactly one inserts.
+
+        With `slots` (the tenant's `max_concurrent_jobs`), the job also claims a free
+        concurrency slot `0 ≤ slot < slots`; the `tenant_job_slot` partial unique index lets
+        only one active job hold each, so racing submissions can never exceed the limit.
+        `JobSlotsExhaustedError` when none is free (and the source has no active job).
+        """
+        if job.status is not JobStatus.QUEUED:
+            raise ValueError("a new job must be queued")
+        if slots is not None and slots < 1:
+            raise ValueError("slots must be >= 1")
+        # every lost slot race means another job took that slot, so this always ends
+        attempts = _CREATE_ATTEMPTS + (slots or 0)
+        for _ in range(attempts):
+            if slots is not None:
+                slot = await self._free_slot(job.tenant_id, slots)
+                if slot is None:
+                    existing = await self.find_active_for_source(job.tenant_id, job.source_id)
+                    if existing is not None:
+                        return existing, False
+                    raise JobSlotsExhaustedError(details={"tenant_id": job.tenant_id})
+                job.slot = slot
+            try:
+                await self.collection.insert_one(job.to_mongo())
+                return job, True
+            except DuplicateKeyError as exc:
+                key = (exc.details or {}).get("keyPattern")
+                if key == _SLOT_KEY:
+                    continue  # another submission took that slot first: pick again
+                if key != _ACTIVE_PER_SOURCE_KEY:
+                    raise self._duplicate(exc) from exc
+            except PyMongoError as exc:
+                raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+            existing = await self.find_active_for_source(job.tenant_id, job.source_id)
+            if existing is not None:
+                return existing, False
+            # the active job finished between our insert and the read: the slot is free now
+        raise DuplicateDocumentError(
+            details={"collection": self.model.collection_name, "fields": ["source_id"]}
+        )
+
+    async def _free_slot(self, tenant_id: str, slots: int) -> int | None:
+        """A random slot below `slots` that none of the tenant's active jobs holds.
+
+        Also `None` once the tenant has `slots` active jobs in any slot, so lowering a
+        tenant's quota takes effect even while old jobs hold slots above the new limit.
+        """
+        try:
+            held = await self.collection.distinct(
+                "slot", {"tenant_id": tenant_id, **ACTIVE_JOB_FILTER}
+            )
+            if await self.count_active_for_tenant(tenant_id) >= slots:
+                return None
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+        free = sorted(set(range(slots)) - set(held))
+        # random, not lowest-first, so racing submissions rarely contend for the same slot
+        return random.choice(free) if free else None
 
     # ---- transitions ---- #
 

@@ -206,7 +206,7 @@ class TestRunCrawlJob_S77:
 
     async def test_a_recrawl_flips_to_the_new_version(self, world: _World) -> None:
         first = await world.job()
-        await world.runner().run(first.id)
+        assert await world.runner().run(first.id) is JobOutcome.SUCCEEDED
         kb = await KnowledgeBaseRepository(world.runtime.mongo.db).get_or_raise(first.kb_id)
         second = await world.job(kb=kb)
 
@@ -368,7 +368,7 @@ class TestFinalization_S78:
 
     async def test_a_recrawl_cleans_up_the_previous_version(self, world: _World) -> None:
         first = await world.job()
-        await world.runner().run(first.id)
+        assert await world.runner().run(first.id) is JobOutcome.SUCCEEDED
         assert world.cleanups == []  # a first crawl has nothing to clean up
         kb = await KnowledgeBaseRepository(world.runtime.mongo.db).get_or_raise(first.kb_id)
         second = await world.job(kb=kb)
@@ -391,7 +391,8 @@ class TestFinalization_S78:
         # without the embedding cache: unchanged chunks would never reach the failing API
         override_settings(EMBEDDING_CACHE_ENABLED=False)
         first = await world.job()
-        await world.runner().run(first.id)
+        # precondition: the first crawl went live (a requeue would keep the source busy, S79)
+        assert await world.runner().run(first.id) is JobOutcome.SUCCEEDED
         kb = await KnowledgeBaseRepository(world.runtime.mongo.db).get_or_raise(first.kb_id)
         second = await world.job(kb=kb)
         fake_openai.fail_with(401)

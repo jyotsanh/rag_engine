@@ -18,6 +18,7 @@ from rag_engine.domain import (
     PageSample,
     PageStatus,
     ReasonCount,
+    new_id,
     utc_now,
 )
 from rag_engine.infrastructure import MongoConnection
@@ -31,7 +32,6 @@ from rag_engine.repositories import (
 _TENANT = "ten_" + "1" * 32
 _OTHER_TENANT = "ten_" + "2" * 32
 _KB = "kb_" + "1" * 32
-_SOURCE = "src_" + "1" * 32
 _OTHER_SOURCE = "src_" + "2" * 32
 _MISSING = "job_" + "f" * 32
 _ERROR = JobError(code="engine_crashed", message="boom")
@@ -63,11 +63,15 @@ async def repo(integration_settings: Settings, clock: _Clock) -> AsyncIterator[J
 
 
 async def _job(
-    repo: JobRepository, *, tenant_id: str = _TENANT, source_id: str = _SOURCE
+    repo: JobRepository, *, tenant_id: str = _TENANT, source_id: str | None = None
 ) -> CrawlJob:
+    # each job crawls its own source by default: a source has at most one active job (S79)
     return await repo.insert(
         CrawlJob(
-            tenant_id=tenant_id, kb_id=_KB, source_id=source_id, seed_url="https://acme.example/"
+            tenant_id=tenant_id,
+            kb_id=_KB,
+            source_id=source_id or new_id("src"),
+            seed_url="https://acme.example/",
         )
     )
 
