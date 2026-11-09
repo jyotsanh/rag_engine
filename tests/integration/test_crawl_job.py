@@ -596,3 +596,61 @@ class TestRecoverJobsTask_S80:
             assert current.status is JobStatus.QUEUED
         finally:
             worker_context.shutdown()
+
+
+class TestCompletionWebhook_S83:
+    """S83 — the runner sends a finished job's completion webhook (and only then)."""
+
+    async def _with_webhook(self, world: _World, max_pages: int = 10) -> CrawlJob:
+        job = await world.job(max_pages=max_pages)
+        await world.runtime.mongo.db["crawl_jobs"].update_one(
+            {"_id": job.id}, {"$set": {"config.webhook_url": "https://hooks.acme.example/rag"}}
+        )
+        return job
+
+    async def test_a_finished_job_enqueues_its_webhook(self, world: _World) -> None:
+        job = await self._with_webhook(world)
+        sent: list[str] = []
+
+        outcome = await world.runner(enqueue_webhook=sent.append).run(job.id)
+
+        done = await world.jobs.get_or_raise(job.id)
+        assert outcome is JobOutcome.SUCCEEDED and sent == [job.id]
+        assert done.webhook is not None and done.webhook.status.value == "pending"
+
+    async def test_a_failed_job_enqueues_its_webhook(
+        self, world: _World, fake_openai: FakeOpenAI
+    ) -> None:
+        job = await self._with_webhook(world)
+        fake_openai.fail_with(401)
+        sent: list[str] = []
+
+        outcome = await world.runner(enqueue_webhook=sent.append).run(job.id)
+
+        assert outcome is JobOutcome.FAILED and sent == [job.id]
+
+    async def test_no_url_or_a_requeue_sends_nothing(
+        self, world: _World, fake_openai: FakeOpenAI, override_settings: OverrideSettings
+    ) -> None:
+        # without the cache: the second crawl's chunks would never reach the failing API
+        override_settings(EMBEDDING_CACHE_ENABLED=False)
+        plain = await world.job()
+        sent: list[str] = []
+        assert await world.runner(enqueue_webhook=sent.append).run(plain.id) is JobOutcome.SUCCEEDED
+
+        requeued = await self._with_webhook(world, max_pages=11)  # its own KB
+        fake_openai.fail_with(500)  # transient: requeued, not finished
+        outcome = await world.runner(enqueue_webhook=sent.append).run(requeued.id)
+
+        assert outcome is JobOutcome.REQUEUED and sent == []
+        assert (await world.jobs.get_or_raise(requeued.id)).webhook is None
+
+    async def test_a_broken_broker_never_fails_a_finished_job(self, world: _World) -> None:
+        job = await self._with_webhook(world)
+
+        def broken(job_id: str) -> None:
+            raise ConnectionError("broker down")
+
+        outcome = await world.runner(enqueue_webhook=broken).run(job.id)
+
+        assert outcome is JobOutcome.SUCCEEDED  # the recovery sweep re-sends it later

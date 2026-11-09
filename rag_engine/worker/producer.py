@@ -14,7 +14,9 @@ from loguru import logger
 from rag_engine.worker.celery_app import (
     DELETE_KNOWLEDGE_BASE_TASK,
     DELETE_SOURCE_TASK,
+    DELIVER_WEBHOOK_TASK,
     MAINTENANCE_QUEUE,
+    WEBHOOKS_QUEUE,
     celery_app,
 )
 
@@ -48,4 +50,11 @@ def send_source_deletion(tenant_id: str, source_id: str) -> None:
 def send_kb_deletion(tenant_id: str, kb_id: str) -> None:
     celery_app.send_task(
         DELETE_KNOWLEDGE_BASE_TASK, args=[tenant_id, kb_id], queue=MAINTENANCE_QUEUE
+    )
+
+
+def send_job_webhook(job_id: str, countdown: float = 0) -> None:
+    """Deliver a finished job's completion webhook (Step 83), on the `webhooks` queue."""
+    celery_app.send_task(
+        DELIVER_WEBHOOK_TASK, args=[job_id], queue=WEBHOOKS_QUEUE, countdown=countdown or None
     )

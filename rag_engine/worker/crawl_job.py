@@ -127,6 +127,10 @@ class JobOutcome(StrEnum):
     SUPERSEDED = "superseded"  # another run took the job over mid-flight
 
 
+# outcomes that end the job, so it owes its completion webhook (Step 83)
+_FINISHED = frozenset({JobOutcome.SUCCEEDED, JobOutcome.FAILED, JobOutcome.CANCELLED})
+
+
 class _JobRejectedError(Exception):
     """The job can't run as specified (its KB or source is gone)."""
 
@@ -136,6 +140,7 @@ class _JobRejectedError(Exception):
 
 
 type Enqueue = Callable[[str, float], None]  # (job_id, countdown seconds)
+type EnqueueWebhook = Callable[[str], None]  # (job_id): the completion webhook (Step 83)
 # (tenant_id, kb_id, source_id, version, countdown seconds): the `cleanup_version` task
 type EnqueueCleanup = Callable[[str, str, str, str, float], None]
 
@@ -154,6 +159,7 @@ class CrawlJobDeps:
     sparse: SparseEmbedder | None = None
     browser_pool: BrowserPool | None = None
     http_factory: Callable[[], AbstractAsyncContextManager[SafeHttpClient]] | None = None
+    enqueue_webhook: EnqueueWebhook | None = None
 
     @classmethod
     def from_runtime(
@@ -224,6 +230,8 @@ class CrawlJobRunner:
             logger.info("job {} started as {} (attempt {})", job.id, run_id, job.attempts)
             outcome = await self._run_claimed(_Run(job, run_id))
             logger.info("job {} finished: {}", job.id, outcome)
+            if outcome in _FINISHED and job.config.webhook_url is not None:
+                self._enqueue_webhook(job.id)
             return outcome
 
     async def _run_claimed(self, run: _Run) -> JobOutcome:
@@ -358,6 +366,16 @@ class CrawlJobRunner:
         await self.claims.release_job(job.id)
         await self.jobs.succeed(job.id, run.run_id)
         return JobOutcome.SUCCEEDED
+
+    def _enqueue_webhook(self, job_id: str) -> None:
+        """The job's terminal transition marked its webhook pending; send it now (the
+        recovery sweep re-sends it if this message is lost)."""
+        if self.deps.enqueue_webhook is None:
+            return
+        try:
+            self.deps.enqueue_webhook(job_id)
+        except Exception:
+            logger.opt(exception=True).error("could not enqueue the webhook of job {}", job_id)
 
     def _enqueue_cleanup(self, job: CrawlJob, version: str, countdown: float) -> None:
         try:

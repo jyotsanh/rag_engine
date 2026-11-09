@@ -171,11 +171,13 @@ class SafeHttpClient:
         guard: SsrfGuard | None = None,
         ssl_context: ssl.SSLContext | None = None,
         max_connections: int | None = None,
+        timeout: httpx.Timeout | None = None,
     ) -> None:
         self._config = config
         self._guard = guard or SsrfGuard(config)
         self._backend = PinnedNetworkBackend()
-        self._timeout = httpx.Timeout(
+        # the crawler's timeouts by default; webhook delivery passes its own (Step 83)
+        self._timeout = timeout or httpx.Timeout(
             connect=config.CRAWL_CONNECT_TIMEOUT_SECONDS,
             read=config.CRAWL_READ_TIMEOUT_SECONDS,
             write=config.CRAWL_READ_TIMEOUT_SECONDS,

@@ -160,6 +160,19 @@ class DiscoveredVia(StrEnum):
     LINK = "link"  # outlink of a fetched page (depth + 1)
 
 
+class WebhookStatus(StrEnum):
+    """A finished job's completion webhook (Step 83)."""
+
+    PENDING = "pending"  # the job finished; not attempted yet
+    RETRYING = "retrying"  # attempted, failed transiently, another attempt is scheduled
+    DELIVERED = "delivered"  # a 2xx answer
+    FAILED = "failed"  # given up: a permanent refusal, or out of attempts
+
+    @property
+    def is_open(self) -> bool:
+        return self in (WebhookStatus.PENDING, WebhookStatus.RETRYING)
+
+
 class RenderedWith(StrEnum):
     HTTP = "http"  # plain HTTP fetch
     BROWSER = "browser"  # re-rendered in headless Chromium
@@ -180,4 +193,5 @@ __all__ = [
     "ResourceStatus",
     "TenantStatus",
     "UsagePurpose",
+    "WebhookStatus",
 ]

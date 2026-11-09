@@ -38,6 +38,7 @@ RECOVER_JOBS_TASK = "rag_engine.worker.tasks.maintenance.recover_jobs"
 DELETE_SOURCE_TASK = "rag_engine.worker.tasks.maintenance.delete_source"
 DELETE_KNOWLEDGE_BASE_TASK = "rag_engine.worker.tasks.maintenance.delete_knowledge_base"
 SWEEP_DELETIONS_TASK = "rag_engine.worker.tasks.maintenance.sweep_deletions"
+DELIVER_WEBHOOK_TASK = "rag_engine.worker.tasks.webhooks.deliver_job_webhook"
 # a redelivery margin on top of the hard time limit (see the module docstring)
 VISIBILITY_MARGIN_SECONDS = 15 * 60
 RESULT_EXPIRES_SECONDS = 24 * 60 * 60
@@ -96,7 +97,11 @@ def configure(app: Celery, config: Settings = settings) -> Celery:
 celery_app = configure(
     Celery(
         "rag_engine",
-        include=["rag_engine.worker.tasks.crawl", "rag_engine.worker.tasks.maintenance"],
+        include=[
+            "rag_engine.worker.tasks.crawl",
+            "rag_engine.worker.tasks.maintenance",
+            "rag_engine.worker.tasks.webhooks",
+        ],
     )
 )
 

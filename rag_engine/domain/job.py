@@ -6,7 +6,7 @@ from pymongo import IndexModel
 
 from rag_engine.config import settings
 from rag_engine.domain.base import MongoDocument
-from rag_engine.domain.enums import ACTIVE_JOB_STATUSES, JobStatus
+from rag_engine.domain.enums import ACTIVE_JOB_STATUSES, JobStatus, WebhookStatus
 from rag_engine.domain.report import CrawlReport
 from rag_engine.domain.types import (
     HttpUrlStr,
@@ -85,6 +85,35 @@ class JobError(BaseModel):
     message: str = Field(max_length=2000)
 
 
+MAX_WEBHOOK_LOG = 20  # attempts kept on the job (the latest ones)
+OPEN_WEBHOOK_STATUSES = [s.value for s in WebhookStatus if s.is_open]
+
+
+class WebhookAttempt(BaseModel):
+    """One POST of the completion webhook (Step 83), for the job's delivery log."""
+
+    attempt: int = Field(ge=1)
+    at: datetime
+    status_code: int | None = None  # None: no HTTP answer (network error, timeout, refused)
+    error: str | None = Field(default=None, max_length=100)  # stable code, e.g. `timeout`
+    detail: str | None = Field(default=None, max_length=500)
+    duration_ms: NonNegativeInt = 0
+
+
+class WebhookState(BaseModel):
+    """The completion webhook of a job with a `webhook_url` (Step 83).
+
+    Set to `pending` by the job's terminal transition itself (atomically), so a crash right
+    after a job finishes can't lose its webhook: the recovery sweep finds it.
+    """
+
+    status: WebhookStatus = WebhookStatus.PENDING
+    attempts: NonNegativeInt = 0
+    touched_at: datetime  # last state change: the sweep's staleness clock
+    delivered_at: datetime | None = None
+    log: list[WebhookAttempt] = Field(default_factory=list, max_length=MAX_WEBHOOK_LOG)
+
+
 class CrawlJob(MongoDocument):
     """One crawl of one source. The job id doubles as the vector `version` it writes."""
 
@@ -110,6 +139,12 @@ class CrawlJob(MongoDocument):
             partialFilterExpression={**ACTIVE_JOB_FILTER, "slot": {"$type": "int"}},
             name="tenant_job_slot",
         ),
+        # Step 83: the recovery sweep finds completion webhooks whose task was lost
+        IndexModel(
+            [("webhook.touched_at", 1)],
+            partialFilterExpression={"webhook.status": {"$in": OPEN_WEBHOOK_STATUSES}},
+            name="webhook_open",
+        ),
         # Step 79: counting a tenant's concurrent jobs reads only its active ones
         IndexModel(
             [("tenant_id", 1), ("status", 1)],
@@ -133,6 +168,7 @@ class CrawlJob(MongoDocument):
     # the tenant concurrency slot (0 ≤ slot < max_concurrent_jobs) held while active (Step 79)
     slot: NonNegativeInt | None = None
     cancel_requested_at: datetime | None = None
+    webhook: WebhookState | None = None  # set when a job with `config.webhook_url` finishes
     started_at: datetime | None = None
     heartbeat_at: datetime | None = None
     finished_at: datetime | None = None

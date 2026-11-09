@@ -131,6 +131,20 @@ class Settings(BaseSettings):
     CASCADE_SWEEP_INTERVAL_SECONDS: float = Field(default=300.0, gt=0)
     CASCADE_STALE_SECONDS: float = Field(default=900.0, gt=0)
 
+    # ---- completion webhooks (Steps 82-83) ---- #
+    # each POST (connect + send + answer) must finish within this; no redirects followed
+    WEBHOOK_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0, le=60)
+    # attempts in total; retries back off exponentially (base x 2^n, capped, with jitter;
+    # a receiver's Retry-After is honoured up to the cap)
+    WEBHOOK_MAX_ATTEMPTS: int = Field(default=8, ge=1, le=20)
+    WEBHOOK_RETRY_BASE_SECONDS: float = Field(default=30.0, gt=0)
+    WEBHOOK_RETRY_MAX_SECONDS: float = Field(default=3600.0, gt=0)
+    # the recovery sweep re-sends a webhook never attempted for WEBHOOK_PENDING_GRACE_SECONDS,
+    # or retrying with no attempt for WEBHOOK_STALE_SECONDS (its task was lost)
+    WEBHOOK_PENDING_GRACE_SECONDS: float = Field(default=120.0, gt=0)
+    WEBHOOK_STALE_SECONDS: float = Field(default=7200.0, gt=0)
+    WEBHOOK_USER_AGENT: str = "rag_engine-webhooks/1.0"
+
     # ---- vector store ---- #
     ACTIVE_VECTOR_STORE: VectorStoreType = VectorStoreType.QDRANT
     QDRANT_HOST: str = "localhost"
@@ -382,6 +396,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 "CASCADE_STALE_SECONDS must be > 2 x CASCADE_RETRY_DELAY_SECONDS "
                 "(a cascade that is waiting must not look stalled)"
+            )
+        if self.WEBHOOK_RETRY_BASE_SECONDS > self.WEBHOOK_RETRY_MAX_SECONDS:
+            raise ValueError("WEBHOOK_RETRY_BASE_SECONDS must be <= WEBHOOK_RETRY_MAX_SECONDS")
+        if self.WEBHOOK_STALE_SECONDS <= self.WEBHOOK_RETRY_MAX_SECONDS:
+            raise ValueError(
+                "WEBHOOK_STALE_SECONDS must be > WEBHOOK_RETRY_MAX_SECONDS "
+                "(a webhook waiting for its retry must not look lost)"
             )
         if any(len(k.get_secret_value()) < 32 for k in self.SECRET_ENCRYPTION_KEYS_PREVIOUS):
             raise ValueError("every SECRET_ENCRYPTION_KEYS_PREVIOUS entry must be >= 32 characters")

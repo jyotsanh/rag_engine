@@ -53,6 +53,7 @@ _BATCH = 100
 
 type Enqueue = Callable[[str, float], None]  # (job_id, countdown seconds)
 type EnqueueCleanup = Callable[[str, str, str, str, float], None]
+type EnqueueWebhook = Callable[[str], None]
 
 
 @dataclass
@@ -62,11 +63,15 @@ class RecoveryReport:
     cancelled: list[str] = field(default_factory=list)
     completed: list[str] = field(default_factory=list)  # finalizing jobs that had flipped
     resent: list[str] = field(default_factory=list)  # lost queued jobs sent again
+    webhooks: list[str] = field(default_factory=list)  # lost completion webhooks sent again
     skipped: list[str] = field(default_factory=list)  # changed under us (the worker woke up)
 
     @property
     def acted(self) -> bool:
-        return any((self.requeued, self.failed, self.cancelled, self.completed, self.resent))
+        return any(
+            (self.requeued, self.failed, self.cancelled, self.completed, self.resent,
+             self.webhooks)
+        )  # fmt: skip
 
 
 class JobRecovery:
@@ -76,6 +81,7 @@ class JobRecovery:
         *,
         enqueue: Enqueue,
         enqueue_cleanup: EnqueueCleanup,
+        enqueue_webhook: EnqueueWebhook | None = None,
         config: Settings = settings,
         clock: Callable[[], datetime] = utc_now,
     ) -> None:
@@ -85,6 +91,7 @@ class JobRecovery:
         self.sources = SourceRepository(db)
         self._enqueue = enqueue
         self._enqueue_cleanup = enqueue_cleanup
+        self._enqueue_webhook = enqueue_webhook
         self._config = config
         self._clock = clock
 
@@ -107,9 +114,36 @@ class JobRecovery:
                 )
                 self._enqueue(job.id, 0)
                 report.resent.append(job.id)
+        if self._enqueue_webhook is not None:
+            await self._resend_webhooks(now, report)
+        for job_id in (*report.failed, *report.cancelled, *report.completed):
+            self._send_webhook(job_id)  # the delivery skips jobs without a webhook_url
         if report.acted:
             logger.info("crash recovery: {}", report)
         return report
+
+    async def _resend_webhooks(self, now: datetime, report: RecoveryReport) -> None:
+        """Completion webhooks whose task was lost (Step 83): never attempted within
+        `WEBHOOK_PENDING_GRACE_SECONDS`, or no retry within `WEBHOOK_STALE_SECONDS`."""
+        config = self._config
+        lost = await self.jobs.find_open_webhooks(
+            pending_before=now - timedelta(seconds=config.WEBHOOK_PENDING_GRACE_SECONDS),
+            retrying_before=now - timedelta(seconds=config.WEBHOOK_STALE_SECONDS),
+            limit=_BATCH,
+        )
+        for job in lost:
+            assert job.webhook is not None
+            if await self.jobs.touch_webhook(job.id, job.webhook.touched_at):
+                self._send_webhook(job.id)
+                report.webhooks.append(job.id)
+
+    def _send_webhook(self, job_id: str) -> None:
+        if self._enqueue_webhook is None:
+            return
+        try:
+            self._enqueue_webhook(job_id)
+        except Exception:
+            logger.opt(exception=True).error("could not enqueue the webhook of job {}", job_id)
 
     async def _recover_held(
         self, job: CrawlJob, report: RecoveryReport, stale_before: datetime

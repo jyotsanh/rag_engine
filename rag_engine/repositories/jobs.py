@@ -37,12 +37,16 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 from rag_engine.domain import (
     ACTIVE_JOB_FILTER,
     JOB_TRANSITIONS,
+    MAX_WEBHOOK_LOG,
     CrawlJob,
     CrawlReport,
     JobCounters,
     JobError,
     JobStatus,
     MongoDocument,
+    WebhookAttempt,
+    WebhookState,
+    WebhookStatus,
     utc_now,
 )
 from rag_engine.infrastructure.exceptions import DatabaseUnavailableError
@@ -64,6 +68,34 @@ _SLOT_KEY = {"tenant_id": 1, "slot": 1}  # key pattern of `tenant_job_slot`
 # a DuplicateKeyError on the source names an active job; it can finish before we read it, so
 # the insert is retried a few times before giving up
 _CREATE_ATTEMPTS = 5
+
+
+def _webhook_on_finish(now: datetime) -> dict[str, Any]:
+    """Aggregation expression: a job with a `webhook_url` gets `webhook: pending` (Step 83).
+
+    Part of the terminal transition's own update, so finishing and owing a webhook are one
+    atomic write: a crash in between can't lose the webhook. `$gt null` is false for both a
+    missing and a null URL.
+    """
+    pending = WebhookState(touched_at=now).model_dump()
+    return {
+        "$cond": [
+            {"$gt": ["$config.webhook_url", None]},
+            {"$ifNull": ["$webhook", {"$literal": pending}]},
+            "$webhook",
+        ]
+    }
+
+
+def _finish_update(target: JobStatus, now: datetime, **fields: Any) -> list[dict[str, Any]]:
+    """The update pipeline of every terminal transition: status, timestamps, the webhook.
+
+    Values go through `$literal`, so a string such as an error message starting with `$`
+    is never read as a field path.
+    """
+    values = {"status": target.value, "updated_at": now, "finished_at": now, **fields}
+    literal = {key: {"$literal": value} for key, value in values.items()}
+    return [{"$set": {**literal, "webhook": _webhook_on_finish(now)}}]
 
 
 def _stale_guard(heartbeat_before: datetime | None) -> dict[str, Any]:
@@ -334,7 +366,7 @@ class JobRepository(BaseRepository[CrawlJob]):
                     "cancel_requested_at": {"$ne": None},
                     **guard,
                 },
-                self._set(JobStatus.CANCELLED, now=now, finished_at=now, heartbeat_at=None),
+                _finish_update(JobStatus.CANCELLED, now, heartbeat_at=None),
                 return_document=ReturnDocument.AFTER,
             )
         except PyMongoError as exc:
@@ -358,14 +390,7 @@ class JobRepository(BaseRepository[CrawlJob]):
         try:
             queued = await self.collection.find_one_and_update(
                 self._where({"_id": job_id, "status": JobStatus.QUEUED.value}, scope),
-                {
-                    "$set": {
-                        "status": JobStatus.CANCELLED.value,
-                        "cancel_requested_at": now,
-                        "finished_at": now,
-                        "updated_at": now,
-                    }
-                },
+                _finish_update(JobStatus.CANCELLED, now, cancel_requested_at=now),
                 return_document=ReturnDocument.AFTER,
             )
             if queued is not None:
@@ -403,7 +428,7 @@ class JobRepository(BaseRepository[CrawlJob]):
         guard: Mapping[str, Any] | None = None,
     ) -> CrawlJob:
         now = self._clock()
-        update = self._set(target, now=now, finished_at=now, heartbeat_at=None, **(extra or {}))
+        update = _finish_update(target, now, heartbeat_at=None, **(extra or {}))
         return await self._transition(job_id, target, update, run_id=run_id, guard=guard)
 
     def _set(
@@ -544,3 +569,85 @@ class JobRepository(BaseRepository[CrawlJob]):
         if await self.get(job_id) is None:
             raise JobNotFoundError(details={"id": job_id})
         raise JobRunSupersededError(details={"id": job_id, "run_id": run_id})
+
+    # ---- completion webhook (Step 83) ---- #
+
+    async def record_webhook_attempt(
+        self,
+        job_id: str,
+        attempt: WebhookAttempt,
+        status: WebhookStatus,
+    ) -> CrawlJob | None:
+        """Log one delivery attempt and move the webhook to `status`.
+
+        Guarded on the webhook still being open with `attempt.attempt - 1` attempts so far,
+        so a duplicated task (late acks) can't record the same attempt twice. None when
+        the guard failed (another delivery got there first).
+        """
+        now = self._clock()
+        changes: dict[str, Any] = {
+            "webhook.status": status.value,
+            "webhook.attempts": attempt.attempt,
+            "webhook.touched_at": now,
+            "updated_at": now,
+        }
+        if status is WebhookStatus.DELIVERED:
+            changes["webhook.delivered_at"] = attempt.at
+        try:
+            raw = await self.collection.find_one_and_update(
+                {
+                    "_id": job_id,
+                    "webhook.status": {"$in": [s.value for s in WebhookStatus if s.is_open]},
+                    "webhook.attempts": attempt.attempt - 1,
+                },
+                {
+                    "$set": changes,
+                    "$push": {
+                        "webhook.log": {
+                            "$each": [attempt.model_dump()],
+                            "$slice": -MAX_WEBHOOK_LOG,
+                        }
+                    },
+                },
+                return_document=ReturnDocument.AFTER,
+            )
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+        return self._load(raw) if raw is not None else None
+
+    async def find_open_webhooks(
+        self, *, pending_before: datetime, retrying_before: datetime, limit: int = 100
+    ) -> list[CrawlJob]:
+        """Webhooks whose delivery seems lost: pending (never attempted) since
+        `pending_before`, or retrying with no attempt since `retrying_before`."""
+        return await self.find(
+            {
+                "$or": [
+                    {
+                        "webhook.status": WebhookStatus.PENDING.value,
+                        "webhook.touched_at": {"$lt": pending_before},
+                    },
+                    {
+                        "webhook.status": WebhookStatus.RETRYING.value,
+                        "webhook.touched_at": {"$lt": retrying_before},
+                    },
+                ]
+            },
+            sort=[("webhook.touched_at", ASCENDING)],
+            limit=limit,
+        )
+
+    async def touch_webhook(self, job_id: str, seen_touched_at: datetime) -> bool:
+        """Bump an open webhook's `touched_at` if unchanged since read (one sweep re-sends)."""
+        try:
+            result = await self.collection.update_one(
+                {
+                    "_id": job_id,
+                    "webhook.status": {"$in": [s.value for s in WebhookStatus if s.is_open]},
+                    "webhook.touched_at": seen_touched_at,
+                },
+                {"$set": {"webhook.touched_at": self._clock()}},
+            )
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+        return result.modified_count == 1

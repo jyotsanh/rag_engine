@@ -2540,3 +2540,57 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
     - A tenant with no secret: Step 84 should refuse a `webhook_url` with 422 until an admin issues one. Alternatively, auto-issue on first use, but then nobody has seen the plaintext.
   - Tenants can't fetch or rotate their own secret yet; it's admin-only, like API key issuance.
 - Next: Step 83: Webhook delivery
+
+### Step 83: Webhook delivery  (2026-11-09)
+- Status: ✅ done
+- Built:
+  - **Owing a webhook is atomic with finishing.**
+    - `CrawlJob.webhook: WebhookState | None` (`status` pending/retrying/delivered/failed (`WebhookStatus`), `attempts`, `touched_at`, `delivered_at`, `log: list[WebhookAttempt]`).
+    - **Every terminal transition** (`_finish` for succeed/fail/cancel, `request_cancel` of a queued job, and `requeue`'s cancel of a dead run) is now an update pipeline (`_finish_update`). It sets `webhook: pending` when `config.webhook_url` is set (`$cond`/`$gt null`; `$ifNull` keeps an existing state), so a crash right after a job finishes can't lose its webhook.
+    - Every value goes through `$literal`, so an error message starting with `$` is never read as a field path (tested).
+    - Partial index `webhook_open` (`webhook.touched_at`, status pending/retrying).
+  - **`rag_engine/webhooks/delivery.py` → `WebhookDeliverer(db, box, client_factory=, config, clock, rng).attempt(job_id) -> AttemptResult`**, one attempt:
+    - Only a job whose webhook is still open is sent, so duplicated tasks and sweep races are no-ops. No tenant secret → `failed/webhook_secret_missing`, with no request sent.
+    - **Signed afresh** on each attempt (Step 82), so a retry isn't rejected as a replay. Headers: `X-RagEngine-Signature`, `X-RagEngine-Event` (`job.<status>`), **`X-RagEngine-Delivery`** (the event id `evt_…`, the same on every attempt, for de-duplication) and `X-RagEngine-Attempt`, plus the `WEBHOOK_USER_AGENT`.
+    - POSTed via **`SafeHttpClient.send_once`**: SSRF-vetted and pinned, **redirects not followed**, its own `WEBHOOK_TIMEOUT_SECONDS`. `SafeHttpClient` gained a `timeout=` parameter. At most 64 KB of the answer is read; the body is never stored.
+    - Classification:
+      - 2xx → `delivered`.
+      - 408/425/429/5xx, timeout, network error or DNS error → retry after **`base × 2^(n−1)`, capped, with equal jitter, never sooner than `Retry-After`** (seconds or HTTP date, also capped).
+      - Other 3xx/4xx, or an SSRF-blocked target → `failed` at once.
+      - Out of `WEBHOOK_MAX_ATTEMPTS` → `failed` ("gave up after N attempts").
+    - Payload (compact, sorted keys, stable bytes across attempts): `{id, type, created_at, data: {job: {id, kb_id, source_id, seed_url, status, error, counters, usage, attempts, started_at, finished_at, report: {pages, stop_reason, stop_detail}}}}`.
+  - `JobRepository.record_webhook_attempt(job, attempt, status)`:
+    - Guarded on the webhook being open with `attempt − 1` attempts so far, so a duplicate attempt is recorded once.
+    - Pushes onto the log with `$slice −MAX_WEBHOOK_LOG` (20), keeping the latest attempts.
+    - Also `find_open_webhooks(pending_before=, retrying_before=)` and `touch_webhook(job, seen_touched_at)`.
+  - **Task** `deliver_job_webhook(job_id)` (`rag_engine/worker/tasks/webhooks.py`, `webhooks` queue, now in the Celery `include`). A retry is the task retried after the backoff (`settle_attempt` lifts Celery's limit; the job's `webhook.attempts` is the real one). A MongoDB outage retries after 60 s without spending an attempt.
+  - Producer: `send_job_webhook(job_id, countdown)`.
+  - **Triggers**:
+    - The runner (`CrawlJobDeps.enqueue_webhook`, wired to `send_job_webhook` in `run_crawl_job`) enqueues after a succeeded, failed or cancelled outcome when the job has a URL. A requeue sends nothing. A broker error only logs.
+    - `JobRecovery` (`enqueue_webhook`) enqueues for the jobs it fails, cancels or completes.
+    - **Lost webhooks**: `JobRecovery` re-sends a webhook pending for longer than `WEBHOOK_PENDING_GRACE_SECONDS` (this also covers jobs cancelled while queued, which no worker touches), or retrying with no attempt for `WEBHOOK_STALE_SECONDS`, using a conditional touch (`RecoveryReport.webhooks`).
+- Settings: `WEBHOOK_TIMEOUT_SECONDS` (10, ≤ 60), `WEBHOOK_MAX_ATTEMPTS` (8), `WEBHOOK_RETRY_BASE_SECONDS` (30), `WEBHOOK_RETRY_MAX_SECONDS` (3600), `WEBHOOK_PENDING_GRACE_SECONDS` (120), `WEBHOOK_STALE_SECONDS` (7200, validated > the retry cap) and `WEBHOOK_USER_AGENT`. Also validated: base ≤ max. `.env.example` updated.
+- Test support: **`tests/support/fake_receiver.py` → `FakeReceiver`**, a local uvicorn receiver recording raw bodies and headers and answering from a script (status, headers, delay).
+- Tests:
+  - `TestWebhookPendingMarker_S83` (6, integration): succeeded, failed and cancelled each mark it pending at `finished_at`; a dead run's cancel does too; no URL → none; values stored literally (`$oops`).
+  - `TestWebhookDelivery_S83` (14, real HTTP to the receiver through the SSRF-safe client):
+    - **A signed delivery verifies with the tenant's secret.** Headers, payload and the log entry are checked.
+    - **500 → retry (22.5 s at jitter 0.5) → 204**: same delivery id and body, attempts 1/2, each signed and verifying on its own.
+    - Retry-After 120 is honoured; 503 three times → retry, retry, failed ("gave up after 3"), then skipped.
+    - 400/410/301 fail at once, **and the redirect is not followed**.
+    - A timeout and a refused connection retry; an SSRF-blocked receiver fails with nothing sent; no secret → failed.
+    - Nothing to send → skipped; a duplicated attempt is recorded once; the log keeps the latest 20 of 25.
+  - `TestLostWebhooks_S83` (2): pending re-sent after the grace period (not before, not twice), retrying only after the stale window, delivered never; recovery sends the webhook of a job it fails.
+  - `TestDeliverWebhookTask_S83` (1): the Celery task in-process delivers a verifiable `job.cancelled`.
+  - `TestCompletionWebhook_S83` (4, in `test_crawl_job.py`): a succeeded job and a failed job enqueue the webhook; no URL, or a requeue, sends nothing; a broken broker never fails a finished job.
+  - `TestWebhookDeliveryUnits_S83` (20, unit): the backoff table with jitter bounds and cap; Retry-After floor and cap; Retry-After parsing (seconds, HTTP dates past and future, garbage); payload shape and stable bytes; task settling; the task is routed to `webhooks`; settings validation.
+  - The webhook, crawl-job and recovery files passed 3/3 consecutive runs (after one test fix: a second crawl of the same pages needs the embedding cache off to reach the failing API, as in Step 78).
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ **2025 passed, 4 skipped, exit 0**, in 715 s.
+- Decisions/notes:
+  - **Step 84** (start crawl):
+    - Validate `webhook_url` with `SsrfGuard.check_static` plus a vet at submission.
+    - **Refuse a `webhook_url` with 422 when the tenant has no webhook secret.** The deliverer would only record `webhook_secret_missing`.
+    - Ports beyond `SSRF_ALLOWED_PORTS` (80/443) are refused by the guard at delivery as well.
+  - **Step 85** (job read API): expose `webhook` (status, attempts, delivered_at, the log) on `GET /jobs/{id}`.
+  - **Step 96**: run a worker consuming `webhooks` (short tasks, high concurrency); the Dockerfile's default `--queues` already includes it.
+- Next: Step 84: Start crawl

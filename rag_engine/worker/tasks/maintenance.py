@@ -30,7 +30,7 @@ from rag_engine.worker.celery_app import (
     celery_app,
 )
 from rag_engine.worker.context import run_async, worker_context
-from rag_engine.worker.producer import send_kb_deletion, send_source_deletion
+from rag_engine.worker.producer import send_job_webhook, send_kb_deletion, send_source_deletion
 from rag_engine.worker.recovery import JobRecovery
 
 CLEANUP_VERSION = "rag_engine.worker.tasks.maintenance.cleanup_version"
@@ -94,6 +94,7 @@ def recover_jobs() -> dict[str, Any]:
         worker_context.runtime.mongo.db,
         enqueue=enqueue_crawl_job,
         enqueue_cleanup=enqueue_version_cleanup,
+        enqueue_webhook=send_job_webhook,
         config=worker_context.runtime.config,
     )
     report = run_async(recovery.run())

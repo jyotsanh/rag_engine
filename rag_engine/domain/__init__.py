@@ -24,8 +24,19 @@ from .enums import (
     ResourceStatus,
     TenantStatus,
     UsagePurpose,
+    WebhookStatus,
 )
-from .job import ACTIVE_JOB_FILTER, CrawlConfig, CrawlJob, EmbeddingUsage, JobCounters, JobError
+from .job import (
+    ACTIVE_JOB_FILTER,
+    MAX_WEBHOOK_LOG,
+    CrawlConfig,
+    CrawlJob,
+    EmbeddingUsage,
+    JobCounters,
+    JobError,
+    WebhookAttempt,
+    WebhookState,
+)
 from .knowledge_base import KnowledgeBase
 from .page import MAX_DEFERRED_LINKS, DeferredLink, Page
 from .report import REPORT_SAMPLES_PER_REASON, CrawlReport, PageSample, ReasonCount
@@ -46,6 +57,7 @@ __all__ = [
     "EMBEDDING_CACHE_TTL_SECONDS",
     "JOB_TRANSITIONS",
     "MAX_DEFERRED_LINKS",
+    "MAX_WEBHOOK_LOG",
     "MAX_WEBHOOK_SECRETS",
     "REPORT_SAMPLES_PER_REASON",
     "TENANT_NAME_COLLATION",
@@ -82,7 +94,10 @@ __all__ = [
     "TenantStatus",
     "TenantUsage",
     "UsagePurpose",
+    "WebhookAttempt",
     "WebhookSecret",
+    "WebhookState",
+    "WebhookStatus",
     "chunk_id",
     "embedding_cache_key",
     "new_id",
