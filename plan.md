@@ -2635,3 +2635,38 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 87**: `DELETE /jobs/{id}` → `rag_engine.crawling.request_cancel(jobs, flags, tenant, job)` (Mongo + Redis flag).
   - **Step 88 (API E2E)**: drive this endpoint with a real worker, instead of seeding jobs directly.
 - Next: Step 85: Job read API
+
+### Step 85: Job read API  (2026-11-09)
+- Status: ✅ done
+- Built:
+  - **`GET /api/v1/jobs/{job_id}`** → `CrawlJobDetailResponse` (`api/routers/jobs.py`). It is the summary from Step 84 plus:
+    - **`duration_seconds`**: since the first start, until it finished or until now while it runs.
+    - **`report`**: the crawl report as the failure summary. Pages by status, failures and skips grouped by reason with sample URLs, and the stop reason. Null until a run's crawl phase ends; meanwhile the **live `counters`** show progress.
+    - **`webhook`** (`WebhookView`): status, attempts, `delivered_at`, and the log of the latest attempts. Only for jobs with a `webhook_url` once they finished.
+    - Another tenant's job → **404 `job_not_found`**, the same as an unknown id; a malformed id → 422. This is the target of the crawl endpoint's `Location` header (tested by following it).
+  - **`GET /api/v1/jobs`** → `Page[CrawlJobResponse]` (the summary, no report or log), newest first. Filters:
+    - `kb_id` and `source_id` (typed ids; malformed → 422);
+    - **`status` repeatable** for several statuses (`?status=running&status=queued`);
+    - cursor pagination (`limit`, `cursor`).
+  - `JobRepository.list_for_tenant` takes one status or a sequence (`$in`) and a `kb_id`. New index **`tenant_kb_jobs`** `(tenant_id, kb_id, _id desc)`; `source_jobs` already serves the source filter.
+  - `Jobs` dependency (`get_job_repository`).
+- Tests:
+  - `TestGetJob_S85` (7, integration, real app + Mongo; jobs created through `POST …/crawls`, states driven through the repository):
+    - A queued job (no duration, report or webhook; no internals).
+    - **A running job shows live counters and usage** (`cached` included) and a duration.
+    - **A failed job carries its error and report** (pages, a failure reason with a sample URL).
+    - **The webhook delivery is shown** (retrying, one attempt, 503 in the log).
+    - Unknown and foreign ids → 404 `job_not_found`, a malformed id → 422; the crawl's `Location` points here; a tenant key is required.
+  - `TestListJobs_S85` (10):
+    - **Newest first, with KB, source, single-status and multi-status filters**; other tenants' jobs excluded; the list is the summary view.
+    - Cursor pagination over 5 jobs (3 pages, the last with no cursor).
+    - 6 invalid filters → 422 (ids, status, limit bounds, cursor).
+    - A tenant sees only its jobs, even when filtering by another tenant's KB.
+    - The new index exists.
+  - `test_jobs_api.py` + `test_jobs.py` passed 3/3 consecutive runs.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ **2072 passed, 4 skipped, exit 0**, in 774 s.
+- Decisions/notes:
+  - **Step 86** (`GET /jobs/{id}/pages`): check the job with `jobs.get_for_tenant` first (404 for foreign jobs), then page through `PageRepository.list_for_job(tenant, job, …)` with status/reason filters.
+  - **Step 87** (`DELETE /jobs/{id}`): return `CrawlJobDetailResponse` after `request_cancel`.
+  - A tenant's jobs stay listed after their KB or source is deleted until the cascade removes them (Step 81).
+- Next: Step 86: Per-page report

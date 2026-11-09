@@ -127,6 +127,8 @@ class CrawlJob(MongoDocument):
     indexes = (
         IndexModel([("tenant_id", 1), ("_id", -1)], name="tenant_jobs"),
         IndexModel([("source_id", 1), ("_id", -1)], name="source_jobs"),
+        # Step 85: a knowledge base's jobs, newest first (`GET /jobs?kb_id=`)
+        IndexModel([("tenant_id", 1), ("kb_id", 1), ("_id", -1)], name="tenant_kb_jobs"),
         IndexModel([("status", 1), ("heartbeat_at", 1)], name="status_heartbeat"),
         # Step 79: at most one active job per source, enforced by the database, so two racing
         # submissions (or API replicas) can't both start crawling the same source

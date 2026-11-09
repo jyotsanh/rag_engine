@@ -8,6 +8,7 @@ from fastapi import Depends, Request
 from rag_engine.infrastructure import MongoDatabase
 from rag_engine.repositories import (
     ApiKeyRepository,
+    JobRepository,
     KnowledgeBaseRepository,
     SourceRepository,
     TenantRepository,
@@ -60,3 +61,10 @@ def get_source_repository(db: Database) -> SourceRepository:
 
 
 Sources = Annotated[SourceRepository, Depends(get_source_repository)]
+
+
+def get_job_repository(db: Database) -> JobRepository:
+    return JobRepository(db)
+
+
+Jobs = Annotated[JobRepository, Depends(get_job_repository)]

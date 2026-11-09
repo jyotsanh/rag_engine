@@ -27,7 +27,7 @@ not a count-then-insert, caps it. A finished job drops out of both indexes, free
 """
 
 import random
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any, ClassVar
 
@@ -125,15 +125,20 @@ class JobRepository(BaseRepository[CrawlJob]):
         self,
         tenant_id: str,
         *,
-        status: JobStatus | None = None,
+        status: JobStatus | Sequence[JobStatus] | None = None,
+        kb_id: str | None = None,
         source_id: str | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         cursor: str | None = None,
     ) -> Page[CrawlJob]:
-        """Newest first, optionally one source's or one status's jobs."""
+        """Newest first, optionally filtered by status(es), knowledge base and source."""
         filter_: dict[str, Any] = {}
-        if status is not None:
+        if isinstance(status, JobStatus):
             filter_["status"] = status.value
+        elif status:
+            filter_["status"] = {"$in": sorted({s.value for s in status})}
+        if kb_id is not None:
+            filter_["kb_id"] = kb_id
         if source_id is not None:
             filter_["source_id"] = source_id
         return await self.paginate(

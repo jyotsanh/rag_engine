@@ -1,4 +1,4 @@
-"""Bodies for starting a crawl (Step 84) and the crawl job representation it returns."""
+"""Bodies for starting a crawl (Step 84) and the crawl job views (Steps 84-85)."""
 
 from datetime import datetime
 
@@ -9,10 +9,14 @@ from rag_engine.domain import (
     MAX_PATTERNS,
     CrawlConfig,
     CrawlJob,
+    CrawlReport,
     EmbeddingUsage,
     JobCounters,
     JobError,
     JobStatus,
+    WebhookAttempt,
+    WebhookStatus,
+    utc_now,
 )
 from rag_engine.domain.types import HttpUrlStr, PathPattern, PathPrefix
 
@@ -83,3 +87,44 @@ class CrawlJobResponse(BaseModel):
     @classmethod
     def of(cls, job: CrawlJob) -> CrawlJobResponse:
         return cls.model_validate(job.model_dump(include=set(cls.model_fields)))
+
+
+class WebhookView(BaseModel):
+    """The completion webhook's delivery (Step 83)."""
+
+    status: WebhookStatus
+    attempts: int
+    delivered_at: datetime | None
+    log: list[WebhookAttempt] = Field(description="The latest attempts, oldest first.")
+
+
+class CrawlJobDetailResponse(CrawlJobResponse):
+    """`GET /jobs/{id}`: the summary plus the crawl report and the webhook's delivery."""
+
+    duration_seconds: float | None = Field(
+        description="Since the first start: until it finished, or until now while it runs."
+    )
+    report: CrawlReport | None = Field(
+        description="Written at the end of each crawl run: pages by status, failures and "
+        "skips grouped by reason with sample URLs, and why the crawl stopped. Null until a "
+        "run's crawl phase ends; meanwhile `counters` show live progress."
+    )
+    webhook: WebhookView | None = Field(
+        description="Only for jobs with a `webhook_url`, once they have finished."
+    )
+
+    @classmethod
+    def of(cls, job: CrawlJob) -> CrawlJobDetailResponse:
+        summary = CrawlJobResponse.of(job).model_dump()
+        duration = None
+        if job.started_at is not None:
+            duration = ((job.finished_at or utc_now()) - job.started_at).total_seconds()
+        webhook = None
+        if job.webhook is not None:
+            webhook = WebhookView(
+                status=job.webhook.status,
+                attempts=job.webhook.attempts,
+                delivered_at=job.webhook.delivered_at,
+                log=job.webhook.log,
+            )
+        return cls(**summary, duration_seconds=duration, report=job.report, webhook=webhook)
