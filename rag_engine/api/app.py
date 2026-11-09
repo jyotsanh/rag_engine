@@ -14,7 +14,8 @@ from rag_engine.api.middlewares import (
 )
 from rag_engine.api.routers import api_router
 from rag_engine.config import logger, settings, setup_logging
-from rag_engine.infrastructure import AppInfrastructure, Infrastructure
+from rag_engine.infrastructure import Infrastructure
+from rag_engine.runtime import AppRuntime
 
 
 @asynccontextmanager
@@ -32,7 +33,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
 
 def create_app(
-    infrastructure_factory: Callable[[], Infrastructure] = AppInfrastructure,
+    infrastructure_factory: Callable[[], Infrastructure] = AppRuntime,
 ) -> FastAPI:
     """Build the API. Tests pass a fake `infrastructure_factory` to run without services."""
     # uvicorn --reload serves from a child process: configure logging here too

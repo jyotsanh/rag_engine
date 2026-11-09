@@ -78,6 +78,7 @@ class TestReadinessIntegration_S12:
             "mongo": "ok",
             "redis": "ok",
             "qdrant": "ok",
+            "vector_collections": "ok",
         }
 
     async def test_not_ready_when_dependencies_fail_after_startup(

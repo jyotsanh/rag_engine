@@ -1,7 +1,12 @@
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
+from pymongo.errors import PyMongoError
+
+from rag_engine.config import EmbeddingModelName
 from rag_engine.domain import KnowledgeBase, MongoDocument, ResourceStatus, utc_now
+from rag_engine.embeddings.models import EmbeddingSpace
+from rag_engine.infrastructure.exceptions import DatabaseUnavailableError
 from rag_engine.repositories.base import BaseRepository, Filter
 from rag_engine.repositories.exceptions import (
     DocumentNotFoundError,
@@ -70,3 +75,27 @@ class KnowledgeBaseRepository(BaseRepository[KnowledgeBase]):
     async def remove(self, kb_id: str, *, scope: Filter | None = None) -> bool:
         """Hard delete (rollback of a create, or the end of the cascade in Step 81)."""
         return await self.delete(kb_id, scope=scope)
+
+    async def embedding_spaces_in_use(self) -> set[EmbeddingSpace]:
+        """Every (model, dimensions) any KB uses, deleting ones included (their vectors still
+        need the collection until the cascade removes them). For the vector store bootstrap."""
+        try:
+            cursor = await self.collection.aggregate(
+                [
+                    {
+                        "$group": {
+                            "_id": {
+                                "model": "$embedding_model",
+                                "dimensions": "$embedding_dimensions",
+                            }
+                        }
+                    }
+                ]
+            )
+            rows = [row async for row in cursor]
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError(details={"reason": type(exc).__name__}) from exc
+        return {
+            EmbeddingSpace(EmbeddingModelName(row["_id"]["model"]), int(row["_id"]["dimensions"]))
+            for row in rows
+        }

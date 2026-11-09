@@ -2190,3 +2190,31 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - `search_scope` includes both `source_ids` and `versions`. The versions alone would be exact (job ids are unique), but the source ids make a deleted source's points unservable the moment it's marked deleting, even before its active version is cleared.
   - **Step 78** (finalization): `previous = activate_version(source, job_id, stats=..., check_previous=True, expected_previous=source.active_version as read at job start)`, then enqueue cleanup of `previous`. On failure/cancel, never flip; delete the job's own version. **Step 89**: `scope = await search_scope(...)`; return `[]` when it's `None`.
 - Next: Step 74: Vector store bootstrap
+
+### Step 74: Vector store bootstrap  (2026-11-09)
+- Status: ✅ done
+- Built:
+  - **`rag_engine/runtime.py` → `AppRuntime(AppInfrastructure)`**: the API's default `infrastructure_factory` (and the worker's, Step 75).
+    1. `AppInfrastructure.start()` (Mongo + indexes, Redis, Qdrant).
+    2. **Vector store bootstrap**: `VectorStoreDispatcher.create(client=qdrant.client)`, then ensure the collection of **every embedding space in use**: all KBs' spaces, **deleting ones included** (their cascade still needs the collection), plus the **default model's native space**.
+    - Any failure (e.g. a `CollectionMismatchError` from a misconfigured existing collection) closes every connection and re-raises: the process never starts half-configured.
+    - Readiness gains **`vector_collections`**.
+  - **Layering fix (found by a circular import)**: my first version put the bootstrap in `infrastructure/lifecycle.py`. That made the lowest layer import `repositories`/`vectorstores`, and importing `rag_engine.domain` (or several others) first in a fresh process failed. `infrastructure` now stays connections-only (lifecycle reverted), and composition lives one layer up in `runtime.py`. Every package now imports standalone (checked in fresh processes).
+  - **`vectorstores/bootstrap.py` → `VectorCollections(store)`** (exported, with `BootstrapReport`):
+    - `bootstrap(spaces)` ensures each space in deterministic order (model, then dimensions) and reports `created`/`existing`.
+    - `ensure(space)` handles a space first used after startup: **cached per process and single-flight** (a per-name lock), so 10 concurrent calls make 1 store call. The Step 76 ingest calls it before upserting.
+    - `check()` is **read-only** readiness: an exact count with a probe tenant on each relied-on collection, so a deleted collection makes `/health/ready` fail (`vector_collection_not_found`) instead of being silently recreated empty.
+  - **`KnowledgeBaseRepository.embedding_spaces_in_use()`**: a distinct `(embedding_model, embedding_dimensions)` aggregation over all KBs, returning `EmbeddingSpace`s.
+- Tests:
+  - `TestVectorBootstrap_S74` (3, unit, reference store): created vs existing reported in order, all sparse; ensure is cached and single-flight (10 concurrent → 1 call); readiness fails when a collection disappears, without recreating it.
+  - `TestRuntimeBootstrap_S74` (3, integration, Mongo + Qdrant):
+    - 4 KBs (two sharing a space, one deleting) → exactly 4 collections: the 3 KB spaces plus the default 1536. Readiness OK with `vector_collections`; a restart recreates nothing.
+    - A deleted collection → not ready (`vector_collection_not_found`) while `qdrant` stays OK.
+    - A same-name, wrong-size collection → `CollectionMismatchError` at startup, with Mongo and Qdrant closed.
+  - `TestReadinessIntegration_S12` now expects `vector_collections: ok`.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1803 passed, 4 skipped (container) in 370 s.
+- Decisions/notes:
+  - Collections are only *created* at startup or ensured on first ingest. KB creation doesn't create one, so a KB that never crawls costs nothing. A search on a KB with no active version never touches Qdrant (`search_scope` → `None`, Step 73).
+  - **Phase I (Vector Store, 67–74) is complete.**
+  - **Step 75** (Celery): the worker process init builds an `AppRuntime` too, so workers get the same connections, vector store and collections.
+- Next: Step 75: Celery app

@@ -1,4 +1,5 @@
 from .base import MAX_SEARCH_LIMIT, BaseVectorStore
+from .bootstrap import BootstrapReport, VectorCollections
 from .dispatcher import VectorStoreDispatcher
 from .exceptions import (
     CollectionMismatchError,
@@ -29,6 +30,7 @@ __all__ = [
     "RRF_K",
     "SPARSE_VECTOR",
     "BaseVectorStore",
+    "BootstrapReport",
     "ChunkPayload",
     "CollectionMismatchError",
     "CollectionNotFoundError",
@@ -38,6 +40,7 @@ __all__ = [
     "QdrantVectorStore",
     "SearchHit",
     "UnsupportedVectorStoreError",
+    "VectorCollections",
     "VectorFilter",
     "VectorPoint",
     "VectorStoreDispatcher",
