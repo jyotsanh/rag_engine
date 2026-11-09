@@ -30,7 +30,13 @@ from .knowledge_base import KnowledgeBase
 from .page import MAX_DEFERRED_LINKS, DeferredLink, Page
 from .report import REPORT_SAMPLES_PER_REASON, CrawlReport, PageSample, ReasonCount
 from .source import Source, SourceStats
-from .tenant import TENANT_NAME_COLLATION, Tenant, TenantQuotas
+from .tenant import (
+    MAX_WEBHOOK_SECRETS,
+    TENANT_NAME_COLLATION,
+    Tenant,
+    TenantQuotas,
+    WebhookSecret,
+)
 from .usage import TenantUsage, tenant_usage_id, usage_period
 
 __all__ = [
@@ -40,6 +46,7 @@ __all__ = [
     "EMBEDDING_CACHE_TTL_SECONDS",
     "JOB_TRANSITIONS",
     "MAX_DEFERRED_LINKS",
+    "MAX_WEBHOOK_SECRETS",
     "REPORT_SAMPLES_PER_REASON",
     "TENANT_NAME_COLLATION",
     "TERMINAL_JOB_STATUSES",
@@ -75,6 +82,7 @@ __all__ = [
     "TenantStatus",
     "TenantUsage",
     "UsagePurpose",
+    "WebhookSecret",
     "chunk_id",
     "embedding_cache_key",
     "new_id",

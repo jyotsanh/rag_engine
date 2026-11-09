@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Self
 
 from pydantic import BaseModel, Field, model_validator
@@ -35,6 +36,17 @@ class TenantQuotas(BaseModel):
         return self
 
 
+MAX_WEBHOOK_SECRETS = 2  # the current one, plus the previous one while receivers switch
+
+
+class WebhookSecret(BaseModel):
+    """A tenant's webhook signing secret (Step 82), encrypted at rest (`SecretBox`)."""
+
+    sealed: str = Field(repr=False, min_length=1, max_length=500)
+    prefix: str = Field(max_length=32)  # non-secret head, e.g. `whsec_AbC123`
+    created_at: datetime
+
+
 class Tenant(MongoDocument):
     collection_name = "tenants"
     id_prefix = "ten"
@@ -48,6 +60,10 @@ class Tenant(MongoDocument):
         default_factory=lambda: settings.DEFAULT_EMBEDDING_MODEL
     )
     quotas: TenantQuotas = Field(default_factory=TenantQuotas)
+    # current first; webhooks are signed with every one of them (Step 82)
+    webhook_secrets: list[WebhookSecret] = Field(
+        default_factory=list, max_length=MAX_WEBHOOK_SECRETS
+    )
 
     @property
     def is_active(self) -> bool:

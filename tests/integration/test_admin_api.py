@@ -59,6 +59,8 @@ class TestAdminTenantsApi_S18:
             ("POST", f"/tenants/{tenant_id}/keys"),
             ("GET", f"/tenants/{tenant_id}/keys"),
             ("DELETE", f"/tenants/{tenant_id}/keys/key_{'0' * 32}"),
+            ("POST", f"/tenants/{tenant_id}/webhook-secret"),
+            ("DELETE", f"/tenants/{tenant_id}/webhook-secret/previous"),
         ]
 
         for method, path in calls:
@@ -287,6 +289,7 @@ class TestAdminKeysApi_S18:
         admin_ops = [
             op for path, ops in spec["paths"].items() if "/admin/" in path for op in ops.values()
         ]
-        assert len(admin_ops) == 7
+        assert len(admin_ops) == 9  # + webhook-secret rotate / retire previous (S82)
         assert all(op["security"] == [{"AdminKey": []}] for op in admin_ops)
         assert "key_hash" not in str(spec["components"]["schemas"].get("ApiKeyResponse"))
+        assert "sealed" not in str(spec["components"]["schemas"].get("TenantResponse"))

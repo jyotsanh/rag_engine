@@ -7,6 +7,8 @@ from .admin import (
     TenantPatch,
     TenantQuotasPatch,
     TenantResponse,
+    WebhookSecretCreatedResponse,
+    WebhookSecretInfo,
 )
 from .knowledge_bases import KnowledgeBaseCreate, KnowledgeBasePatch, KnowledgeBaseResponse
 from .sources import SourceResponse
@@ -24,4 +26,6 @@ __all__ = [
     "TenantPatch",
     "TenantQuotasPatch",
     "TenantResponse",
+    "WebhookSecretCreatedResponse",
+    "WebhookSecretInfo",
 ]

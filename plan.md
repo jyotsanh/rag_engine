@@ -2488,3 +2488,55 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 87** (job cancel API) is independent; the cascade calls the repository's `request_cancel` itself and doesn't need the Redis flag (the heartbeat sees the Mongo flag within `CRAWL_HEARTBEAT_SECONDS`).
   - **Step 96**: the `beat` process now drives two schedules (recovery and deletion sweep).
 - Next: Step 82: Webhook signer
+
+### Step 82: Webhook signer  (2026-11-09)
+- Status: ✅ done
+- Built:
+  - **`rag_engine/webhooks/verify.py`**, the receiver side, **stdlib only** (copy it into a receiver as is; a test enforces the import set):
+    - The header is **`X-RagEngine-Signature: t=<unix>,v1=<hex>[,v1=<hex>]`**, where each `v1` = `hex(HMAC-SHA256(secret, f"{t}." + raw body))`.
+    - `verify_webhook(body, header, secret | [secrets], tolerance_seconds=300, now=)` returns the timestamp, or raises a `WebhookVerificationError`: `MalformedSignatureError`, `TimestampOutOfToleranceError` (both directions: replay or clock skew) or `SignatureMismatchError`.
+    - Comparisons are constant time, with no early exit. Unknown schemes (`v2=…`) are ignored, so the format can evolve. Header ≤ 1024 chars and ≤ 8 signatures (DoS bounds).
+    - Uppercase hex and spaces are tolerated. The docstring is the receiver's guide (raw body, tolerance, de-duplicate by delivery id).
+  - **`rag_engine/webhooks/signer.py`**: `sign(body, secrets, timestamp=)` (one `v1` per active secret, current first), `signature_headers(body, secrets, now=)`, `generate_secret()` (`whsec_` + 256 random bits) and `display_prefix()`.
+  - **Per-tenant secrets.** A single service-wide secret would have to be given to every tenant's receiver, and then any tenant could forge webhooks that another tenant's receiver accepts.
+    - `Tenant.webhook_secrets: list[WebhookSecret]` (≤ 2, current first; `sealed`, `prefix`, `created_at`; `sealed` hidden from repr).
+    - **`rag_engine/webhooks/secrets.py` → `WebhookSecretService(tenants, box)`**:
+      - `rotate(tenant)` → `(tenant, plaintext)`, **shown once**. The old current secret becomes previous and the oldest is dropped.
+      - `drop_previous(tenant)` (idempotent) ends the overlap.
+      - **`signing_secrets(tenant)`** for Step 83: plaintexts, current first. Secrets sealed under a retired encryption key are re-sealed on the way.
+      - Updates are a **compare-and-swap** (`TenantRepository.replace_webhook_secrets`, matching the stored list, or a missing field for older tenants) with up to 3 attempts, then `WebhookSecretConflictError` (409).
+  - **Encryption at rest**: `rag_engine/security/secret_box.py` → **`SecretBox`**:
+    - AES-256-GCM (via `cryptography`, already installed), key = sha256 of `SECRET_ENCRYPTION_KEY` with a context prefix.
+    - **The tenant id is the associated data**, so a sealed value copied onto another tenant won't open.
+    - Token `sb1.<key id>.<b64url(nonce‖ct)>`, with a fresh 96-bit nonce per seal.
+    - Key rotation via `SECRET_ENCRYPTION_KEYS_PREVIOUS`, plus `needs_reseal()`. `SecretUnreadableError` (500 `secret_unreadable`).
+    - API keys stay hashed (they're only ever verified); webhook secrets must be read back to sign.
+  - **Admin API**:
+    - **`POST /admin/tenants/{id}/webhook-secret`** → 201 `{secret, prefix, created_at, active}`, with `Cache-Control: no-store`.
+    - **`DELETE /admin/tenants/{id}/webhook-secret/previous`** → the active list.
+    - `TenantResponse.webhook_secrets` lists `{prefix, created_at}` only; the `sealed` value never appears in responses or in the OpenAPI schema.
+    - `get_secret_box` dependency (one per process).
+- Settings: **`SECRET_ENCRYPTION_KEY`** (required, ≥ 32 chars) and `SECRET_ENCRYPTION_KEYS_PREVIOUS` (each ≥ 32). `.env.example` updated; `tests/conftest.py` sets a test key.
+  - ⚠️ **The local `.env` needed this new required key**, so a generated one was appended (nothing else was changed).
+- Tests:
+  - `TestWebhookSigner_S82` (32, unit):
+    - An independently computed known vector; one signature per secret; `signature_headers`; invalid signing input; generated secrets (unique, format, prefix).
+    - A fresh request verifies; either secret verifies during a rotation (and a receiver can hold several). A tampered body, wrong secret or moved timestamp fails.
+    - Tolerance at ±300/301 s, and a custom tolerance. **12 malformed headers.** Unknown schemes are ignored, case and spaces tolerated; every failure is a `WebhookVerificationError`.
+    - **The receiver helper imports only the stdlib.** Hypothesis properties: any body/secret/timestamp round-trips, and any flipped byte fails.
+  - `TestSecretBox_S82` (7, unit): round trip (plaintext not in the token), fresh nonces, bound to its record, tampered and malformed tokens, a retired key still opens and asks for a reseal (a dropped key doesn't), settings validation.
+  - `TestWebhookSecrets_S82` (8, integration, real Mongo):
+    - Issue seals the secret (no plaintext in the stored document); rotation overlaps exactly one previous secret (verification matrix); `drop_previous` (idempotent).
+    - A tenant stored before this step (no field); **3 concurrent rotations, none lost** (compare-and-swap).
+    - An encryption-key rotation re-seals on use (it then opens with the new key alone); a secret copied onto another tenant doesn't open; unknown tenant → 404.
+  - `TestWebhookSecretApi_S82` (2): issue, rotate and retire through the API (shown once with `no-store`; listings show prefixes only); admin-only, plus 404.
+  - `test_admin_api.py`: 9 admin operations in OpenAPI (was 7), and the new routes added to the "every route needs the admin key" list.
+  - These files passed 3/3 consecutive runs.
+- **`cryptography>=46` is now a declared runtime dependency** (`uv add`). It was only transitive before; `TestRuntimeDependencies_S37` caught the direct import. `test_settings.py`'s required secrets gained `SECRET_ENCRYPTION_KEY`.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ **1978 passed, 4 skipped, exit 0**, in 584 s. The first full run failed 11 tests, all from those two gaps.
+- Decisions/notes:
+  - **Step 83 (delivery)**:
+    - `body = json bytes` → `signature_headers(body, await WebhookSecretService(...).signing_secrets(tenant))`, plus `X-RagEngine-Event` and `X-RagEngine-Delivery` (a unique id for receivers to de-duplicate). Sign at every attempt, so retries carry a fresh timestamp.
+    - A tenant with no secret: Step 84 should refuse a `webhook_url` with 422 until an admin issues one. Alternatively, auto-issue on first use, but then nobody has seen the plaintext.
+  - Tenants can't fetch or rotate their own secret yet; it's admin-only, like API key issuance.
+- Next: Step 83: Webhook delivery

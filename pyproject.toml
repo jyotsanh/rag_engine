@@ -8,6 +8,7 @@ authors = [{ name = "jyotsanh", email = "hamaljyotsan@gmail.com" }]
 dependencies = [
     "celery[redis]>=5.5",
     "charset-normalizer>=3.4",
+    "cryptography>=46",
     "defusedxml>=0.7.1",
     "fastapi>=0.120",
     "fastembed>=0.7",

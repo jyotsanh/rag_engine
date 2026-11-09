@@ -11,6 +11,7 @@ from .auth import (
 )
 from .infrastructure import (
     ApiKeys,
+    Box,
     Database,
     Hasher,
     KnowledgeBases,
@@ -20,6 +21,7 @@ from .infrastructure import (
     get_api_key_repository,
     get_db,
     get_knowledge_base_repository,
+    get_secret_box,
     get_source_repository,
     get_tenant_repository,
 )
@@ -29,6 +31,7 @@ __all__ = [
     "API_RATE_LIMIT_WINDOW_SECONDS",
     "AdminAuth",
     "ApiKeys",
+    "Box",
     "CurrentTenant",
     "Database",
     "Hasher",
@@ -43,6 +46,7 @@ __all__ = [
     "get_api_key_repository",
     "get_db",
     "get_knowledge_base_repository",
+    "get_secret_box",
     "get_source_repository",
     "get_task_queue",
     "get_tenant_repository",

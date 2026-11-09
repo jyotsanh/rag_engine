@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     API_KEY_PEPPER: SecretStr = Field(min_length=32)
     # retired peppers still accepted during rotation; keys verified with one get re-hashed
     API_KEY_PEPPER_PREVIOUS: list[SecretStr] = []
+    # encrypts secrets the service must read back (tenants' webhook signing secrets, Step
+    # 82); rotate by moving the old value to SECRET_ENCRYPTION_KEYS_PREVIOUS
+    SECRET_ENCRYPTION_KEY: SecretStr = Field(min_length=32)
+    SECRET_ENCRYPTION_KEYS_PREVIOUS: list[SecretStr] = []
     # outbound fetches (crawler, robots, webhooks) may only target these ports
     SSRF_ALLOWED_PORTS: list[int] = [80, 443]
     # ONLY for tests/local fixture sites — never enable in prod
@@ -379,6 +383,8 @@ class Settings(BaseSettings):
                 "CASCADE_STALE_SECONDS must be > 2 x CASCADE_RETRY_DELAY_SECONDS "
                 "(a cascade that is waiting must not look stalled)"
             )
+        if any(len(k.get_secret_value()) < 32 for k in self.SECRET_ENCRYPTION_KEYS_PREVIOUS):
+            raise ValueError("every SECRET_ENCRYPTION_KEYS_PREVIOUS entry must be >= 32 characters")
         if any(len(p.get_secret_value()) < 32 for p in self.API_KEY_PEPPER_PREVIOUS):
             raise ValueError("every API_KEY_PEPPER_PREVIOUS entry must be >= 32 characters")
         if self.ENVIRONMENT is Environment.PROD and self.SSRF_ALLOW_PRIVATE_NETWORKS:

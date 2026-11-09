@@ -12,7 +12,7 @@ from rag_engine.repositories import (
     SourceRepository,
     TenantRepository,
 )
-from rag_engine.security import ApiKeyHasher
+from rag_engine.security import ApiKeyHasher, SecretBox
 
 
 def get_db(request: Request) -> MongoDatabase:
@@ -25,8 +25,15 @@ def get_api_key_hasher() -> ApiKeyHasher:
     return ApiKeyHasher()
 
 
+@lru_cache(maxsize=1)
+def get_secret_box() -> SecretBox:
+    """One box per process (encryption keys are read from settings once)."""
+    return SecretBox.from_settings()
+
+
 Database = Annotated[MongoDatabase, Depends(get_db)]
 Hasher = Annotated[ApiKeyHasher, Depends(get_api_key_hasher)]
+Box = Annotated[SecretBox, Depends(get_secret_box)]
 
 
 def get_tenant_repository(db: Database) -> TenantRepository:

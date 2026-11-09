@@ -20,6 +20,7 @@ from .safe_http import (
     TooManyRedirectsError,
     UnvettedHostError,
 )
+from .secret_box import SecretBox, SecretUnreadableError
 from .ssrf import (
     METADATA_ADDRESSES,
     HostResolutionError,
@@ -46,6 +47,8 @@ __all__ = [
     "RedirectLoopError",
     "SafeHttpClient",
     "SafeResponse",
+    "SecretBox",
+    "SecretUnreadableError",
     "SlidingWindowRateLimiter",
     "SsrfBlockedError",
     "SsrfGuard",

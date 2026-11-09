@@ -1,10 +1,11 @@
-"""Operator endpoints: tenants and their API keys. All require the master admin key."""
+"""Operator endpoints: tenants, their API keys and webhook signing secrets. All require the
+master admin key."""
 
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Path, Query, Response, status
 
-from rag_engine.api.deps import AdminAuth, ApiKeys, Hasher, Tenants
+from rag_engine.api.deps import AdminAuth, ApiKeys, Box, Hasher, Tenants
 from rag_engine.api.params import Cursor, Limit
 from rag_engine.api.schemas import (
     ApiKeyCreate,
@@ -13,12 +14,15 @@ from rag_engine.api.schemas import (
     TenantCreate,
     TenantPatch,
     TenantResponse,
+    WebhookSecretCreatedResponse,
+    WebhookSecretInfo,
 )
 from rag_engine.domain import TenantStatus
 from rag_engine.domain.types import ApiKeyId, TenantId
 from rag_engine.exceptions import ErrorResponse
 from rag_engine.repositories import DEFAULT_PAGE_SIZE, Page
 from rag_engine.services import TenantAdminService
+from rag_engine.webhooks import WebhookSecretService
 
 _ERRORS: dict[int | str, dict[str, Any]] = {
     code: {"model": ErrorResponse} for code in (401, 403, 404, 409)
@@ -32,6 +36,13 @@ def get_service(tenants: Tenants, keys: ApiKeys, hasher: Hasher) -> TenantAdminS
 
 
 Service = Annotated[TenantAdminService, Depends(get_service)]
+
+
+def get_webhook_secrets(tenants: Tenants, box: Box) -> WebhookSecretService:
+    return WebhookSecretService(tenants, box)
+
+
+WebhookSecrets = Annotated[WebhookSecretService, Depends(get_webhook_secrets)]
 TenantPath = Annotated[TenantId, Path(description="Tenant id, e.g. `ten_…`.")]
 KeyPath = Annotated[ApiKeyId, Path(description="API key id, e.g. `key_…`.")]
 
@@ -110,3 +121,34 @@ async def list_keys(
 @router.delete("/tenants/{tenant_id}/keys/{key_id}", summary="Revoke an API key (idempotent)")
 async def revoke_key(tenant_id: TenantPath, key_id: KeyPath, service: Service) -> ApiKeyResponse:
     return ApiKeyResponse.of(await service.revoke_key(tenant_id, key_id))
+
+
+@router.post(
+    "/tenants/{tenant_id}/webhook-secret",
+    status_code=status.HTTP_201_CREATED,
+    summary="Issue or rotate the webhook signing secret (the plaintext is returned once)",
+    description="The new secret becomes current; the previous current one keeps signing "
+    "alongside it (two `v1` signatures per webhook) until the next rotation or until it is "
+    "retired with `DELETE …/webhook-secret/previous`, so receivers can switch without "
+    "downtime.",
+)
+async def rotate_webhook_secret(
+    tenant_id: TenantPath, secrets: WebhookSecrets, response: Response
+) -> WebhookSecretCreatedResponse:
+    tenant, plaintext = await secrets.rotate(tenant_id)
+    response.headers["Cache-Control"] = "no-store"  # the body carries a secret
+    active = TenantResponse.of(tenant).webhook_secrets
+    return WebhookSecretCreatedResponse(
+        secret=plaintext, prefix=active[0].prefix, created_at=active[0].created_at,
+        active=active,
+    )  # fmt: skip
+
+
+@router.delete(
+    "/tenants/{tenant_id}/webhook-secret/previous",
+    summary="Retire the previous webhook secret (idempotent)",
+)
+async def drop_previous_webhook_secret(
+    tenant_id: TenantPath, secrets: WebhookSecrets
+) -> list[WebhookSecretInfo]:
+    return TenantResponse.of(await secrets.drop_previous(tenant_id)).webhook_secrets

@@ -1818,6 +1818,7 @@ source = { editable = "." }
 dependencies = [
     { name = "celery", extra = ["redis"] },
     { name = "charset-normalizer" },
+    { name = "cryptography" },
     { name = "defusedxml" },
     { name = "fastapi" },
     { name = "fastembed" },
@@ -1867,6 +1868,7 @@ dev = [
 requires-dist = [
     { name = "celery", extras = ["redis"], specifier = ">=5.5" },
     { name = "charset-normalizer", specifier = ">=3.4" },
+    { name = "cryptography", specifier = ">=46" },
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "fastapi", specifier = ">=0.120" },
     { name = "fastembed", specifier = ">=0.7" },

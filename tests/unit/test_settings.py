@@ -10,6 +10,7 @@ from rag_engine.config import EmbeddingProvider, Environment, Settings, VectorSt
 _REQUIRED = {
     "ADMIN_API_KEY": "a" * 32,
     "API_KEY_PEPPER": "p" * 32,
+    "SECRET_ENCRYPTION_KEY": "e" * 32,  # Step 82
     "OPENAI_API_KEY": "sk-test",
 }
 
@@ -45,7 +46,7 @@ class TestSettings_S3:
 
         assert missing in str(exc.value)
 
-    @pytest.mark.parametrize("name", ["ADMIN_API_KEY", "API_KEY_PEPPER"])
+    @pytest.mark.parametrize("name", ["ADMIN_API_KEY", "API_KEY_PEPPER", "SECRET_ENCRYPTION_KEY"])
     def test_short_security_secret_rejected(self, name: str) -> None:
         with pytest.raises(ValidationError):
             _make(**{name: "too-short"})

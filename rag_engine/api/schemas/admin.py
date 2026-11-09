@@ -60,18 +60,42 @@ class TenantPatch(_Request):
         return self
 
 
+class WebhookSecretInfo(BaseModel):
+    """A webhook signing secret, without the secret."""
+
+    prefix: str = Field(description="The secret's first characters, to tell secrets apart.")
+    created_at: datetime
+
+
 class TenantResponse(BaseModel):
     id: str
     name: str
     status: TenantStatus
     default_embedding_model: EmbeddingModelName
     quotas: TenantQuotas
+    webhook_secrets: list[WebhookSecretInfo] = Field(
+        description="Active webhook signing secrets, current first (two during a rotation)."
+    )
     created_at: datetime
     updated_at: datetime
 
     @classmethod
     def of(cls, tenant: Tenant) -> TenantResponse:
-        return cls.model_validate(tenant.model_dump())
+        values = tenant.model_dump(exclude={"webhook_secrets"})
+        secrets = [WebhookSecretInfo(prefix=s.prefix, created_at=s.created_at)
+                   for s in tenant.webhook_secrets]  # fmt: skip
+        return cls.model_validate({**values, "webhook_secrets": secrets})
+
+
+class WebhookSecretCreatedResponse(BaseModel):
+    secret: str = Field(
+        description="The new signing secret. Shown only once: store it in the receiver."
+    )
+    prefix: str
+    created_at: datetime
+    active: list[WebhookSecretInfo] = Field(
+        description="Every secret webhooks are now signed with, current first."
+    )
 
 
 class ApiKeyState(StrEnum):
