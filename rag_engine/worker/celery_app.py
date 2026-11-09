@@ -67,6 +67,11 @@ def configure(app: Celery, config: Settings = settings) -> Celery:
     return app
 
 
-celery_app = configure(Celery("rag_engine", include=["rag_engine.worker.tasks.maintenance"]))
+celery_app = configure(
+    Celery(
+        "rag_engine",
+        include=["rag_engine.worker.tasks.crawl", "rag_engine.worker.tasks.maintenance"],
+    )
+)
 
 from rag_engine.worker import signals  # noqa: E402, F401  (connects the process signals)

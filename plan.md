@@ -2286,3 +2286,39 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - Sparse embedding isn't metered (local CPU).
   - **Step 77** (`run_crawl_job`): crawl (engine) → if not cancelled, `IngestionPipeline(...)` with `embedder = CachedEmbedder(get_embedder(kb.embedding_space), EmbeddingCacheRepository(db))` when `EMBEDDING_CACHE_ENABLED`, `sparse = get_sparse_embedder()`, `store = runtime.vector_store`, `collections = runtime.collections`, `on_batch = heartbeat` → then finalize (Step 78).
 - Next: Step 77: `run_crawl_job` task
+
+### Step 77: `run_crawl_job` task  (2026-11-09)
+- Status: ✅ done
+- Built:
+  - **`rag_engine/worker/crawl_job.py` → `CrawlJobRunner(CrawlJobDeps).run(job_id) -> JobOutcome`** (succeeded / failed / cancelled / requeued / skipped / superseded). `CrawlJobDeps.from_runtime(runtime, enqueue=..., **overrides)` wires the worker's `AppRuntime`; tests inject `embedder_factory`, `sparse`, `http_factory` and `browser_pool`.
+    1. **Claim**: only a `queued` job is run (**a redelivered task is a no-op** under late acks), and `jobs.start(job, new_id("run"))` lets exactly one run claim it. Loads the KB and source: a deleting/missing one → `failed` (`knowledge_base_deleted` / `source_deleted`). It remembers the source's current `active_version` for the CAS.
+    2. **Crawl**: `CrawlEngine` wired as in production (Step 54's draft): `SafeHttpClient` → `HttpFetcher`, `RobotsCache(RedisRobotsStore)`, `DomainRateLimiter`, `AutoFetcher(before_render=render_politeness)`, `SitemapDiscoverer`, `RedisCancelFlags`. The process browser pool's `job_context` is used **only when `CRAWL_JS_RENDERING` ≠ never**.
+    3. **Ingest**: `IngestionPipeline` with `get_chunker(tokenizer_for(model))`, **`CachedEmbedder(get_embedder(kb.space), EmbeddingCacheRepository)`** (when `EMBEDDING_CACHE_ENABLED`), `get_sparse_embedder()`, `runtime.vector_store`/`collections` and `UsageMeter`. The embedder is closed afterwards.
+    4. **Finalize**: `begin_finalizing` → `sources.activate_version(..., check_previous=True, expected_previous=<as read at claim>)` with `SourceStats(pages=succeeded, chunks, last_succeeded_at)` → `claims.release_job` → `succeed`.
+  - **Heartbeat** task beside the work, every `CRAWL_HEARTBEAT_SECONDS` (30):
+    - A cancel request seen **during the crawl** → `engine.cancel()` (pages drain, Step 52); **during ingestion** → the work task is cancelled. Then `finish_cancelled` (job `cancelled`, flag cleared, claims released). Finalizing isn't cancellable.
+    - `JobRunSupersededError` → the work is cancelled and the run returns `SUPERSEDED` **without touching the job**. A heartbeat DB blip is logged and retried.
+    - An outer cancellation (`Task.cancelling()`) is re-raised, never mistaken for a job cancel.
+  - **Error capture** (`_classify`):
+    - **permanent** → `failed` with the error's code: embedding auth/request errors, a source version conflict, `_JobRejectedError`, **`SoftTimeLimitExceeded` → `time_limit`**, any other `AppBaseException`, and a bug → `internal_error` (logged with traceback; the message includes the exception);
+    - **transient** (`DatabaseUnavailableError`, `RedisUnavailableError`, `VectorStoreUnavailableError`, a retryable `EmbeddingError` past its retries) → `jobs.requeue` (a pending cancel makes that `cancelled`) and **re-enqueue with backoff `CRAWL_JOB_RETRY_DELAY_SECONDS × attempts`**, up to `CRAWL_JOB_MAX_ATTEMPTS` (3), then `failed`.
+    - On failure: the report is stored first if the crawl didn't finish (Step 53: `fail` releases the job), then `fail`, `pages.close_out_job` and the claims are released.
+  - **`rag_engine/worker/tasks/crawl.py`**: `run_crawl_job(job_id) -> outcome` (`rag_engine.worker.tasks.crawl.run_crawl_job`, routed to `crawl`, using the process browser pool) and **`enqueue_crawl_job(job_id, countdown)`** (sends by name, so producers needn't import workers). The `celery_app` include now has the crawl tasks.
+- Settings: `CRAWL_HEARTBEAT_SECONDS` (30), `CRAWL_JOB_MAX_ATTEMPTS` (3) and `CRAWL_JOB_RETRY_DELAY_SECONDS` (60). `.env.example` updated.
+- Test support: **`tests/support/fake_openai.py` → `FakeOpenAI`**, a local `POST /v1/embeddings` server (uvicorn thread, deterministic `fake_vector`s honouring `dimensions`, usage, request log, `fail_with(status)`). With `OPENAI_BASE_URL` pointed at it, **the real `OpenAIEmbedder` runs over HTTP** with no production test hooks (Step 88 can use it for the API E2E).
+- Tests:
+  - `TestRunCrawlJob_S77` (10, integration: real Mongo/Redis/Qdrant, the fixture site's `/docs/` section, `FakeOpenAI`):
+    - **Success**: succeeded with no error and the heartbeat cleared; **the source's `active_version` is the job**; stats; chunked == embedded == points in Qdrant; usage recorded via real HTTP; report stored; `search_scope` serves the version.
+    - A redelivered task is a no-op; a re-crawl flips to the new version (the old one's points await Step 78's cleanup).
+    - **Cancel during the crawl** (Mongo-only request, found by the heartbeat) and **during ingestion** → `cancelled`, with no version activated.
+    - 401 from OpenAI → `failed/embedding_auth_failed`, report kept, no requeue. **500s → requeued, requeued, failed**: enqueued with 5 s then 10 s, attempts=3, code `embedding_unavailable`.
+    - A deleted source fails before any request to the site; a superseded run stops and leaves the job queued; a bug → `internal_error`, with no page left queued or in progress.
+  - `TestRunCrawlJobTask_S77` (1): **the Celery task itself** (`run_crawl_job.apply`) end to end in-process: `worker_context` starts its own `AppRuntime`, and the job succeeds and goes live through the fake OpenAI over HTTP.
+  - `TestCrawlJobErrors_S77` (11, unit): the classification table, including `SoftTimeLimitExceeded`.
+  - The integration file passed 3/3 consecutive runs.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1848 passed, 4 skipped (container) in ~430 s.
+- Decisions/notes:
+  - A run whose own failure handling can't reach Mongo lets the exception propagate (the Celery task fails). The job stays `running` with a stale heartbeat, and **Step 80** requeues it.
+  - **Step 78** (finalization) extends this runner: delete the job's own vectors (and chunks) when it fails or is cancelled; after a successful flip, enqueue cleanup of `previous` (the version `activate_version` returns). The flip itself is done here.
+  - **Step 79** must guarantee one active job per source; today's CAS already refuses a stale flip.
+- Next: Step 78: Finalization

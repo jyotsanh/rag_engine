@@ -102,6 +102,13 @@ class Settings(BaseSettings):
     CELERY_TASK_SOFT_TIME_LIMIT_SECONDS: int = Field(default=3 * 60 * 60, gt=0)
     CELERY_TASK_TIME_LIMIT_SECONDS: int = Field(default=3 * 60 * 60 + 300, gt=0)
     CELERY_WORKER_CONCURRENCY: int = Field(default=2, gt=0)
+    # a running crawl job proves it is alive this often (and picks up cancel requests);
+    # Step 80 requeues jobs whose heartbeat is much older than this
+    CRAWL_HEARTBEAT_SECONDS: float = Field(default=30.0, gt=0)
+    # a job failing on a transient outage (database, Redis, vector store, embedding API) is
+    # requeued with backoff (delay x attempts) up to this many attempts in total, then failed
+    CRAWL_JOB_MAX_ATTEMPTS: int = Field(default=3, ge=1)
+    CRAWL_JOB_RETRY_DELAY_SECONDS: float = Field(default=60.0, ge=0)
 
     # ---- vector store ---- #
     ACTIVE_VECTOR_STORE: VectorStoreType = VectorStoreType.QDRANT
