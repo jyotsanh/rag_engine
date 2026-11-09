@@ -13,10 +13,12 @@ import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
-from rag_engine.crawling.fetchers import FetchResult
 from rag_engine.domain import ContentKind
+
+if TYPE_CHECKING:  # crawling imports extraction: a runtime import here would be circular
+    from rag_engine.crawling.fetchers import FetchResult
 
 type MetadataValue = str | int | float | bool | None
 

@@ -154,6 +154,12 @@ class Settings(BaseSettings):
     # None: fastembed's default (<tmp>/fastembed_cache)
     FASTEMBED_CACHE_DIR: str | None = None
 
+    # ---- ingestion (Step 76) ---- #
+    # chunks per embedding batch (dense + sparse); each batch is metered and upserted
+    INGEST_EMBED_BATCH_SIZE: int = Field(default=128, gt=0, le=2048)
+    # batches buffered between the chunk → embed → upsert stages (backpressure)
+    INGEST_QUEUE_SIZE: int = Field(default=4, gt=0, le=64)
+
     # ---- chunking (Steps 55-58) ---- #
     CHUNKER: ChunkerType = ChunkerType.STRUCTURE
     # the splitter aims for chunks of about CHUNK_TARGET_TOKENS of text...

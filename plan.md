@@ -2255,3 +2255,34 @@ If a step spills over, the next prompt finishes it and logs it. Later steps then
   - **Step 76/77**: `run_crawl_job` is `@celery_app.task(name="rag_engine.worker.tasks.crawl.run_crawl_job", bind=True)` → `run_async(...)`, using `worker_context.runtime` (mongo, redis, `vector_store`, `collections`) and the process browser pool. Handle `SoftTimeLimitExceeded` by failing the job cleanly.
   - **Step 80**: Celery beat for periodic recovery; a beat schedule goes on the `maintenance` queue.
 - Next: Step 76: Ingestion pipeline
+
+### Step 76: Ingestion pipeline  (2026-11-09)
+- Status: ✅ done
+- Built: the `rag_engine/ingestion/` package → **`IngestionPipeline(...).run(job, run_id) -> IngestReport`**.
+  - **Runs after the crawl, over the job's stored succeeded pages**, not streamed during the crawl. The boilerplate strip (Step 40) is a **job-level** statistic (a block is boilerplate only if most pages carry it), so no page can be stripped, hence chunked, before the crawl has seen them all. This also makes ingestion a pure function of stored state: a crashed run is just re-run (idempotent end to end).
+  - **Stage 0**: build the `BoilerplateIndex` over the job's succeeded pages in discovery order (hub pages keep the "keep one" copies).
+  - **Three stages joined by bounded `asyncio.Queue`s** (`INGEST_QUEUE_SIZE`; backpressure, and embedding overlaps upserting):
+    1. **chunk** (pages in discovery order): strip → clean again (`EmptyContentError` → the page has no chunks) → `chunker.chunk_documents` in a worker thread (CPU) → **`save_page_chunks`** (Mongo, idempotent). Chunks are grouped into embedding batches of `INGEST_EMBED_BATCH_SIZE` that **span pages**.
+    2. **embed**: dense (`Embedder`, normally `CachedEmbedder` over OpenAI) and sparse BM25 **concurrently**, both on `embed_text`; each batch is metered (`UsageMeter.record_ingest`, job + tenant).
+    3. **upsert**: `VectorPoint.from_chunk` under the job's version. **A page whose stored chunk count changed** since a previous run first has its points in this version deleted (`delete_by_filter(versions, page_ids)`), so no stale ordinal lingers (the Step 69 note). `on_batch` (the Step 77 heartbeat) runs after every upserted batch.
+  - **Counters reconciled at the end** from stored state: `chunked` = chunks of the version in Mongo, `embedded` = points of the version in the store (`reconcile_counters`), so a re-run never double counts.
+  - **Failures**: any stage error cancels the others and is **raised as itself**. `TaskGroup` wraps errors in an `ExceptionGroup`; the pipeline unwraps it and raises the first real failure with its traceback (`EmbeddingAuthError`, `JobRunSupersededError`, ...), so Step 77 can `except` them directly. The first test run caught this.
+  - Collaborators are protocols where it helps (`SparseEmbedder`, `CollectionEnsurer` = `VectorCollections.ensure`, Step 74).
+- **Pre-existing circular imports fixed** (found while importing the new package standalone):
+  - `import rag_engine.extraction` in a fresh process failed. Any `rag_engine.crawling.*` import runs `crawling/__init__`, which eagerly imported the engine, which imports `extraction`, while `extraction` imports low-level `crawling.fetchers` helpers.
+  - Fix: **the engine's names are exported lazily** from `rag_engine.crawling` (PEP 562 `__getattr__`, with `TYPE_CHECKING` imports for type checkers), and `extraction/base.py` imports `FetchResult` for typing only.
+  - **Every package now imports standalone** (checked for all 15 in fresh processes); `from rag_engine.crawling import CrawlEngine` still works.
+- Settings: `INGEST_EMBED_BATCH_SIZE` (128, ≤ 2048) and `INGEST_QUEUE_SIZE` (4, ≤ 64). `.env.example` updated.
+- Tests: `TestIngestionPipeline_S76` (10, integration: real Mongo and chunker, `FakeEmbedder` (optionally behind `CachedEmbedder`), a deterministic fake sparse embedder, the in-memory store, plus one real Qdrant run):
+  - 8 pages → chunks in Mongo == points == the `chunked`/`embedded` counters; **the cookie banner is in no chunk** (job-level strip); every point has a sparse vector; job usage (requests = batches, tokens) and the tenant ingest row are recorded.
+  - Only the job's succeeded pages are ingested (a failed page and another job's page are ignored); a page left empty by the strip has no chunks.
+  - **Re-run** with the shared embedding cache: same chunks, no duplicate points, **0 provider calls** (cached == chunks), counters not doubled.
+  - **A page that re-chunks smaller loses its stale points** (the page's points == its new chunk count).
+  - Embedding batches span pages and are ≤ the batch size, with `on_batch` once per batch; **backpressure**: with a slow store, chunked-but-not-upserted chunks stay within a small fixed window.
+  - A permanent `EmbeddingAuthError` and a superseded run each stop the pipeline (raised as themselves, within a timeout); **end to end into real Qdrant** (count and search under the version).
+  - Passed 2/2 runs.
+- Checks: ruff ✅ format ✅ ty ✅ pytest ✅ 1826 passed, 4 skipped (container) in 426 s.
+- Decisions/notes:
+  - Sparse embedding isn't metered (local CPU).
+  - **Step 77** (`run_crawl_job`): crawl (engine) → if not cancelled, `IngestionPipeline(...)` with `embedder = CachedEmbedder(get_embedder(kb.embedding_space), EmbeddingCacheRepository(db))` when `EMBEDDING_CACHE_ENABLED`, `sparse = get_sparse_embedder()`, `store = runtime.vector_store`, `collections = runtime.collections`, `on_batch = heartbeat` → then finalize (Step 78).
+- Next: Step 77: `run_crawl_job` task

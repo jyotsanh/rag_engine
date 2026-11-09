@@ -1,3 +1,15 @@
+"""Crawling: URLs, scope, robots, rate limits, fetchers, frontier, dedupe and the engine.
+
+The engine's names are exported **lazily** (PEP 562 `__getattr__`): the engine depends on
+`rag_engine.extraction`, which itself uses low-level helpers from `crawling.fetchers`.
+Importing any `rag_engine.crawling.*` module runs this `__init__`, so an eager engine
+import here made `import rag_engine.extraction` circular. `from rag_engine.crawling import
+CrawlEngine` still works (resolved on first access), and type checkers see the names
+through the `TYPE_CHECKING` import.
+"""
+
+from typing import TYPE_CHECKING, Any
+
 from .cancellation import CancelSignal, RedisCancelFlags, finish_cancelled, request_cancel
 from .dedupe import (
     ContentClaimStore,
@@ -5,16 +17,6 @@ from .dedupe import (
     DedupeDecision,
     DedupeOutcome,
     content_hash,
-)
-from .engine import (
-    CrawlEngine,
-    CrawlStop,
-    CrawlSummary,
-    PageFetcher,
-    RateLimiter,
-    RobotsSource,
-    SitemapSource,
-    render_politeness,
 )
 from .fetchers import RawFetcher
 from .frontier import (
@@ -180,3 +182,36 @@ __all__ = [
     "robots_token",
     "url_hash",
 ]
+
+_ENGINE_EXPORTS = frozenset(
+    {
+        "CrawlEngine",
+        "CrawlStop",
+        "CrawlSummary",
+        "PageFetcher",
+        "RateLimiter",
+        "RobotsSource",
+        "SitemapSource",
+        "render_politeness",
+    }
+)
+
+if TYPE_CHECKING:
+    from .engine import (
+        CrawlEngine,
+        CrawlStop,
+        CrawlSummary,
+        PageFetcher,
+        RateLimiter,
+        RobotsSource,
+        SitemapSource,
+        render_politeness,
+    )
+
+
+def __getattr__(name: str) -> Any:
+    if name in _ENGINE_EXPORTS:
+        from . import engine
+
+        return getattr(engine, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
